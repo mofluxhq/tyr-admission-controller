@@ -1,0 +1,23 @@
+{
+  "name": "admission-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "description": "Admission-first AI gateway: fail-fast token-budget admission control in front of LLM providers. Built on async-bulkhead-llm.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node --experimental-strip-types src/index.ts"
+  },
+  "dependencies": {
+    "async-bulkhead-llm": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.0"
+  }
+}
