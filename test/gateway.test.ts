@@ -138,14 +138,23 @@ afterAll(() => {
 // requests carry max_tokens explicitly so output reservations are exact;
 // input estimates are small (short messages).
 
-function startGateway(pool: {
-  maxConcurrent: number;
-  budget?: number;
-  highPriorityReserve?: number;
-}): Promise<{ server: Server; url: string }> {
+function startGateway(
+  pool: {
+    maxConcurrent: number;
+    budget?: number;
+    highPriorityReserve?: number;
+  },
+  opts: { upstreamTimeoutMs?: number; maxRequestBodyBytes?: number } = {},
+): Promise<{ server: Server; url: string }> {
   const { server } = createGateway({
     upstreamUrl: upstream.url,
     openaiUpstreamUrl: openaiUpstream.url,
+    ...(opts.upstreamTimeoutMs !== undefined
+      ? { upstreamTimeoutMs: opts.upstreamTimeoutMs }
+      : {}),
+    ...(opts.maxRequestBodyBytes !== undefined
+      ? { maxRequestBodyBytes: opts.maxRequestBodyBytes }
+      : {}),
     pools: [
       {
         name: "test-pool",
@@ -155,6 +164,7 @@ function startGateway(pool: {
       },
     ],
   });
+
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
@@ -396,9 +406,46 @@ describe("admission-gateway", () => {
     }
   });
 
+  it("returns 504 upstream_timeout when upstreamTimeoutMs elapses before upstream responds", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 4, budget: 5000 },
+      { upstreamTimeoutMs: 50 },
+    );
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("slow please")), // mock delays ~300ms
+      });
+      expect(res.status).toBe(504);
+      const body = (await res.json()) as { error: { type: string } };
+      expect(body.error.type).toBe("upstream_timeout");
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("does not time out fast requests when upstreamTimeoutMs is configured", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 4, budget: 5000 },
+      { upstreamTimeoutMs: 2000 },
+    );
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi")),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+
   it("returns 404 for /v1/chat/completions when openaiUpstreamUrl is not configured", async () => {
     const { server } = createGateway({
       upstreamUrl: upstream.url,
+
       pools: [
         {
           name: "anthropic-only",
@@ -422,5 +469,40 @@ describe("admission-gateway", () => {
       server.close();
     }
   });
-});
 
+  it("returns 413 payload_too_large when the request body exceeds maxRequestBodyBytes", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 4, budget: 5000 },
+      { maxRequestBodyBytes: 200 },
+    );
+    try {
+      // A body well over 200 bytes.
+      const longContent = "x".repeat(1000);
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg(longContent)),
+      });
+      expect(res.status).toBe(413);
+      const body = (await res.json()) as { error: { type: string; limitBytes: number } };
+      expect(body.error.type).toBe("payload_too_large");
+      expect(body.error.limitBytes).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("defaults maxRequestBodyBytes to 1 MiB and admits normal-sized requests", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi")),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+});

@@ -33,6 +33,9 @@ priority admission, and rejection detail.
     only when the client sets `stream_options: { include_usage: true }` (see
     `src/sse-openai.ts`). Without it, no mid-stream signal is available and
     the pre-admission reservation is used at release.
+- **Caps request body buffering.** Incoming request bodies are buffered up to
+  `maxRequestBodyBytes` (default 1 MiB); anything larger is rejected with
+  `413 Payload Too Large` before it consumes further memory.
 - **Rejects** with `429`/`503`/`504` plus an `x-admission-reason` header and a
   JSON `detail` capacity snapshot — no fabricated `Retry-After`.
 - **Routes** by longest model-prefix match across pools.
@@ -82,6 +85,7 @@ model-aware:
 createGateway({
   upstreamUrl: "https://api.anthropic.com",
   openaiUpstreamUrl: "https://api.openai.com",
+  maxRequestBodyBytes: 1_048_576, // optional, defaults to 1 MiB
   pools: [
     { name: "sonnet", modelPrefixes: ["claude-sonnet-4"], model: "claude-sonnet-4-5",
       maxConcurrent: 40, budget: 400_000, highPriorityReserve: 80_000 },
@@ -95,6 +99,11 @@ createGateway({
 
 `upstreamUrl` and `openaiUpstreamUrl` are both optional — omit either to
 disable its route entirely (e.g. an Anthropic-only or OpenAI-only deployment).
+
+`maxRequestBodyBytes` caps how much of an incoming request body the gateway
+will buffer into memory before responding `413 Payload Too Large`; it defaults
+to 1 MiB (1,048,576 bytes) and can be overridden via the `MAX_REQUEST_BODY_BYTES`
+env var when using the default `src/index.ts` entrypoint.
 
 ## Known limitations (v0.2)
 

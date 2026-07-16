@@ -8,9 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-16
+
 ### Added
 
 - CI workflow now auto-creates a GitHub release on version tag push.
+- `maxRequestBodyBytes` gateway option (default 1 MiB) that caps how many
+  bytes of an incoming request body are buffered before the gateway responds
+  `413 Payload Too Large`. Configurable via `MAX_REQUEST_BODY_BYTES` in the
+  default env-configured entrypoint. Previously request bodies were buffered
+  with no upper bound, allowing unbounded memory growth from oversized or
+  malicious payloads.
 
 ## [0.2.0] - 2026-07-16
 
@@ -61,6 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/janbalangue/torii-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/janbalangue/torii-gateway/releases/tag/v0.2.0
 [0.1.0]: https://github.com/janbalangue/torii-gateway/compare/72236af...96e0097

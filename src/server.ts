@@ -18,8 +18,30 @@ export type GatewayOptions = {
    * Powers `POST /v1/chat/completions`. Omit to disable that route.
    */
   openaiUpstreamUrl?: string;
+  /**
+   * Timeout in milliseconds for the upstream fetch request. Combined with
+   * the client-disconnect abort signal — whichever fires first aborts the
+   * upstream call. Omit for no timeout (client disconnect is still honored).
+   */
+  upstreamTimeoutMs?: number;
+  /**
+   * Maximum number of bytes buffered from a request body before it is
+   * rejected with `413`. Guards against unbounded memory growth from
+   * oversized or malicious payloads. Defaults to 1 MiB (1_048_576 bytes).
+   */
+  maxRequestBodyBytes?: number;
   pools: PoolConfig[];
 };
+
+/** Default cap on buffered request-body bytes: 1 MiB. */
+const DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576;
+
+class PayloadTooLargeError extends Error {
+  constructor(public readonly limitBytes: number) {
+    super(`request body exceeded ${limitBytes} bytes`);
+    this.name = "PayloadTooLargeError";
+  }
+}
 
 function rejectStatus(reason: LLMRejectReason): number {
   switch (reason) {
@@ -32,12 +54,35 @@ function rejectStatus(reason: LLMRejectReason): number {
   }
 }
 
-function readBody(req: IncomingMessage): Promise<Buffer> {
+// Reads the request body up to `maxBytes`. On overflow we stop buffering and
+// reject with PayloadTooLargeError, but we deliberately do NOT destroy the
+// socket: in HTTP/1.1 keep-alive, the request and response share the same
+// underlying TCP connection, so destroying it here would prevent the 413
+// response from ever reaching the client. Instead we drain (discard) the
+// remainder of the incoming body so the connection stays usable for writing
+// the response, and the client's request write can complete normally.
+function readBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on("data", (c: Buffer) => chunks.push(c));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
+    let total = 0;
+    let rejected = false;
+    req.on("data", (c: Buffer) => {
+      if (rejected) return; // still drains via 'data' events, just discarded
+      total += c.length;
+      if (total > maxBytes) {
+        rejected = true;
+        chunks.length = 0; // release already-buffered memory immediately
+        reject(new PayloadTooLargeError(maxBytes));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => {
+      if (!rejected) resolve(Buffer.concat(chunks));
+    });
+    req.on("error", (err) => {
+      if (!rejected) reject(err);
+    });
   });
 }
 
@@ -54,13 +99,34 @@ export function createGateway(opts: GatewayOptions) {
   const pools: Pools = createPools(opts.pools);
   const anthropicUpstream = opts.upstreamUrl?.replace(/\/$/, "");
   const openaiUpstream = opts.openaiUpstreamUrl?.replace(/\/$/, "");
+  const upstreamTimeoutMs = opts.upstreamTimeoutMs;
+  const maxRequestBodyBytes =
+    opts.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+
 
   function makeHandler(adapter: Adapter, upstream: string) {
     return async function handle(
       req: IncomingMessage,
       res: ServerResponse,
     ): Promise<void> {
-      const raw = await readBody(req);
+      let raw: Buffer;
+      try {
+        raw = await readBody(req, maxRequestBodyBytes);
+      } catch (err) {
+        if (err instanceof PayloadTooLargeError) {
+          if (!res.headersSent) {
+            res.setHeader("connection", "close");
+            sendJson(res, 413, {
+              error: {
+                type: "payload_too_large",
+                limitBytes: err.limitBytes,
+              },
+            });
+          }
+          return;
+        }
+        throw err;
+      }
       let body: Record<string, unknown>;
       try {
         body = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
@@ -89,11 +155,17 @@ export function createGateway(opts: GatewayOptions) {
       );
       const wantsStream = adapter.isStreamRequested(body);
 
-      // Abort upstream work if the client disconnects.
+      // Abort upstream work if the client disconnects, combined with a
+      // configurable upstream timeout — whichever fires first wins.
       const abort = new AbortController();
       res.on("close", () => {
         if (!res.writableEnded) abort.abort();
       });
+      const admissionSignal: AbortSignal =
+        upstreamTimeoutMs !== undefined
+          ? AbortSignal.any([abort.signal, AbortSignal.timeout(upstreamTimeoutMs)])
+          : abort.signal;
+
 
       const headers: Record<string, string> = {};
       for (const h of adapter.forwardHeaders) {
@@ -151,9 +223,10 @@ export function createGateway(opts: GatewayOptions) {
           },
           {
             priority,
-            signal: abort.signal,
+            signal: admissionSignal,
             getUsage: (r) => r.usage,
           },
+
         );
       } catch (err) {
         if (res.headersSent) {
@@ -174,12 +247,26 @@ export function createGateway(opts: GatewayOptions) {
           });
           return;
         }
+        if (
+          err instanceof Error &&
+          err.name === "TimeoutError" &&
+          upstreamTimeoutMs !== undefined
+        ) {
+          sendJson(res, 504, {
+            error: {
+              type: "upstream_timeout",
+              message: `upstream did not respond within ${upstreamTimeoutMs}ms`,
+            },
+          });
+          return;
+        }
         sendJson(res, 502, {
           error: {
             type: "upstream_error",
             message: err instanceof Error ? err.message : String(err),
           },
         });
+
       }
     };
   }

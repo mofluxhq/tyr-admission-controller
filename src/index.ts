@@ -3,6 +3,13 @@ import { createGateway } from "./server.js";
 const port = Number(process.env["PORT"] ?? 8787);
 const upstreamUrl = process.env["UPSTREAM_URL"];
 const openaiUpstreamUrl = process.env["OPENAI_UPSTREAM_URL"];
+const upstreamTimeoutMs = process.env["UPSTREAM_TIMEOUT_MS"]
+  ? Number(process.env["UPSTREAM_TIMEOUT_MS"])
+  : undefined;
+const maxRequestBodyBytes = process.env["MAX_REQUEST_BODY_BYTES"]
+  ? Number(process.env["MAX_REQUEST_BODY_BYTES"])
+  : undefined;
+
 
 if (!upstreamUrl && !openaiUpstreamUrl) {
   throw new Error(
@@ -13,7 +20,10 @@ if (!upstreamUrl && !openaiUpstreamUrl) {
 const { server } = createGateway({
   ...(upstreamUrl !== undefined ? { upstreamUrl } : {}),
   ...(openaiUpstreamUrl !== undefined ? { openaiUpstreamUrl } : {}),
+  ...(upstreamTimeoutMs !== undefined ? { upstreamTimeoutMs } : {}),
+  ...(maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes } : {}),
   pools: [
+
     {
       name: "default",
       modelPrefixes: ["claude", "gpt", "o1", "o3", "o4"],
