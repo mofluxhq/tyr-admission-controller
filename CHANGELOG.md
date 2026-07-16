@@ -8,7 +8,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-16
+
+### Changed
+
+- **Breaking:** `upstreamTimeoutMs` replaced by two distinct timeouts:
+
+  - `responseTimeoutMs` bounds how long the upstream may take to send
+    response headers (i.e. for `fetch()` to resolve). Cancelled the instant
+    headers arrive — it does not bound how long a streaming body may
+    subsequently run.
+  - `idleTimeoutMs` bounds the gap between consecutive chunks of a streaming
+    response body. It resets on every chunk received, so a healthy
+    long-running stream that keeps sending data — no matter its total
+    duration — is never killed, while a stream that stalls mid-flight is
+    aborted once the gap exceeds the limit.
+
+  Previously, a single `upstreamTimeoutMs` bounded the entire upstream call
+  end-to-end, which meant a perfectly healthy long-running stream could be
+  killed simply for taking a long time overall. The env vars
+  `RESPONSE_TIMEOUT_MS` and `IDLE_TIMEOUT_MS` replace `UPSTREAM_TIMEOUT_MS`
+  in the default `src/index.ts` entrypoint. A response-timeout expiry
+  returns `504` with `error.type: "response_timeout"`; an idle-timeout
+  expiry either returns `504` with `error.type: "idle_timeout"` (if headers
+  were not yet sent) or terminates the connection outright (if the stream
+  had already started, since a clean JSON error can no longer be sent at
+  that point).
+
+### Added
+
+- Streaming backpressure: the proxy loop now honors `res.write()`'s return
+  value and pauses pulling further chunks from the upstream body until the
+  client's write buffer drains (or the connection closes). Previously, a
+  fast upstream stream paired with a slow-reading client would let Node
+  buffer the entire response in memory with no upper bound; now the
+  gateway's own memory usage for a stream stays bounded by the client's
+  actual consumption rate.
+- Graceful shutdown: `createGateway()` now returns a `shutdown()` function
+  that stops the HTTP server from accepting new connections and calls the
+
+  new `Pools.drain()` (backed by `async-bulkhead-llm`'s `bulkhead.drain()`)
+  to let in-flight requests finish before resolving. New admissions during
+  drain are rejected with `503` and `x-admission-reason: shutdown` (already
+  supported by the existing rejection mapping). The default `src/index.ts`
+  entrypoint now listens for `SIGTERM`/`SIGINT` and invokes `shutdown()`
+  before exiting.
+
+
 ## [0.3.0] - 2026-07-16
+
 
 ### Added
 
@@ -69,7 +117,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/janbalangue/torii-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/janbalangue/torii-gateway/compare/v0.2.0...v0.3.0
+
 [0.2.0]: https://github.com/janbalangue/torii-gateway/releases/tag/v0.2.0
 [0.1.0]: https://github.com/janbalangue/torii-gateway/compare/72236af...96e0097

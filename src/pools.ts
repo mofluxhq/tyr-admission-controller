@@ -32,7 +32,14 @@ export type Pools = {
   /** Longest-prefix match across all pools; undefined if no pool matches. */
   select(model: string): Pool | undefined;
   stats(): Record<string, LLMStats>;
+  /**
+   * Drains all pool bulkheads: stops admitting new requests (rejected
+   * with reason "shutdown") and resolves once all in-flight work across
+   * every pool has completed.
+   */
+  drain(): Promise<void>;
 };
+
 
 export function createPools(configs: PoolConfig[]): Pools {
   if (configs.length === 0) throw new Error("at least one pool is required");
@@ -81,8 +88,13 @@ export function createPools(configs: PoolConfig[]): Pools {
     return out;
   }
 
-  return { select, stats };
+  async function drain(): Promise<void> {
+    await Promise.all(pools.map(({ pool }) => pool.bulkhead.drain()));
+  }
+
+  return { select, stats, drain };
 }
+
 
 export function parsePriority(header: string | undefined): LLMPriority {
   return header === "high" ? "high" : "normal";

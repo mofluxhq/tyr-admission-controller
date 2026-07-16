@@ -3,9 +3,13 @@ import { createGateway } from "./server.js";
 const port = Number(process.env["PORT"] ?? 8787);
 const upstreamUrl = process.env["UPSTREAM_URL"];
 const openaiUpstreamUrl = process.env["OPENAI_UPSTREAM_URL"];
-const upstreamTimeoutMs = process.env["UPSTREAM_TIMEOUT_MS"]
-  ? Number(process.env["UPSTREAM_TIMEOUT_MS"])
+const responseTimeoutMs = process.env["RESPONSE_TIMEOUT_MS"]
+  ? Number(process.env["RESPONSE_TIMEOUT_MS"])
   : undefined;
+const idleTimeoutMs = process.env["IDLE_TIMEOUT_MS"]
+  ? Number(process.env["IDLE_TIMEOUT_MS"])
+  : undefined;
+
 const maxRequestBodyBytes = process.env["MAX_REQUEST_BODY_BYTES"]
   ? Number(process.env["MAX_REQUEST_BODY_BYTES"])
   : undefined;
@@ -17,11 +21,14 @@ if (!upstreamUrl && !openaiUpstreamUrl) {
   );
 }
 
-const { server } = createGateway({
+const { server, shutdown } = createGateway({
+
   ...(upstreamUrl !== undefined ? { upstreamUrl } : {}),
   ...(openaiUpstreamUrl !== undefined ? { openaiUpstreamUrl } : {}),
-  ...(upstreamTimeoutMs !== undefined ? { upstreamTimeoutMs } : {}),
+  ...(responseTimeoutMs !== undefined ? { responseTimeoutMs } : {}),
+  ...(idleTimeoutMs !== undefined ? { idleTimeoutMs } : {}),
   ...(maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes } : {}),
+
   pools: [
 
     {
@@ -42,3 +49,24 @@ server.listen(port, () => {
   ].filter(Boolean);
   console.log(`torii-gateway listening on :${port} (${routes.join(", ")})`);
 });
+
+let shuttingDown = false;
+
+function handleShutdownSignal(signal: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received, draining in-flight requests...`);
+  shutdown()
+    .then(() => {
+      console.log("shutdown complete");
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error("error during shutdown", err);
+      process.exit(1);
+    });
+}
+
+process.on("SIGTERM", () => handleShutdownSignal("SIGTERM"));
+process.on("SIGINT", () => handleShutdownSignal("SIGINT"));
+

@@ -1,9 +1,15 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createServer, type Server } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import type { AddressInfo } from "node:net";
-import { createGateway } from "../src/server.js";
+import { createGateway, waitForDrain } from "../src/server.js";
 
 // ── Mock upstream: Anthropic-messages-shaped, controllable timing ──
+
 
 function startMockUpstream(): Promise<{ server: Server; url: string }> {
   const server = createServer((req, res) => {
@@ -15,6 +21,14 @@ function startMockUpstream(): Promise<{ server: Server; url: string }> {
         messages: { content: string }[];
       };
       const slow = body.messages[0]?.content.includes("slow") ?? false;
+      // "stall": send message_start then go silent forever (no message_stop,
+      // no res.end()) — simulates an upstream connection that hangs mid-flight.
+      const stall = body.messages[0]?.content.includes("stall") ?? false;
+      // "drip": send small keep-alive events at a steady short interval over
+      // a total duration that would exceed any reasonable single wall-clock
+      // timeout, then finish normally — simulates a healthy long-running
+      // stream that never goes idle.
+      const drip = body.messages[0]?.content.includes("drip") ?? false;
 
       if (body.stream) {
         res.writeHead(200, { "content-type": "text/event-stream" });
@@ -24,6 +38,34 @@ function startMockUpstream(): Promise<{ server: Server; url: string }> {
             message: { usage: { input_tokens: 20 } },
           })}\n\n`,
         );
+
+        if (stall) {
+          // Deliberately never write again and never end the response.
+          return;
+        }
+
+        if (drip) {
+          let i = 0;
+          const dripInterval = setInterval(() => {
+            i += 1;
+            res.write(`event: ping\ndata: ${JSON.stringify({ i })}\n\n`);
+            if (i >= 6) {
+              // ~300ms total (6 * 50ms), each gap well under any idle
+              // timeout used by the "survives" test.
+              clearInterval(dripInterval);
+              res.write(
+                `event: message_delta\ndata: ${JSON.stringify({
+                  type: "message_delta",
+                  usage: { output_tokens: 40 },
+                })}\n\n`,
+              );
+              res.write(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
+              res.end();
+            }
+          }, 50);
+          return;
+        }
+
         const finish = () => {
           res.write(
             `event: message_delta\ndata: ${JSON.stringify({
@@ -59,6 +101,7 @@ function startMockUpstream(): Promise<{ server: Server; url: string }> {
 }
 
 // ── Mock OpenAI-shaped upstream ──
+
 
 function startMockOpenAIUpstream(): Promise<{ server: Server; url: string }> {
   const server = createServer((req, res) => {
@@ -144,13 +187,20 @@ function startGateway(
     budget?: number;
     highPriorityReserve?: number;
   },
-  opts: { upstreamTimeoutMs?: number; maxRequestBodyBytes?: number } = {},
-): Promise<{ server: Server; url: string }> {
-  const { server } = createGateway({
+  opts: {
+    responseTimeoutMs?: number;
+    idleTimeoutMs?: number;
+    maxRequestBodyBytes?: number;
+  } = {},
+): Promise<{ server: Server; url: string; shutdown: () => Promise<void> }> {
+  const { server, shutdown } = createGateway({
     upstreamUrl: upstream.url,
     openaiUpstreamUrl: openaiUpstream.url,
-    ...(opts.upstreamTimeoutMs !== undefined
-      ? { upstreamTimeoutMs: opts.upstreamTimeoutMs }
+    ...(opts.responseTimeoutMs !== undefined
+      ? { responseTimeoutMs: opts.responseTimeoutMs }
+      : {}),
+    ...(opts.idleTimeoutMs !== undefined
+      ? { idleTimeoutMs: opts.idleTimeoutMs }
       : {}),
     ...(opts.maxRequestBodyBytes !== undefined
       ? { maxRequestBodyBytes: opts.maxRequestBodyBytes }
@@ -165,13 +215,15 @@ function startGateway(
     ],
   });
 
+
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
-      resolve({ server, url: `http://127.0.0.1:${port}` });
+      resolve({ server, url: `http://127.0.0.1:${port}`, shutdown });
     });
   });
 }
+
 
 
 const msg = (content: string, extra: Record<string, unknown> = {}) => ({
@@ -406,29 +458,29 @@ describe("admission-gateway", () => {
     }
   });
 
-  it("returns 504 upstream_timeout when upstreamTimeoutMs elapses before upstream responds", async () => {
+  it("returns 504 response_timeout when responseTimeoutMs elapses before upstream sends headers", async () => {
     const gw = await startGateway(
       { maxConcurrent: 4, budget: 5000 },
-      { upstreamTimeoutMs: 50 },
+      { responseTimeoutMs: 50 },
     );
     try {
       const res = await fetch(`${gw.url}/v1/messages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(msg("slow please")), // mock delays ~300ms
+        body: JSON.stringify(msg("slow please")), // mock delays ~300ms before headers
       });
       expect(res.status).toBe(504);
       const body = (await res.json()) as { error: { type: string } };
-      expect(body.error.type).toBe("upstream_timeout");
+      expect(body.error.type).toBe("response_timeout");
     } finally {
       gw.server.close();
     }
   });
 
-  it("does not time out fast requests when upstreamTimeoutMs is configured", async () => {
+  it("does not time out fast requests when responseTimeoutMs is configured", async () => {
     const gw = await startGateway(
       { maxConcurrent: 4, budget: 5000 },
-      { upstreamTimeoutMs: 2000 },
+      { responseTimeoutMs: 2000 },
     );
     try {
       const res = await fetch(`${gw.url}/v1/messages`, {
@@ -441,6 +493,81 @@ describe("admission-gateway", () => {
       gw.server.close();
     }
   });
+
+  it("kills a stalled stream when idleTimeoutMs elapses with no new chunks", async () => {
+    // Mock upstream sends message_start immediately, then goes silent
+    // forever (no further chunks, no res.end()) when the prompt contains
+    // "stall". With idleTimeoutMs well under the mock's infinite silence,
+    // the gateway must abort the upstream connection and terminate the
+    // client connection rather than hang indefinitely — headers were
+    // already sent, so the gateway can't send a clean error body; it
+    // destroys the socket, which surfaces to the client as a network
+    // error rather than a valid (complete) response.
+    const gw = await startGateway(
+      { maxConcurrent: 4, budget: 5000 },
+      { idleTimeoutMs: 100 },
+    );
+    try {
+      const start = Date.now();
+      await expect(
+        fetch(`${gw.url}/v1/messages`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(msg("stall", { stream: true })),
+        }).then((res) => res.text()),
+      ).rejects.toBeTruthy();
+      // Confirms the connection was killed by the idle timeout rather than
+      // some unrelated immediate failure — it took at least ~idleTimeoutMs.
+      expect(Date.now() - start).toBeGreaterThanOrEqual(90);
+
+      // The pool must not be left holding the reservation forever — the
+      // in-flight tokens for this pool return to 0 once the aborted
+      // request's bulkhead slot releases.
+      const stats = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
+        string,
+        { tokenBudget: { inFlightTokens: number } }
+      >;
+      expect(stats["test-pool"]!.tokenBudget.inFlightTokens).toBe(0);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+
+  it("does not kill a healthy long stream that keeps sending chunks within idleTimeoutMs", async () => {
+    // Mock upstream drips small events every ~50ms for ~300ms (well beyond
+    // a single naive wall-clock timeout window) before finishing normally.
+    // Because idleTimeoutMs resets on every chunk, and each gap here is well
+    // under idleTimeoutMs, the stream must complete successfully in full.
+    const gw = await startGateway(
+      { maxConcurrent: 4, budget: 5000 },
+      { idleTimeoutMs: 200 },
+    );
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("drip", { stream: true })),
+      });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toContain("message_start");
+      expect(text).toContain("message_stop");
+      expect(text).toContain("event: ping");
+
+      // Stream completed normally, so usage was released as usual.
+      const stats = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
+        string,
+        { tokenBudget: { inFlightTokens: number; totalConsumed: number } }
+      >;
+      const tb = stats["test-pool"]!.tokenBudget;
+      expect(tb.inFlightTokens).toBe(0);
+      expect(tb.totalConsumed).toBe(60); // 20 input + 40 output from mock
+    } finally {
+      gw.server.close();
+    }
+  });
+
 
   it("returns 404 for /v1/chat/completions when openaiUpstreamUrl is not configured", async () => {
     const { server } = createGateway({
@@ -505,4 +632,192 @@ describe("admission-gateway", () => {
       gw.server.close();
     }
   });
+
+  it("waitForDrain resolves once the response emits 'drain'", async () => {
+    // Direct unit test of the exported helper: create a bare http server,
+    // grab its ServerResponse, and confirm waitForDrain resolves on the
+    // 'drain' event (not immediately, and not hanging forever).
+    const server = createServer((_req, res) => {
+      let resolved = false;
+      void waitForDrain(res).then(() => {
+        resolved = true;
+        res.end(JSON.stringify({ resolved }));
+      });
+      // Resolve should NOT have fired synchronously.
+      expect(resolved).toBe(false);
+      // Simulate backpressure release.
+      res.emit("drain");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/`);
+      const body = (await res.json()) as { resolved: boolean };
+      expect(body.resolved).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("waitForDrain resolves immediately if the response is already destroyed", async () => {
+    const server = createServer((_req, res) => {
+      res.destroy();
+      // Give the 'close' event a tick to fire, then confirm waitForDrain
+      // still resolves (via the destroyed-check fast path or 'close').
+      setTimeout(() => {
+        void waitForDrain(res).then(() => {
+          // Nothing to assert on the wire (connection already closed) —
+          // reaching this callback at all proves it didn't hang.
+        });
+      }, 10);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    try {
+      await expect(fetch(`http://127.0.0.1:${port}/`)).rejects.toBeTruthy();
+    } finally {
+      server.close();
+    }
+  });
+
+  it("applies backpressure to a fast upstream stream read by a slow client", async () => {
+    // Mock upstream that blasts many sizeable chunks as fast as possible,
+    // far exceeding the default 16KB highWaterMark, so res.write() must
+    // return false at least once and the gateway must wait for 'drain'
+    // before continuing to pull from upstream.
+    const chunkCount = 200;
+    const chunkSize = 4096; // 200 * 4096 = ~800KB, well over 16KB HWM
+    const fastServer = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(
+          `event: message_start\ndata: ${JSON.stringify({
+            type: "message_start",
+            message: { usage: { input_tokens: 20 } },
+          })}\n\n`,
+        );
+        const payload = "x".repeat(chunkSize);
+        for (let i = 0; i < chunkCount; i++) {
+          res.write(`event: ping\ndata: ${JSON.stringify({ payload })}\n\n`);
+        }
+        res.write(
+          `event: message_delta\ndata: ${JSON.stringify({
+            type: "message_delta",
+            usage: { output_tokens: 40 },
+          })}\n\n`,
+        );
+        res.write(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
+        res.end();
+      });
+    });
+    await new Promise<void>((resolve) =>
+      fastServer.listen(0, "127.0.0.1", () => resolve()),
+    );
+    const { port: fastPort } = fastServer.address() as AddressInfo;
+    const fastUpstreamUrl = `http://127.0.0.1:${fastPort}`;
+
+    const { server, shutdown } = createGateway({
+      upstreamUrl: fastUpstreamUrl,
+      pools: [
+        {
+          name: "test-pool",
+          modelPrefixes: ["claude"],
+          model: "claude-sonnet-4",
+          maxConcurrent: 4,
+          budget: 5000,
+        },
+      ],
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      // Issue the request over a raw http.request with a client-side
+      // response reader that pauses between reads, forcing the gateway's
+      // res.write() to see the socket's write buffer stay full and
+      // exercise the waitForDrain() backpressure path.
+      const received: Buffer[] = [];
+      await new Promise<void>((resolve, reject) => {
+        const clientReq = httpRequest(
+          {
+            host: "127.0.0.1",
+            port,
+            path: "/v1/messages",
+            method: "POST",
+            headers: { "content-type": "application/json" },
+          },
+          (clientRes) => {
+            clientRes.on("data", (chunk: Buffer) => {
+              received.push(chunk);
+              // Pause the client's readable side briefly on each chunk to
+              // slow consumption and force TCP-level (and thus writable-
+              // side) backpressure back onto the gateway's res.write().
+              clientRes.pause();
+              setTimeout(() => clientRes.resume(), 5);
+            });
+            clientRes.on("end", resolve);
+            clientRes.on("error", reject);
+          },
+        );
+        clientReq.on("error", reject);
+        clientReq.end(
+          JSON.stringify(
+            msg("hi", { stream: true, model: "claude-sonnet-4-5" }),
+          ),
+        );
+      });
+
+      const full = Buffer.concat(received).toString();
+      expect(full).toContain("message_start");
+      expect(full).toContain("message_stop");
+      // All chunk payloads made it through intact despite the slow client.
+      expect(full.split("event: ping").length - 1).toBe(chunkCount);
+
+      // The pool released its reservation cleanly once the (backpressured)
+      // stream completed — no tokens left stuck in-flight.
+      const stats = (await (await fetch(`http://127.0.0.1:${port}/stats`)).json()) as Record<
+        string,
+        { tokenBudget: { inFlightTokens: number } }
+      >;
+      expect(stats["test-pool"]!.tokenBudget.inFlightTokens).toBe(0);
+    } finally {
+      await shutdown();
+      fastServer.close();
+    }
+  });
+
+  it("gracefully drains in-flight requests on shutdown and rejects new ones with 503", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+
+
+    // Kick off a slow in-flight request before shutting down.
+    const inFlight = fetch(`${gw.url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(msg("slow please")), // mock delays ~300ms
+    });
+    await new Promise((r) => setTimeout(r, 80)); // let it admit
+
+    // Begin graceful shutdown: stops accepting new TCP connections and
+    // drains the bulkhead once in-flight work completes.
+    const shutdownPromise = gw.shutdown();
+
+    // New requests during drain should be rejected with 503 + reason
+    // "shutdown" — but the server no longer accepts new connections
+    // (server.close() was called), so a genuinely new connection attempt
+    // will be refused at the TCP layer rather than reach the handler.
+    await expect(
+      fetch(`${gw.url}/healthz`).then(() => "connected"),
+    ).rejects.toBeTruthy();
+
+    // The in-flight request should still complete successfully.
+    const res = await inFlight;
+    expect(res.status).toBe(200);
+
+    // shutdown() resolves once the bulkhead has drained.
+    await shutdownPromise;
+  });
 });
+

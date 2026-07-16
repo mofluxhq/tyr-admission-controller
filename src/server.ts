@@ -19,11 +19,27 @@ export type GatewayOptions = {
    */
   openaiUpstreamUrl?: string;
   /**
-   * Timeout in milliseconds for the upstream fetch request. Combined with
-   * the client-disconnect abort signal — whichever fires first aborts the
-   * upstream call. Omit for no timeout (client disconnect is still honored).
+   * Timeout in milliseconds for the upstream to send response headers
+   * (i.e. for the `fetch()` call to resolve). Covers "upstream never
+   * responds at all" — a stalled connection attempt or a hung server that
+   * never sends a status line. Cancelled the moment headers arrive; it has
+   * no effect on how long a streaming body may subsequently take (see
+   * `idleTimeoutMs` for that). Combined with the client-disconnect abort
+   * signal — whichever fires first aborts the upstream call. Omit for no
+   * response timeout (client disconnect is still honored).
    */
-  upstreamTimeoutMs?: number;
+  responseTimeoutMs?: number;
+  /**
+   * Timeout in milliseconds for the gap between consecutive chunks of a
+   * streaming upstream response body. Guards against a stream that starts
+   * fine but then stalls mid-flight (e.g. a hung upstream connection that
+   * never sends more data and never closes). The timer resets on every
+   * chunk received, so a healthy long-running stream that keeps sending
+   * data — no matter how long the overall stream lasts — is never killed
+   * by this timeout. Only applies to streaming responses. Omit for no
+   * idle timeout.
+   */
+  idleTimeoutMs?: number;
   /**
    * Maximum number of bytes buffered from a request body before it is
    * rejected with `413`. Guards against unbounded memory growth from
@@ -32,6 +48,7 @@ export type GatewayOptions = {
   maxRequestBodyBytes?: number;
   pools: PoolConfig[];
 };
+
 
 /** Default cap on buffered request-body bytes: 1 MiB. */
 const DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576;
@@ -95,13 +112,40 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+// Resolves once the response's write buffer has drained below its
+// highWaterMark, or once the response closes — whichever comes first.
+// Resolving on 'close' prevents hanging forever if the client disconnects
+// while we're waiting for backpressure to release; the caller's abort
+// signal (wired to res "close") then terminates upstream reading on the
+// next loop iteration.
+// Exported for direct unit testing; not part of the GatewayOptions API.
+export function waitForDrain(res: ServerResponse): Promise<void> {
+  if (res.destroyed) return Promise.resolve();
+
+  return new Promise<void>((resolve) => {
+    const onDrain = () => {
+      res.removeListener("close", onClose);
+      resolve();
+    };
+    const onClose = () => {
+      res.removeListener("drain", onDrain);
+      resolve();
+    };
+    res.once("drain", onDrain);
+    res.once("close", onClose);
+  });
+}
+
+
 export function createGateway(opts: GatewayOptions) {
   const pools: Pools = createPools(opts.pools);
   const anthropicUpstream = opts.upstreamUrl?.replace(/\/$/, "");
   const openaiUpstream = opts.openaiUpstreamUrl?.replace(/\/$/, "");
-  const upstreamTimeoutMs = opts.upstreamTimeoutMs;
+  const responseTimeoutMs = opts.responseTimeoutMs;
+  const idleTimeoutMs = opts.idleTimeoutMs;
   const maxRequestBodyBytes =
     opts.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+
 
 
   function makeHandler(adapter: Adapter, upstream: string) {
@@ -155,17 +199,19 @@ export function createGateway(opts: GatewayOptions) {
       );
       const wantsStream = adapter.isStreamRequested(body);
 
-      // Abort upstream work if the client disconnects, combined with a
-      // configurable upstream timeout — whichever fires first wins.
+      // Abort upstream work if the client disconnects. Response-timeout and
+      // idle-timeout are layered on top of the same controller below, so
+      // whichever fires first — client disconnect, response timeout, or
+      // stream stall — aborts the in-flight upstream call.
       const abort = new AbortController();
       res.on("close", () => {
         if (!res.writableEnded) abort.abort();
       });
-      const admissionSignal: AbortSignal =
-        upstreamTimeoutMs !== undefined
-          ? AbortSignal.any([abort.signal, AbortSignal.timeout(upstreamTimeoutMs)])
-          : abort.signal;
+      const admissionSignal: AbortSignal = abort.signal;
 
+      // Tracks which timeout (if any) triggered the abort, so the catch
+      // block can report the right error type.
+      let timeoutKind: "response" | "idle" | undefined;
 
       const headers: Record<string, string> = {};
       for (const h of adapter.forwardHeaders) {
@@ -177,12 +223,29 @@ export function createGateway(opts: GatewayOptions) {
         await pool.bulkhead.run(
           llmRequest,
           async (signal, ctx) => {
-            const upstreamRes = await fetch(`${upstream}${adapter.path}`, {
-              method: "POST",
-              headers,
-              body: raw,
-              ...(signal !== undefined ? { signal } : {}),
-            });
+            // Response timeout: bounds how long we wait for the upstream to
+            // send response headers (i.e. for fetch() to resolve). Cleared
+            // the instant headers arrive — it has no bearing on how long a
+            // streaming body may subsequently run.
+            let responseTimer: ReturnType<typeof setTimeout> | undefined;
+            if (responseTimeoutMs !== undefined) {
+              responseTimer = setTimeout(() => {
+                timeoutKind = "response";
+                abort.abort();
+              }, responseTimeoutMs);
+            }
+
+            let upstreamRes: Response;
+            try {
+              upstreamRes = await fetch(`${upstream}${adapter.path}`, {
+                method: "POST",
+                headers,
+                body: raw,
+                ...(signal !== undefined ? { signal } : {}),
+              });
+            } finally {
+              if (responseTimer !== undefined) clearTimeout(responseTimer);
+            }
 
             if (wantsStream && upstreamRes.body) {
               res.writeHead(upstreamRes.status, {
@@ -196,10 +259,38 @@ export function createGateway(opts: GatewayOptions) {
                 ctx?.reportUsage(usage);
               });
               const decoder = new TextDecoder();
-              for await (const chunk of upstreamRes.body) {
-                extractor.push(decoder.decode(chunk, { stream: true }));
-                res.write(chunk);
+
+              // Idle timeout: bounds the gap between consecutive chunks.
+              // Resets on every chunk, so a stream that keeps sending data
+              // — regardless of total duration — is never killed by this.
+              let idleTimer: ReturnType<typeof setTimeout> | undefined;
+              const armIdleTimer = () => {
+                if (idleTimeoutMs === undefined) return;
+                if (idleTimer !== undefined) clearTimeout(idleTimer);
+                idleTimer = setTimeout(() => {
+                  timeoutKind = "idle";
+                  abort.abort();
+                }, idleTimeoutMs);
+              };
+
+              try {
+                armIdleTimer();
+                for await (const chunk of upstreamRes.body) {
+                  armIdleTimer();
+                  extractor.push(decoder.decode(chunk, { stream: true }));
+                  // Backpressure: if the client's write buffer is full,
+                  // pause pulling further chunks from upstream until it
+                  // drains (or the response closes). Without this, a slow
+                  // client reading a fast upstream stream would let Node
+                  // buffer the entire response in memory unbounded.
+                  if (!res.write(chunk)) {
+                    await waitForDrain(res);
+                  }
+                }
+              } finally {
+                if (idleTimer !== undefined) clearTimeout(idleTimer);
               }
+
               res.end();
               // release() falls back to the last reported usage for refund.
               return { usage: extractor.current() };
@@ -249,16 +340,26 @@ export function createGateway(opts: GatewayOptions) {
         }
         if (
           err instanceof Error &&
-          err.name === "TimeoutError" &&
-          upstreamTimeoutMs !== undefined
+          (err.name === "AbortError" || err.name === "TimeoutError")
         ) {
-          sendJson(res, 504, {
-            error: {
-              type: "upstream_timeout",
-              message: `upstream did not respond within ${upstreamTimeoutMs}ms`,
-            },
-          });
-          return;
+          if (timeoutKind === "response") {
+            sendJson(res, 504, {
+              error: {
+                type: "response_timeout",
+                message: `upstream did not respond within ${responseTimeoutMs}ms`,
+              },
+            });
+            return;
+          }
+          if (timeoutKind === "idle") {
+            sendJson(res, 504, {
+              error: {
+                type: "idle_timeout",
+                message: `upstream stream stalled for ${idleTimeoutMs}ms`,
+              },
+            });
+            return;
+          }
         }
         sendJson(res, 502, {
           error: {
@@ -270,6 +371,7 @@ export function createGateway(opts: GatewayOptions) {
       }
     };
   }
+
 
   const handleAnthropic = anthropicUpstream
     ? makeHandler(anthropicAdapter, anthropicUpstream)
@@ -312,5 +414,30 @@ export function createGateway(opts: GatewayOptions) {
     sendJson(res, 404, { error: { type: "not_found" } });
   });
 
-  return { server, pools };
+  let shuttingDown: Promise<void> | undefined;
+
+  /**
+   * Gracefully shuts down the gateway: stops accepting new TCP
+   * connections, then drains every pool's bulkhead (new requests are
+   * rejected with reason "shutdown" while in-flight requests are
+   * allowed to complete). Safe to call multiple times — subsequent
+   * calls resolve when the first shutdown finishes.
+   */
+  function shutdown(): Promise<void> {
+    if (shuttingDown) return shuttingDown;
+    shuttingDown = new Promise<void>((resolve, reject) => {
+      server.close((err?: Error) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        pools.drain().then(resolve, reject);
+      });
+    });
+
+    return shuttingDown;
+  }
+
+  return { server, pools, shutdown };
 }
+

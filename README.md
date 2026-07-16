@@ -36,9 +36,20 @@ priority admission, and rejection detail.
 - **Caps request body buffering.** Incoming request bodies are buffered up to
   `maxRequestBodyBytes` (default 1 MiB); anything larger is rejected with
   `413 Payload Too Large` before it consumes further memory.
+- **Applies streaming backpressure.** When proxying a streaming response, the
+  gateway honors `res.write()`'s return value and pauses pulling further
+  chunks from the upstream body whenever the client's write buffer is full,
+  resuming once it drains. A fast upstream paired with a slow-reading client
+  can no longer force the gateway to buffer an entire response in memory.
 - **Rejects** with `429`/`503`/`504` plus an `x-admission-reason` header and a
+
   JSON `detail` capacity snapshot — no fabricated `Retry-After`.
 - **Routes** by longest model-prefix match across pools.
+- **Shuts down gracefully.** `SIGTERM`/`SIGINT` stop the server from accepting
+  new connections and drain every pool's bulkhead — in-flight requests finish
+  normally while new admissions are rejected with `503` (`x-admission-reason:
+  shutdown`) until drain completes.
+
 
 ## Endpoints
 
@@ -85,8 +96,11 @@ model-aware:
 createGateway({
   upstreamUrl: "https://api.anthropic.com",
   openaiUpstreamUrl: "https://api.openai.com",
+  responseTimeoutMs: 30_000, // optional — upstream must send headers within 30s
+  idleTimeoutMs: 30_000,     // optional — stream must not stall for 30s between chunks
   maxRequestBodyBytes: 1_048_576, // optional, defaults to 1 MiB
   pools: [
+
     { name: "sonnet", modelPrefixes: ["claude-sonnet-4"], model: "claude-sonnet-4-5",
       maxConcurrent: 40, budget: 400_000, highPriorityReserve: 80_000 },
     { name: "haiku",  modelPrefixes: ["claude-haiku-4"],  model: "claude-haiku-4-5",
