@@ -1,4 +1,4 @@
-# admission-gateway (private)
+# torii-gateway (private)
 
 An **admission-first** AI gateway. Unlike gateways that do windowed rate
 limiting and after-the-fact spend tracking, this one enforces a true in-flight
