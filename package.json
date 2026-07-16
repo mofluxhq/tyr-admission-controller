@@ -1,6 +1,6 @@
 {
-  "name": "admission-gateway",
-  "version": "0.1.0",
+  "name": "torii-gateway",
+  "version": "0.2.0",
   "private": true,
   "license": "UNLICENSED",
   "description": "Admission-first AI gateway: fail-fast token-budget admission control in front of LLM providers. Built on async-bulkhead-llm.",

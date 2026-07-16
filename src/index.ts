@@ -1,15 +1,22 @@
 import { createGateway } from "./server.js";
 
 const port = Number(process.env["PORT"] ?? 8787);
-const upstreamUrl =
-  process.env["UPSTREAM_URL"] ?? "https://api.anthropic.com";
+const upstreamUrl = process.env["UPSTREAM_URL"];
+const openaiUpstreamUrl = process.env["OPENAI_UPSTREAM_URL"];
+
+if (!upstreamUrl && !openaiUpstreamUrl) {
+  throw new Error(
+    "at least one of UPSTREAM_URL or OPENAI_UPSTREAM_URL must be set",
+  );
+}
 
 const { server } = createGateway({
-  upstreamUrl,
+  ...(upstreamUrl !== undefined ? { upstreamUrl } : {}),
+  ...(openaiUpstreamUrl !== undefined ? { openaiUpstreamUrl } : {}),
   pools: [
     {
       name: "default",
-      modelPrefixes: ["claude"],
+      modelPrefixes: ["claude", "gpt", "o1", "o3", "o4"],
       model: "claude-sonnet-4",
       maxConcurrent: Number(process.env["MAX_CONCURRENT"] ?? 50),
       budget: Number(process.env["TOKEN_BUDGET"] ?? 500_000),
@@ -19,5 +26,9 @@ const { server } = createGateway({
 });
 
 server.listen(port, () => {
-  console.log(`admission-gateway listening on :${port} → ${upstreamUrl}`);
+  const routes = [
+    upstreamUrl ? `/v1/messages -> ${upstreamUrl}` : undefined,
+    openaiUpstreamUrl ? `/v1/chat/completions -> ${openaiUpstreamUrl}` : undefined,
+  ].filter(Boolean);
+  console.log(`torii-gateway listening on :${port} (${routes.join(", ")})`);
 });

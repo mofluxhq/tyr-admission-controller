@@ -58,15 +58,80 @@ function startMockUpstream(): Promise<{ server: Server; url: string }> {
   });
 }
 
+// ── Mock OpenAI-shaped upstream ──
+
+function startMockOpenAIUpstream(): Promise<{ server: Server; url: string }> {
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString()) as {
+        stream?: boolean;
+        messages: { content: string }[];
+      };
+      const slow = body.messages[0]?.content.includes("slow") ?? false;
+
+      if (body.stream) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(
+          `data: ${JSON.stringify({
+            id: "chatcmpl_mock",
+            object: "chat.completion.chunk",
+            choices: [{ delta: { content: "hello" }, index: 0, finish_reason: null }],
+            usage: null,
+          })}\n\n`,
+        );
+        const finish = () => {
+          res.write(
+            `data: ${JSON.stringify({
+              id: "chatcmpl_mock",
+              object: "chat.completion.chunk",
+              choices: [{ delta: {}, index: 0, finish_reason: "stop" }],
+              usage: { prompt_tokens: 20, completion_tokens: 40 },
+            })}\n\n`,
+          );
+          res.write(`data: [DONE]\n\n`);
+          res.end();
+        };
+        setTimeout(finish, slow ? 500 : 5);
+      } else {
+        const wait = slow ? 300 : 0;
+        setTimeout(() => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(
+            JSON.stringify({
+              id: "chatcmpl_mock",
+              object: "chat.completion",
+              choices: [
+                { index: 0, message: { role: "assistant", content: "hello" }, finish_reason: "stop" },
+              ],
+              usage: { prompt_tokens: 20, completion_tokens: 30 },
+            }),
+          );
+        }, wait);
+      }
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({ server, url: `http://127.0.0.1:${port}` });
+    });
+  });
+}
+
 // ── Fixtures ──
 
 let upstream: { server: Server; url: string };
+let openaiUpstream: { server: Server; url: string };
 
 beforeAll(async () => {
   upstream = await startMockUpstream();
+  openaiUpstream = await startMockOpenAIUpstream();
 });
 afterAll(() => {
   upstream.server.close();
+  openaiUpstream.server.close();
 });
 
 // Estimator note: pools use the built-in model-aware estimator. All test
@@ -80,10 +145,11 @@ function startGateway(pool: {
 }): Promise<{ server: Server; url: string }> {
   const { server } = createGateway({
     upstreamUrl: upstream.url,
+    openaiUpstreamUrl: openaiUpstream.url,
     pools: [
       {
         name: "test-pool",
-        modelPrefixes: ["claude"],
+        modelPrefixes: ["claude", "gpt"],
         model: "claude-sonnet-4",
         ...pool,
       },
@@ -96,6 +162,7 @@ function startGateway(pool: {
     });
   });
 }
+
 
 const msg = (content: string, extra: Record<string, unknown> = {}) => ({
   model: "claude-sonnet-4-5",
@@ -270,7 +337,7 @@ describe("admission-gateway", () => {
       const res = await fetch(`${gw.url}/v1/messages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...msg("hi"), model: "gpt-4o" }),
+        body: JSON.stringify({ ...msg("hi"), model: "unknown-model-x" }),
       });
       expect(res.status).toBe(404);
       const health = await fetch(`${gw.url}/healthz`);
@@ -279,4 +346,81 @@ describe("admission-gateway", () => {
       gw.server.close();
     }
   });
+
+  it("proxies OpenAI-shaped non-streaming requests and applies usage refunds", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    try {
+      const res = await fetch(`${gw.url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi", { model: "gpt-4o" })),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { id: string };
+      expect(body.id).toBe("chatcmpl_mock");
+
+      const stats = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
+        string,
+        { tokenBudget: { totalConsumed: number; totalRefunded: number; inFlightTokens: number } }
+      >;
+      const tb = stats["test-pool"]!.tokenBudget;
+      expect(tb.totalConsumed).toBe(50); // 20 prompt + 30 completion from mock
+      expect(tb.totalRefunded).toBeGreaterThan(0);
+      expect(tb.inFlightTokens).toBe(0);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("streams OpenAI SSE through and reports final cumulative usage", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    try {
+      const res = await fetch(`${gw.url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi", { model: "gpt-4o", stream: true })),
+      });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toContain("chat.completion.chunk");
+      expect(text).toContain("[DONE]");
+
+      const done = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
+        string,
+        { tokenBudget: { inFlightTokens: number; totalConsumed: number } }
+      >;
+      expect(done["test-pool"]!.tokenBudget.inFlightTokens).toBe(0);
+      expect(done["test-pool"]!.tokenBudget.totalConsumed).toBe(60); // 20+40
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("returns 404 for /v1/chat/completions when openaiUpstreamUrl is not configured", async () => {
+    const { server } = createGateway({
+      upstreamUrl: upstream.url,
+      pools: [
+        {
+          name: "anthropic-only",
+          modelPrefixes: ["claude"],
+          model: "claude-sonnet-4",
+          maxConcurrent: 1,
+        },
+      ],
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    const url = `http://127.0.0.1:${port}`;
+    try {
+      const res = await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi", { model: "gpt-4o" })),
+      });
+      expect(res.status).toBe(404);
+    } finally {
+      server.close();
+    }
+  });
 });
+

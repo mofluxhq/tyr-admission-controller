@@ -3,26 +3,23 @@ import {
   LLMBulkheadRejectedError,
   type LLMRejectReason,
   type LLMRequest,
-  type TokenUsage,
 } from "async-bulkhead-llm";
 import { createPools, parsePriority, type PoolConfig, type Pools } from "./pools.js";
-import { createSSEUsageExtractor } from "./sse.js";
+import { anthropicAdapter, openaiAdapter, type Adapter } from "./adapters.js";
 
 export type GatewayOptions = {
-  /** Upstream provider base URL, e.g. "https://api.anthropic.com". */
-  upstreamUrl: string;
+  /**
+   * Anthropic-shaped upstream base URL, e.g. "https://api.anthropic.com".
+   * Powers `POST /v1/messages`. Omit to disable that route.
+   */
+  upstreamUrl?: string;
+  /**
+   * OpenAI-shaped upstream base URL, e.g. "https://api.openai.com".
+   * Powers `POST /v1/chat/completions`. Omit to disable that route.
+   */
+  openaiUpstreamUrl?: string;
   pools: PoolConfig[];
 };
-
-/** Headers forwarded verbatim to the upstream (auth passthrough — the
- * gateway holds no provider keys in v0). */
-const FORWARD_HEADERS = [
-  "content-type",
-  "x-api-key",
-  "authorization",
-  "anthropic-version",
-  "anthropic-beta",
-] as const;
 
 function rejectStatus(reason: LLMRejectReason): number {
   switch (reason) {
@@ -55,156 +52,164 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 export function createGateway(opts: GatewayOptions) {
   const pools: Pools = createPools(opts.pools);
-  const upstream = opts.upstreamUrl.replace(/\/$/, "");
+  const anthropicUpstream = opts.upstreamUrl?.replace(/\/$/, "");
+  const openaiUpstream = opts.openaiUpstreamUrl?.replace(/\/$/, "");
 
-  async function handleMessages(
-    req: IncomingMessage,
-    res: ServerResponse,
-  ): Promise<void> {
-    const raw = await readBody(req);
-    let body: Record<string, unknown>;
-    try {
-      body = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
-    } catch {
-      sendJson(res, 400, { error: { type: "invalid_json" } });
-      return;
-    }
-
-    const model = typeof body["model"] === "string" ? body["model"] : "";
-    const pool = pools.select(model);
-    if (!pool) {
-      sendJson(res, 404, {
-        error: { type: "no_pool_for_model", model },
-      });
-      return;
-    }
-
-    // Minimal admission view of the request. Malformed messages fall back
-    // to an empty list (estimator sees 0 input chars; max_tokens/outputCap
-    // still reserves output).
-    const llmRequest: LLMRequest = {
-      model,
-      messages: Array.isArray(body["messages"])
-        ? (body["messages"] as LLMRequest["messages"])
-        : [],
-      ...(typeof body["max_tokens"] === "number"
-        ? { max_tokens: body["max_tokens"] }
-        : {}),
-    };
-    const priority = parsePriority(
-      typeof req.headers["x-priority"] === "string"
-        ? req.headers["x-priority"]
-        : undefined,
-    );
-    const wantsStream = body["stream"] === true;
-
-    // Abort upstream work if the client disconnects.
-    const abort = new AbortController();
-    res.on("close", () => {
-      if (!res.writableEnded) abort.abort();
-    });
-
-    const headers: Record<string, string> = {};
-    for (const h of FORWARD_HEADERS) {
-      const v = req.headers[h];
-      if (typeof v === "string") headers[h] = v;
-    }
-
-    try {
-      await pool.bulkhead.run(
-        llmRequest,
-        async (signal, ctx) => {
-          const upstreamRes = await fetch(`${upstream}/v1/messages`, {
-            method: "POST",
-            headers,
-            body: raw,
-            ...(signal !== undefined ? { signal } : {}),
-          });
-
-          if (wantsStream && upstreamRes.body) {
-            res.writeHead(upstreamRes.status, {
-              "content-type":
-                upstreamRes.headers.get("content-type") ?? "text/event-stream",
-              "cache-control": "no-cache",
-              connection: "keep-alive",
-            });
-            const extractor = createSSEUsageExtractor((usage) => {
-              ctx?.reportUsage(usage);
-            });
-            const decoder = new TextDecoder();
-            for await (const chunk of upstreamRes.body) {
-              extractor.push(decoder.decode(chunk, { stream: true }));
-              res.write(chunk);
-            }
-            res.end();
-            // release() falls back to the last reported usage for refund.
-            return { usage: extractor.current() };
-          }
-
-          const text = await upstreamRes.text();
-          res.writeHead(upstreamRes.status, {
-            "content-type":
-              upstreamRes.headers.get("content-type") ?? "application/json",
-          });
-          res.end(text);
-
-          let usage: TokenUsage | undefined;
-          try {
-            const parsed = JSON.parse(text) as {
-              usage?: { input_tokens?: number; output_tokens?: number };
-            };
-            if (
-              typeof parsed.usage?.input_tokens === "number" &&
-              typeof parsed.usage?.output_tokens === "number"
-            ) {
-              usage = {
-                input: parsed.usage.input_tokens,
-                output: parsed.usage.output_tokens,
-              };
-            }
-          } catch {
-            // non-JSON upstream response: no usage to report
-          }
-          return { usage };
-        },
-        {
-          priority,
-          signal: abort.signal,
-          getUsage: (r) => r.usage,
-        },
-      );
-    } catch (err) {
-      if (res.headersSent) {
-        // Stream already started; nothing safe to send. Terminate.
-        res.destroy();
+  function makeHandler(adapter: Adapter, upstream: string) {
+    return async function handle(
+      req: IncomingMessage,
+      res: ServerResponse,
+    ): Promise<void> {
+      const raw = await readBody(req);
+      let body: Record<string, unknown>;
+      try {
+        body = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
+      } catch {
+        sendJson(res, 400, { error: { type: "invalid_json" } });
         return;
       }
-      if (err instanceof LLMBulkheadRejectedError) {
-        const status = rejectStatus(err.reason);
-        res.setHeader("x-admission-reason", err.reason);
-        sendJson(res, status, {
-          error: {
-            type: "admission_rejected",
-            reason: err.reason,
-            pool: pool.name,
-            detail: err.detail ?? null,
-          },
+
+      const model = typeof body["model"] === "string" ? body["model"] : "";
+      const pool = pools.select(model);
+      if (!pool) {
+        sendJson(res, 404, {
+          error: { type: "no_pool_for_model", model },
         });
         return;
       }
-      sendJson(res, 502, {
-        error: {
-          type: "upstream_error",
-          message: err instanceof Error ? err.message : String(err),
-        },
+
+      // Minimal admission view of the request. Malformed messages fall
+      // back to an empty list (estimator sees 0 input chars; max_tokens/
+      // outputCap still reserves output).
+      const llmRequest: LLMRequest = adapter.toLLMRequest(body);
+      const priority = parsePriority(
+        typeof req.headers["x-priority"] === "string"
+          ? req.headers["x-priority"]
+          : undefined,
+      );
+      const wantsStream = adapter.isStreamRequested(body);
+
+      // Abort upstream work if the client disconnects.
+      const abort = new AbortController();
+      res.on("close", () => {
+        if (!res.writableEnded) abort.abort();
       });
-    }
+
+      const headers: Record<string, string> = {};
+      for (const h of adapter.forwardHeaders) {
+        const v = req.headers[h];
+        if (typeof v === "string") headers[h] = v;
+      }
+
+      try {
+        await pool.bulkhead.run(
+          llmRequest,
+          async (signal, ctx) => {
+            const upstreamRes = await fetch(`${upstream}${adapter.path}`, {
+              method: "POST",
+              headers,
+              body: raw,
+              ...(signal !== undefined ? { signal } : {}),
+            });
+
+            if (wantsStream && upstreamRes.body) {
+              res.writeHead(upstreamRes.status, {
+                "content-type":
+                  upstreamRes.headers.get("content-type") ??
+                  "text/event-stream",
+                "cache-control": "no-cache",
+                connection: "keep-alive",
+              });
+              const extractor = adapter.createStreamExtractor((usage) => {
+                ctx?.reportUsage(usage);
+              });
+              const decoder = new TextDecoder();
+              for await (const chunk of upstreamRes.body) {
+                extractor.push(decoder.decode(chunk, { stream: true }));
+                res.write(chunk);
+              }
+              res.end();
+              // release() falls back to the last reported usage for refund.
+              return { usage: extractor.current() };
+            }
+
+            const text = await upstreamRes.text();
+            res.writeHead(upstreamRes.status, {
+              "content-type":
+                upstreamRes.headers.get("content-type") ??
+                "application/json",
+            });
+            res.end(text);
+
+            let usage;
+            try {
+              usage = adapter.parseUsage(JSON.parse(text));
+            } catch {
+              // non-JSON upstream response: no usage to report
+            }
+            return { usage };
+          },
+          {
+            priority,
+            signal: abort.signal,
+            getUsage: (r) => r.usage,
+          },
+        );
+      } catch (err) {
+        if (res.headersSent) {
+          // Stream already started; nothing safe to send. Terminate.
+          res.destroy();
+          return;
+        }
+        if (err instanceof LLMBulkheadRejectedError) {
+          const status = rejectStatus(err.reason);
+          res.setHeader("x-admission-reason", err.reason);
+          sendJson(res, status, {
+            error: {
+              type: "admission_rejected",
+              reason: err.reason,
+              pool: pool.name,
+              detail: err.detail ?? null,
+            },
+          });
+          return;
+        }
+        sendJson(res, 502, {
+          error: {
+            type: "upstream_error",
+            message: err instanceof Error ? err.message : String(err),
+          },
+        });
+      }
+    };
   }
+
+  const handleAnthropic = anthropicUpstream
+    ? makeHandler(anthropicAdapter, anthropicUpstream)
+    : undefined;
+  const handleOpenAI = openaiUpstream
+    ? makeHandler(openaiAdapter, openaiUpstream)
+    : undefined;
 
   const server = createServer((req, res) => {
     const url = req.url ?? "/";
-    if (req.method === "POST" && url === "/v1/messages") {
-      void handleMessages(req, res).catch(() => {
+
+    if (req.method === "POST" && url === anthropicAdapter.path) {
+      if (!handleAnthropic) {
+        sendJson(res, 404, { error: { type: "route_not_configured" } });
+        return;
+      }
+      void handleAnthropic(req, res).catch(() => {
+        if (!res.headersSent) sendJson(res, 500, { error: { type: "internal" } });
+      });
+      return;
+    }
+    if (req.method === "POST" && url === openaiAdapter.path) {
+      if (!handleOpenAI) {
+        sendJson(res, 404, { error: { type: "route_not_configured" } });
+        return;
+      }
+      void handleOpenAI(req, res).catch(() => {
         if (!res.headersSent) sendJson(res, 500, { error: { type: "internal" } });
       });
       return;
