@@ -1001,7 +1001,7 @@ describe("admission-gateway", () => {
       );
     }
 
-    let buf = Buffer.alloc(0);
+    let buf: Bytes = Buffer.alloc(0);
     socket.on("data", (chunk: Buffer) => {
       buf = Buffer.concat([buf, chunk]);
     });
