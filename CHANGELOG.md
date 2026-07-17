@@ -8,7 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-17
+
+### Added
+
+- `PoolConfig.budget` is now documented as tri-state: omitted (unlimited,
+  token-aware admission disabled), `0` (a legal "admit nothing" pool — every
+  budget-gated request is rejected with `429`/`budget_limit`), or `N > 0`
+  (the in-flight token ceiling). Previously only the omitted/positive states
+  were documented. `budget: 0` used to throw at construction under
+  `async-bulkhead-llm@3.2.0`; the currently pinned `3.3.1` makes it a valid
+  construction that simply never admits, which the gateway now allows
+  intentionally (useful for taking a pool out of rotation without deleting
+  it from config) rather than treating as a footgun to reject. Added a test
+  pinning that a `budget: 0` pool constructs successfully and returns `429`
+  for every request rather than crashing.
+
 ## [0.4.1] - 2026-07-16
+
 
 ### Fixed
 
@@ -30,9 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - 2026-07-16
 
-
 ### Changed
-
+`
 - **Breaking:** `upstreamTimeoutMs` replaced by two distinct timeouts:
 
   - `responseTimeoutMs` bounds how long the upstream may take to send
@@ -138,7 +154,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/janbalangue/torii-gateway/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/janbalangue/torii-gateway/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/janbalangue/torii-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/janbalangue/torii-gateway/compare/v0.2.0...v0.3.0

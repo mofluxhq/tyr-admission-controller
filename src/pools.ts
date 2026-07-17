@@ -15,8 +15,20 @@ export type PoolConfig = {
   /** Default model for estimator ratio lookup. */
   model: string;
   maxConcurrent: number;
-  /** In-flight token ceiling. Omit to disable token-aware admission. */
+  /**
+   * In-flight token ceiling. Tri-state:
+   *  - omitted: token-aware admission is disabled entirely (unlimited).
+   *  - 0: a legal, intentional "admit nothing" pool — every budget-gated
+   *    request is rejected (429, `x-admission-reason: budget_limit`)
+   *    immediately, without ever calling upstream. Useful for taking a pool
+   *    out of rotation (e.g. during an incident) without deleting it from
+   *    config. Requires async-bulkhead-llm >=3.3.1 — under 3.2.0 this threw
+   *    at construction (`assertPositiveInteger`); 3.3.1 made 0 a valid
+   *    budget that simply never admits.
+   *  - N > 0: the actual in-flight token ceiling.
+   */
   budget?: number;
+
   /** Budget headroom reserved for priority: "high" requests. */
   highPriorityReserve?: number;
   /** Fallback output reservation when max_tokens is absent. */

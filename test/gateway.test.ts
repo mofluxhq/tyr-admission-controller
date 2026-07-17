@@ -330,7 +330,33 @@ describe("admission-gateway", () => {
     }
   });
 
+  it("budget: 0 constructs a pool that rejects every request with 429 budget_limit (never crashes)", async () => {
+    // async-bulkhead-llm 3.2.0 threw at construction for budget: 0
+    // (assertPositiveInteger); 3.3.1 made it a legal "admit nothing" pool.
+    // This pins that: construction must succeed, and every budget-gated
+    // request — even the very first, with nothing else in flight — must
+    // be rejected with 429/budget_limit rather than admitted or crashing.
+    const gw = await startGateway({ maxConcurrent: 10, budget: 0 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi")),
+      });
+      expect(res.status).toBe(429);
+      expect(res.headers.get("x-admission-reason")).toBe("budget_limit");
+      const body = (await res.json()) as {
+        error: { reason: string; detail: { tokenBudget: { available: number } } };
+      };
+      expect(body.error.reason).toBe("budget_limit");
+      expect(body.error.detail.tokenBudget.available).toBe(0);
+    } finally {
+      gw.server.close();
+    }
+  });
+
   it("admits x-priority: high when normal traffic is budget-blocked", async () => {
+
     // budget 2400, reserve 1200 → normal ceiling 1200 (one fits, two don't).
     const gw = await startGateway({
       maxConcurrent: 10,
