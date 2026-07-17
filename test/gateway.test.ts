@@ -5,8 +5,49 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
-import type { AddressInfo } from "node:net";
+import { connect as netConnect, type AddressInfo } from "node:net";
 import { createGateway, waitForDrain } from "../src/server.js";
+
+// Parses one complete HTTP/1.1 response (status line + headers + body,
+// using Content-Length to know where the body ends) off the front of
+// `buf`. Returns null if `buf` doesn't yet contain a full response.
+// Used to read two pipelined responses off a single raw socket in the
+// shutdown-503 test below — every response the gateway sends carries an
+// explicit content-length (see sendJson in src/server.ts), so this is
+// reliable without needing a full HTTP parser.
+// Buffer.subarray()'s TS type is Buffer<ArrayBufferLike>, distinct from
+// the plain `Buffer` (= Buffer<ArrayBuffer>) alias used for the `buf`
+// parameter/accumulator elsewhere in this file. `rest` is typed to match
+// what subarray() actually returns rather than fighting the type system.
+type Bytes = ReturnType<Buffer["subarray"]>;
+
+function parseOneResponse(
+  buf: Buffer,
+): { statusCode: number; headers: Record<string, string>; body: string; rest: Bytes } | null {
+  const headerEnd = buf.indexOf("\r\n\r\n");
+  if (headerEnd === -1) return null;
+  const headerText = buf.subarray(0, headerEnd).toString("utf8");
+  const lines = headerText.split("\r\n");
+  const statusLine = lines[0] ?? "";
+  const statusCode = Number(statusLine.split(" ")[1]);
+  const headers: Record<string, string> = {};
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    const idx = line.indexOf(":");
+    if (idx === -1) continue;
+    headers[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+  }
+  const contentLength = Number(headers["content-length"] ?? "0");
+  const bodyStart = headerEnd + 4;
+  if (buf.length < bodyStart + contentLength) return null; // body not fully arrived yet
+  const body = buf.subarray(bodyStart, bodyStart + contentLength).toString("utf8");
+  const rest = buf.subarray(bodyStart + contentLength);
+  return { statusCode, headers, body, rest };
+}
+
+
+
+
 
 // ── Mock upstream: Anthropic-messages-shaped, controllable timing ──
 
@@ -534,7 +575,146 @@ describe("admission-gateway", () => {
   });
 
 
+  it("releases the bulkhead slot and token budget when a client stalls (stops reading) mid-stream", async () => {
+    // Reproduces the resource-pinning bug: a client that connects, starts a
+    // stream, and then simply stops reading (TCP connection stays open —
+    // no FIN, no RST) must NOT be able to pin its admission hold forever.
+    // Once the client's receive window fills, the gateway's res.write()
+    // starts returning false and the handler parks in waitForDrain(res).
+    // A stalled-but-connected client never emits 'drain' or 'close', so
+    // without a bound, nothing would ever unpark it. clientStallTimeoutMs
+    // (here defaulted from idleTimeoutMs) must destroy the response after
+    // the bound elapses, cascading: close -> drain-wait resolves -> loop
+    // unwinds -> bulkhead releases.
+    //
+    // Mock upstream blasts many sizeable chunks so the client's receive
+    // buffer and the gateway's write buffer both fill quickly once reading
+    // stops, reliably forcing res.write() to return false.
+    const chunkCount = 500;
+    const chunkSize = 4096; // ~2MB total, far beyond default HWM/socket bufs
+    const fastServer = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(
+          `event: message_start\ndata: ${JSON.stringify({
+            type: "message_start",
+            message: { usage: { input_tokens: 20 } },
+          })}\n\n`,
+        );
+        const payload = "x".repeat(chunkSize);
+        let i = 0;
+        const pump = () => {
+          // Keep writing until the mock's own socket backs up or we've
+          // sent everything — either way this never blocks the test.
+          while (i < chunkCount) {
+            i += 1;
+            const ok = res.write(
+              `event: ping\ndata: ${JSON.stringify({ payload })}\n\n`,
+            );
+            if (!ok) {
+              res.once("drain", pump);
+              return;
+            }
+          }
+          // Deliberately never send message_delta/message_stop/res.end() —
+          // doesn't matter, the client stalls before it would matter.
+        };
+        pump();
+      });
+    });
+    await new Promise<void>((resolve) =>
+      fastServer.listen(0, "127.0.0.1", () => resolve()),
+    );
+    const { port: fastPort } = fastServer.address() as AddressInfo;
+    const fastUpstreamUrl = `http://127.0.0.1:${fastPort}`;
+
+    const { server, shutdown } = createGateway({
+      upstreamUrl: fastUpstreamUrl,
+      idleTimeoutMs: 100, // clientStallTimeoutMs defaults to this
+      pools: [
+        {
+          name: "test-pool",
+          modelPrefixes: ["claude"],
+          model: "claude-sonnet-4",
+          maxConcurrent: 1,
+          budget: 5000,
+        },
+      ],
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      // Issue the request over a raw http.request and, exactly like the
+      // probe described in the bug report, pause the client's readable
+      // side immediately and never resume it — i.e. connect, start the
+      // stream, and stop reading.
+      await new Promise<void>((resolve, reject) => {
+        const clientReq = httpRequest(
+          {
+            host: "127.0.0.1",
+            port,
+            path: "/v1/messages",
+            method: "POST",
+            headers: { "content-type": "application/json" },
+          },
+          (clientRes) => {
+            clientRes.pause(); // stop reading — never resume
+            clientRes.on("error", () => {
+              /* connection will be destroyed by the gateway; ignore */
+            });
+          },
+        );
+        clientReq.on("error", () => {
+          /* gateway-side destroy may surface as a client error; ignore */
+        });
+        clientReq.end(
+          JSON.stringify(msg("hi", { stream: true, model: "claude-sonnet-4-5" })),
+        );
+
+        // Poll /stats until the pool's admission hold is released, or
+        // time out and fail — this is the core assertion: the slot and
+        // token budget must NOT be held indefinitely.
+        const deadline = Date.now() + 3000;
+        const poll = async () => {
+          if (Date.now() > deadline) {
+            reject(new Error("bulkhead hold was never released"));
+            return;
+          }
+          const stats = (await (
+            await fetch(`http://127.0.0.1:${port}/stats`)
+          ).json()) as Record<
+            string,
+            {
+              tokenBudget: { inFlightTokens: number };
+              inFlight?: number;
+            }
+          >;
+          const tb = stats["test-pool"]!.tokenBudget;
+          if (tb.inFlightTokens === 0) {
+            resolve();
+            return;
+          }
+          setTimeout(() => void poll(), 25);
+        };
+        void poll();
+      });
+
+      // The bulkhead's run() only resolves/rejects once — releasing the
+      // concurrency slot and the token budget together — so confirming
+      // inFlightTokens reached 0 above already proves both were released,
+      // not just the budget.
+    } finally {
+
+      await shutdown();
+      fastServer.close();
+    }
+  });
+
   it("does not kill a healthy long stream that keeps sending chunks within idleTimeoutMs", async () => {
+
     // Mock upstream drips small events every ~50ms for ~300ms (well beyond
     // a single naive wall-clock timeout window) before finishing normally.
     // Because idleTimeoutMs resets on every chunk, and each gap here is well
@@ -788,36 +968,116 @@ describe("admission-gateway", () => {
     }
   });
 
-  it("gracefully drains in-flight requests on shutdown and rejects new ones with 503", async () => {
+  it("gracefully drains in-flight requests on shutdown and rejects new admissions arriving on a still-open connection with 503", async () => {
+    // Node's server.close() proactively destroys *idle* keep-alive
+    // connections (verified empirically), so a warmed-up-then-idle
+    // connection can't be used to probe the drain window — it gets torn
+    // down before a second request could land. Instead, pipeline a
+    // second request behind a still-in-flight one on the SAME raw TCP
+    // connection: the connection can't be idle-closed while request #1
+    // is in flight, and HTTP/1.1 guarantees responses are written back
+    // in request order, so response #2 (the drain-time admission,
+    // expected to be a 503) arrives right after response #1 (the
+    // in-flight request, expected to complete with 200).
     const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    const { port } = gw.server.address() as AddressInfo;
 
-
-    // Kick off a slow in-flight request before shutting down.
-    const inFlight = fetch(`${gw.url}/v1/messages`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(msg("slow please")), // mock delays ~300ms
+    const socket = netConnect(port, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", () => resolve());
+      socket.once("error", reject);
     });
-    await new Promise((r) => setTimeout(r, 80)); // let it admit
 
-    // Begin graceful shutdown: stops accepting new TCP connections and
-    // drains the bulkhead once in-flight work completes.
-    const shutdownPromise = gw.shutdown();
+    function writeRequest(body: Record<string, unknown>): void {
+      const payload = JSON.stringify(body);
+      socket.write(
+        `POST /v1/messages HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${port}\r\n` +
+          `Content-Type: application/json\r\n` +
+          `Content-Length: ${Buffer.byteLength(payload)}\r\n` +
+          `Connection: keep-alive\r\n` +
+          `\r\n` +
+          payload,
+      );
+    }
 
-    // New requests during drain should be rejected with 503 + reason
-    // "shutdown" — but the server no longer accepts new connections
-    // (server.close() was called), so a genuinely new connection attempt
-    // will be refused at the TCP layer rather than reach the handler.
-    await expect(
-      fetch(`${gw.url}/healthz`).then(() => "connected"),
-    ).rejects.toBeTruthy();
+    let buf = Buffer.alloc(0);
+    socket.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+    });
 
-    // The in-flight request should still complete successfully.
-    const res = await inFlight;
-    expect(res.status).toBe(200);
+    try {
+      // Request #1: slow in-flight request (mock upstream delays ~300ms)
+      // that must be allowed to complete despite the shutdown.
+      writeRequest(msg("slow please"));
+      await new Promise((r) => setTimeout(r, 80)); // let it admit
 
-    // shutdown() resolves once the bulkhead has drained.
-    await shutdownPromise;
+      // Begin graceful shutdown: server.close() and pools.drain() now run
+      // concurrently, so the bulkheads are marked closed immediately —
+      // well before request #1's response has even been written back.
+      const shutdownPromise = gw.shutdown();
+
+      // Request #2: pipelined on the SAME still-open connection, sent
+      // while shutdown is in progress. It reaches the handler (the
+      // connection is busy serving request #1, so it can't have been
+      // idle-closed), and since the bulkhead is already draining, it
+      // must be rejected with a genuine HTTP 503 — not a TCP refusal.
+      writeRequest(msg("hi"));
+
+      // Wait until both pipelined responses have fully arrived.
+      const first = await new Promise<ReturnType<typeof parseOneResponse>>(
+        (resolve, reject) => {
+          const check = () => {
+            const parsed = parseOneResponse(buf);
+            if (parsed) {
+              resolve(parsed);
+              return;
+            }
+            if (Date.now() > deadline) {
+              reject(new Error("timed out waiting for first response"));
+              return;
+            }
+            setTimeout(check, 10);
+          };
+          const deadline = Date.now() + 3000;
+          check();
+        },
+      );
+      expect(first).not.toBeNull();
+      expect(first!.statusCode).toBe(200);
+      buf = first!.rest;
+
+      const second = await new Promise<ReturnType<typeof parseOneResponse>>(
+        (resolve, reject) => {
+          const check = () => {
+            const parsed = parseOneResponse(buf);
+            if (parsed) {
+              resolve(parsed);
+              return;
+            }
+            if (Date.now() > deadline) {
+              reject(new Error("timed out waiting for second response"));
+              return;
+            }
+            setTimeout(check, 10);
+          };
+          const deadline = Date.now() + 3000;
+          check();
+        },
+      );
+      expect(second).not.toBeNull();
+      expect(second!.statusCode).toBe(503);
+      expect(second!.headers["x-admission-reason"]).toBe("shutdown");
+      const secondBody = JSON.parse(second!.body) as { error: { reason: string } };
+      expect(secondBody.error.reason).toBe("shutdown");
+
+      // shutdown() resolves once the bulkhead has drained.
+      await shutdownPromise;
+    } finally {
+      socket.destroy();
+    }
   });
 });
+
+
 

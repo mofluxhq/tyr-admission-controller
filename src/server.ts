@@ -41,6 +41,19 @@ export type GatewayOptions = {
    */
   idleTimeoutMs?: number;
   /**
+   * Timeout in milliseconds bounding how long the gateway will wait for a
+   * backpressured client to drain before giving up on it. Guards against a
+   * client that stops reading entirely (TCP connection stays open, but no
+   * `drain` and no `close` ever fires) — without this bound, the handler
+   * parks in `waitForDrain` forever, pinning its bulkhead slot and token
+   * budget reservation indefinitely. On timeout, the response socket is
+   * destroyed, which cascades through `close` to unwind the handler and
+   * release its admission hold. Defaults to `idleTimeoutMs` when omitted;
+   * if both are omitted, a stalled client is never bounded (matching prior
+   * behavior).
+   */
+  clientStallTimeoutMs?: number;
+  /**
    * Maximum number of bytes buffered from a request body before it is
    * rejected with `413`. Guards against unbounded memory growth from
    * oversized or malicious payloads. Defaults to 1 MiB (1_048_576 bytes).
@@ -48,6 +61,7 @@ export type GatewayOptions = {
   maxRequestBodyBytes?: number;
   pools: PoolConfig[];
 };
+
 
 
 /** Default cap on buffered request-body bytes: 1 MiB. */
@@ -118,23 +132,50 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 // while we're waiting for backpressure to release; the caller's abort
 // signal (wired to res "close") then terminates upstream reading on the
 // next loop iteration.
+//
+// A stalled-but-connected client (TCP connection open, but the client
+// simply stops reading) produces neither 'drain' nor 'close' — without a
+// bound, this would park forever, pinning the caller's admission hold
+// (bulkhead slot + token budget) indefinitely. When `timeoutMs` is
+// provided, a timer races the drain/close listeners; on expiry it calls
+// `res.destroy()`, which synchronously/asynchronously emits 'close',
+// resolving this promise via the normal onClose path and letting the
+// caller's loop unwind and release its hold.
 // Exported for direct unit testing; not part of the GatewayOptions API.
-export function waitForDrain(res: ServerResponse): Promise<void> {
+export function waitForDrain(
+  res: ServerResponse,
+  timeoutMs?: number,
+): Promise<void> {
   if (res.destroyed) return Promise.resolve();
 
   return new Promise<void>((resolve) => {
-    const onDrain = () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      res.removeListener("drain", onDrain);
       res.removeListener("close", onClose);
+      if (timer !== undefined) clearTimeout(timer);
+    };
+    const onDrain = () => {
+      cleanup();
       resolve();
     };
     const onClose = () => {
-      res.removeListener("drain", onDrain);
+      cleanup();
       resolve();
     };
     res.once("drain", onDrain);
     res.once("close", onClose);
+
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        // Does not resolve directly — destroying triggers 'close' above,
+        // which is the single source of truth for "give up" resolution.
+        res.destroy();
+      }, timeoutMs);
+    }
   });
 }
+
 
 
 export function createGateway(opts: GatewayOptions) {
@@ -143,8 +184,15 @@ export function createGateway(opts: GatewayOptions) {
   const openaiUpstream = opts.openaiUpstreamUrl?.replace(/\/$/, "");
   const responseTimeoutMs = opts.responseTimeoutMs;
   const idleTimeoutMs = opts.idleTimeoutMs;
+  // Bounds how long the gateway waits for a backpressured client to drain
+  // before giving up on it (see waitForDrain). Falls back to idleTimeoutMs
+  // when not explicitly configured — a stalled client is conceptually the
+  // same failure mode as an idle upstream, just on the other side of the
+  // pipe, so it's reasonable to reuse the same bound by default.
+  const clientStallTimeoutMs = opts.clientStallTimeoutMs ?? idleTimeoutMs;
   const maxRequestBodyBytes =
     opts.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+
 
 
 
@@ -284,8 +332,9 @@ export function createGateway(opts: GatewayOptions) {
                   // client reading a fast upstream stream would let Node
                   // buffer the entire response in memory unbounded.
                   if (!res.write(chunk)) {
-                    await waitForDrain(res);
+                    await waitForDrain(res, clientStallTimeoutMs);
                   }
+
                 }
               } finally {
                 if (idleTimer !== undefined) clearTimeout(idleTimer);
@@ -297,12 +346,21 @@ export function createGateway(opts: GatewayOptions) {
             }
 
             const text = await upstreamRes.text();
+            // Explicit content-length (rather than relying on Node's
+            // chunked-encoding fallback) since we've already buffered the
+            // full upstream body here — this keeps response framing
+            // deterministic for any client relying on content-length to
+            // know where one response ends and the next begins, e.g. a
+            // pipelined HTTP/1.1 client reading two responses off a
+            // single socket back-to-back.
             res.writeHead(upstreamRes.status, {
               "content-type":
                 upstreamRes.headers.get("content-type") ??
                 "application/json",
+              "content-length": Buffer.byteLength(text),
             });
             res.end(text);
+
 
             let usage;
             try {
@@ -328,6 +386,16 @@ export function createGateway(opts: GatewayOptions) {
         if (err instanceof LLMBulkheadRejectedError) {
           const status = rejectStatus(err.reason);
           res.setHeader("x-admission-reason", err.reason);
+          if (err.reason === "shutdown") {
+            // Tell the client (and Node's keep-alive machinery) to close
+            // this connection rather than keep it alive: the gateway is
+            // shutting down, so there's no point idling the socket for a
+            // pipelined/future request that would only be rejected again.
+            // This also lets server.close()'s callback (and therefore
+            // shutdown()) resolve promptly instead of waiting out the
+            // keep-alive timeout on an otherwise-idle connection.
+            res.setHeader("connection", "close");
+          }
           sendJson(res, status, {
             error: {
               type: "admission_rejected",
@@ -335,6 +403,7 @@ export function createGateway(opts: GatewayOptions) {
               pool: pool.name,
               detail: err.detail ?? null,
             },
+
           });
           return;
         }
@@ -418,25 +487,42 @@ export function createGateway(opts: GatewayOptions) {
 
   /**
    * Gracefully shuts down the gateway: stops accepting new TCP
-   * connections, then drains every pool's bulkhead (new requests are
-   * rejected with reason "shutdown" while in-flight requests are
-   * allowed to complete). Safe to call multiple times — subsequent
-   * calls resolve when the first shutdown finishes.
+   * connections and, concurrently, drains every pool's bulkhead (new
+   * requests are rejected with reason "shutdown" while in-flight
+   * requests are allowed to complete). The two run concurrently rather
+   * than sequentially because `server.close()`'s callback only fires
+   * once every connection — including idle keep-alive ones — has ended;
+   * waiting for that before draining would mean no client could ever
+   * observe the "shutdown" rejection. Starting the drain immediately
+   * ensures a request that arrives on a still-open keep-alive
+   * connection during the drain window is actually rejected with `503`
+   * / `x-admission-reason: shutdown`, rather than the drain being purely
+   * academic. Safe to call multiple times — subsequent calls resolve
+   * when the first shutdown finishes.
    */
   function shutdown(): Promise<void> {
     if (shuttingDown) return shuttingDown;
     shuttingDown = new Promise<void>((resolve, reject) => {
+      // Mark bulkheads closed right away so any request that reaches the
+      // handler from this point on — including on connections that were
+      // already established before server.close() — gets rejected with
+      // reason "shutdown" instead of being admitted.
+      const drainDone = pools.drain();
+
       server.close((err?: Error) => {
         if (err) {
           reject(err);
           return;
         }
-        pools.drain().then(resolve, reject);
+        // All connections have ended; wait for any bulkhead work that
+        // was still in flight to finish releasing.
+        drainDone.then(resolve, reject);
       });
     });
 
     return shuttingDown;
   }
+
 
   return { server, pools, shutdown };
 }

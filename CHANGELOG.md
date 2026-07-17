@@ -8,7 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-16
+
+### Fixed
+
+- Non-streaming proxy responses now send an explicit `content-length`
+  header instead of relying on Node's chunked-transfer-encoding fallback.
+  Previously, a client pipelining multiple requests on a single keep-alive
+  connection (or any client relying on `content-length` for response
+  framing) could misparse where one response ends and the next begins.
+  This also fixes a latent issue where the documented graceful-shutdown
+  `503`/`x-admission-reason: shutdown` response would send `Connection:
+  close`, causing the socket to close promptly at that point — see next
+  item.
+- Graceful shutdown now resolves promptly: a `503`/`shutdown` admission
+  rejection sends `Connection: close`, so the connection it arrived on
+  closes immediately instead of idling out on Node's keep-alive timer.
+  Previously, `shutdown()` would not resolve until every connection —
+  including ones that had already received a final "shutdown" rejection —
+  had gone fully idle and timed out, needlessly delaying process exit.
+
 ## [0.4.0] - 2026-07-16
+
 
 ### Changed
 
@@ -117,7 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/janbalangue/torii-gateway/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/janbalangue/torii-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/janbalangue/torii-gateway/compare/v0.2.0...v0.3.0
 

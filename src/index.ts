@@ -9,8 +9,12 @@ const responseTimeoutMs = process.env["RESPONSE_TIMEOUT_MS"]
 const idleTimeoutMs = process.env["IDLE_TIMEOUT_MS"]
   ? Number(process.env["IDLE_TIMEOUT_MS"])
   : undefined;
+const clientStallTimeoutMs = process.env["CLIENT_STALL_TIMEOUT_MS"]
+  ? Number(process.env["CLIENT_STALL_TIMEOUT_MS"])
+  : undefined;
 
 const maxRequestBodyBytes = process.env["MAX_REQUEST_BODY_BYTES"]
+
   ? Number(process.env["MAX_REQUEST_BODY_BYTES"])
   : undefined;
 
@@ -27,7 +31,9 @@ const { server, shutdown } = createGateway({
   ...(openaiUpstreamUrl !== undefined ? { openaiUpstreamUrl } : {}),
   ...(responseTimeoutMs !== undefined ? { responseTimeoutMs } : {}),
   ...(idleTimeoutMs !== undefined ? { idleTimeoutMs } : {}),
+  ...(clientStallTimeoutMs !== undefined ? { clientStallTimeoutMs } : {}),
   ...(maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes } : {}),
+
 
   pools: [
 

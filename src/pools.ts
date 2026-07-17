@@ -89,8 +89,18 @@ export function createPools(configs: PoolConfig[]): Pools {
   }
 
   async function drain(): Promise<void> {
+    // async-bulkhead-llm's `drain()` alone only waits for in-flight work
+    // to finish — it does NOT stop new admissions. The library's own docs
+    // say to "compose as close() -> drain()" for graceful shutdown:
+    // `close()` stops admitting new requests immediately (rejecting with
+    // reason "shutdown"), and `drain()` then resolves once all in-flight
+    // work has completed. Without the `close()` call here, a request that
+    // reaches the handler during a "drain" would still be admitted
+    // normally instead of getting the documented 503.
+    for (const { pool } of pools) pool.bulkhead.close();
     await Promise.all(pools.map(({ pool }) => pool.bulkhead.drain()));
   }
+
 
   return { select, stats, drain };
 }
