@@ -460,7 +460,7 @@ describe("admission-gateway", () => {
     }
   });
 
-  it("routes unknown models to 404 and serves /healthz", async () => {
+  it("routes unknown models to 422 and serves /healthz", async () => {
     const gw = await startGateway({ maxConcurrent: 1 });
     try {
       const res = await fetch(`${gw.url}/v1/messages`, {
@@ -468,13 +468,238 @@ describe("admission-gateway", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ ...msg("hi"), model: "unknown-model-x" }),
       });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(422);
+      const body = (await res.json()) as { error: { type: string; model: string } };
+      expect(body.error.type).toBe("unsupported_model");
+      expect(body.error.model).toBe("unknown-model-x");
       const health = await fetch(`${gw.url}/healthz`);
       expect(health.status).toBe(200);
     } finally {
       gw.server.close();
     }
   });
+
+  it("returns 400 invalid_request when the JSON body is not an object (e.g. null)", async () => {
+    const gw = await startGateway({ maxConcurrent: 1 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "null",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { type: string; errors: string[] } };
+      expect(body.error.type).toBe("invalid_request");
+      expect(body.error.errors.length).toBeGreaterThan(0);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("returns 400 invalid_request when the JSON body is an array", async () => {
+    const gw = await startGateway({ maxConcurrent: 1 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "[]",
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { type: string } };
+      expect(body.error.type).toBe("invalid_request");
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("returns 400 invalid_request when max_tokens is negative", async () => {
+    const gw = await startGateway({ maxConcurrent: 1 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi", { max_tokens: -1 })),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { type: string; errors: string[] } };
+      expect(body.error.type).toBe("invalid_request");
+      expect(body.error.errors.some((e) => e.includes("max_tokens"))).toBe(true);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("returns 400 invalid_request when max_tokens exceeds the configured ceiling", async () => {
+    const { server } = createGateway({
+      upstreamUrl: upstream.url,
+      maxOutputTokens: 100,
+      pools: [
+        {
+          name: "test-pool",
+          modelPrefixes: ["claude"],
+          model: "claude-sonnet-4",
+          maxConcurrent: 1,
+        },
+      ],
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi", { max_tokens: 1000 })),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { type: string } };
+      expect(body.error.type).toBe("invalid_request");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("returns 400 invalid_request when a message is missing content", async () => {
+    const gw = await startGateway({ maxConcurrent: 1 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 1000,
+          messages: [{ role: "user" }],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { type: string; errors: string[] } };
+      expect(body.error.type).toBe("invalid_request");
+      expect(body.error.errors.some((e) => e.includes("content"))).toBe(true);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("returns 400 invalid_request when messages is missing entirely", async () => {
+    const gw = await startGateway({ maxConcurrent: 1 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1000 }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { type: string } };
+      expect(body.error.type).toBe("invalid_request");
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("returns 400 invalid_request when max_tokens is missing for the Anthropic route", async () => {
+    const gw = await startGateway({ maxConcurrent: 1 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { type: string; errors: string[] } };
+      expect(body.error.type).toBe("invalid_request");
+      expect(body.error.errors.some((e) => e.includes("max_tokens"))).toBe(true);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("returns 400 invalid_request for an invalid message role", async () => {
+    const gw = await startGateway({ maxConcurrent: 1 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 1000,
+          messages: [{ role: "system-prompt-typo", content: "hi" }],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { type: string } };
+      expect(body.error.type).toBe("invalid_request");
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("returns 400 invalid_request when stream is not a boolean", async () => {
+    const gw = await startGateway({ maxConcurrent: 1 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi", { stream: "yes" })),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { type: string } };
+      expect(body.error.type).toBe("invalid_request");
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("accepts a valid multimodal content-block message", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 1000,
+          messages: [
+            {
+              role: "user",
+              content: [{ type: "text", text: "hi" }],
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("routes /v1/messages?x=1 correctly instead of 404ing on the query string", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages?x=1`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi")),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("still serves /stats?foo=bar and /healthz?foo=bar with query strings", async () => {
+    const gw = await startGateway({ maxConcurrent: 1 });
+    try {
+      const stats = await fetch(`${gw.url}/stats?foo=bar`);
+      expect(stats.status).toBe(200);
+      const health = await fetch(`${gw.url}/healthz?foo=bar`);
+      expect(health.status).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+
 
   it("proxies OpenAI-shaped non-streaming requests and applies usage refunds", async () => {
     const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });

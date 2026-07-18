@@ -36,6 +36,13 @@ priority admission, and rejection detail.
 - **Caps request body buffering.** Incoming request bodies are buffered up to
   `maxRequestBodyBytes` (default 1 MiB); anything larger is rejected with
   `413 Payload Too Large` before it consumes further memory.
+- **Validates requests before admission.** Each route's provider adapter
+  validates the parsed JSON body's shape (non-array object, required fields,
+  message roles/content, `stream`/`tools`/`system` shapes, output-limit
+  bounds) before the request is ever handed to the bulkhead. Malformed
+  client input is rejected with `400` — it is never treated as an
+  infrastructure failure (`500`/`502`).
+
 - **Applies streaming backpressure.** When proxying a streaming response, the
   gateway honors `res.write()`'s return value and pauses pulling further
   chunks from the upstream body whenever the client's write buffer is full,
@@ -62,7 +69,14 @@ priority admission, and rejection detail.
 
 Each route is enabled only when its corresponding upstream URL is configured
 (`UPSTREAM_URL` for Anthropic, `OPENAI_UPSTREAM_URL` for OpenAI). Requesting a
-route with no configured upstream returns `404`.
+route with no configured upstream returns `404`. A request whose `model`
+doesn't match any configured pool returns `422` (`error.type:
+"unsupported_model"`) — the route exists and the payload is well-formed, it
+simply isn't routed anywhere. A malformed request body (wrong JSON shape,
+missing required fields, invalid roles/content, out-of-range `max_tokens`,
+etc.) returns `400` (`error.type: "invalid_request"`) with an `errors` array
+describing every problem found.
+
 
 Request headers: `x-priority: high` opts a request into the high-priority
 budget tier (see `highPriorityReserve`). Provider auth headers are forwarded
@@ -99,7 +113,9 @@ createGateway({
   responseTimeoutMs: 30_000, // optional — upstream must send headers within 30s
   idleTimeoutMs: 30_000,     // optional — stream must not stall for 30s between chunks
   maxRequestBodyBytes: 1_048_576, // optional, defaults to 1 MiB
+  maxOutputTokens: 200_000,  // optional — ceiling for max_tokens/max_completion_tokens
   pools: [
+
 
     { name: "sonnet", modelPrefixes: ["claude-sonnet-4"], model: "claude-sonnet-4-5",
       maxConcurrent: 40, budget: 400_000, highPriorityReserve: 80_000 },
@@ -118,6 +134,14 @@ disable its route entirely (e.g. an Anthropic-only or OpenAI-only deployment).
 will buffer into memory before responding `413 Payload Too Large`; it defaults
 to 1 MiB (1,048,576 bytes) and can be overridden via the `MAX_REQUEST_BODY_BYTES`
 env var when using the default `src/index.ts` entrypoint.
+
+`maxOutputTokens` is a sanity ceiling for output-limit fields (`max_tokens` /
+`max_completion_tokens`); requests specifying a value above it are rejected
+with `400` before admission. It defaults to 200,000 and can be overridden via
+the `MAX_OUTPUT_TOKENS` env var when using the default `src/index.ts`
+entrypoint. This is distinct from a pool's `outputCap`, which controls the
+default output-token reservation used for admission accounting.
+
 
 ## Known limitations (v0.2)
 
@@ -145,8 +169,10 @@ src/
   server.ts       HTTP server, proxy, admission, adapter wiring
   pools.ts        model→pool routing + bulkhead construction
   adapters.ts     per-provider request/response/usage translation
+  validation.ts   shared shape-validation helpers used by adapter validate()
   sse.ts          incremental SSE usage extractor (Anthropic)
   sse-openai.ts   incremental SSE usage extractor (OpenAI)
 test/
   gateway.test.ts   end-to-end tests against mock upstreams
 ```
+

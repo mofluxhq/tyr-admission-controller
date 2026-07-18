@@ -59,6 +59,14 @@ export type GatewayOptions = {
    * oversized or malicious payloads. Defaults to 1 MiB (1_048_576 bytes).
    */
   maxRequestBodyBytes?: number;
+  /**
+   * Ceiling for output-limit fields (`max_tokens` / `max_completion_tokens`).
+   * Requests specifying a value above this are rejected with `400` before
+   * admission. This is a sanity bound against malformed/malicious input,
+   * not a business policy — actual per-pool output reservation defaults
+   * are controlled by `PoolConfig.outputCap`. Defaults to 200,000.
+   */
+  maxOutputTokens?: number;
   pools: PoolConfig[];
 };
 
@@ -66,6 +74,10 @@ export type GatewayOptions = {
 
 /** Default cap on buffered request-body bytes: 1 MiB. */
 const DEFAULT_MAX_REQUEST_BODY_BYTES = 1_048_576;
+
+/** Default ceiling for output-limit fields (max_tokens / max_completion_tokens). */
+const DEFAULT_MAX_OUTPUT_TOKENS = 200_000;
+
 
 class PayloadTooLargeError extends Error {
   constructor(public readonly limitBytes: number) {
@@ -192,6 +204,8 @@ export function createGateway(opts: GatewayOptions) {
   const clientStallTimeoutMs = opts.clientStallTimeoutMs ?? idleTimeoutMs;
   const maxRequestBodyBytes =
     opts.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+  const maxOutputTokens = opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+
 
 
 
@@ -219,27 +233,35 @@ export function createGateway(opts: GatewayOptions) {
         }
         throw err;
       }
-      let body: Record<string, unknown>;
+      let parsed: unknown;
       try {
-        body = JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
+        parsed = JSON.parse(raw.toString("utf8"));
       } catch {
         sendJson(res, 400, { error: { type: "invalid_json" } });
         return;
       }
 
+      const validation = adapter.validate(parsed, { maxOutputTokens });
+      if (!validation.ok) {
+        sendJson(res, 400, {
+          error: { type: "invalid_request", errors: validation.errors },
+        });
+        return;
+      }
+      const body = validation.value;
+
       const model = typeof body["model"] === "string" ? body["model"] : "";
       const pool = pools.select(model);
       if (!pool) {
-        sendJson(res, 404, {
-          error: { type: "no_pool_for_model", model },
+        sendJson(res, 422, {
+          error: { type: "unsupported_model", model },
         });
         return;
       }
 
-      // Minimal admission view of the request. Malformed messages fall
-      // back to an empty list (estimator sees 0 input chars; max_tokens/
-      // outputCap still reserves output).
+      // Admission view of the (now-validated) request.
       const llmRequest: LLMRequest = adapter.toLLMRequest(body);
+
       const priority = parsePriority(
         typeof req.headers["x-priority"] === "string"
           ? req.headers["x-priority"]
@@ -450,9 +472,13 @@ export function createGateway(opts: GatewayOptions) {
     : undefined;
 
   const server = createServer((req, res) => {
-    const url = req.url ?? "/";
+    // Route matching compares only the pathname, not the complete raw
+    // URL — a request like "/v1/messages?x=1" must still match the
+    // "/v1/messages" route; comparing req.url verbatim would incorrectly
+    // 404 any request carrying a query string.
+    const pathname = new URL(req.url ?? "/", "http://internal").pathname;
 
-    if (req.method === "POST" && url === anthropicAdapter.path) {
+    if (req.method === "POST" && pathname === anthropicAdapter.path) {
       if (!handleAnthropic) {
         sendJson(res, 404, { error: { type: "route_not_configured" } });
         return;
@@ -462,7 +488,7 @@ export function createGateway(opts: GatewayOptions) {
       });
       return;
     }
-    if (req.method === "POST" && url === openaiAdapter.path) {
+    if (req.method === "POST" && pathname === openaiAdapter.path) {
       if (!handleOpenAI) {
         sendJson(res, 404, { error: { type: "route_not_configured" } });
         return;
@@ -472,16 +498,17 @@ export function createGateway(opts: GatewayOptions) {
       });
       return;
     }
-    if (req.method === "GET" && url === "/stats") {
+    if (req.method === "GET" && pathname === "/stats") {
       sendJson(res, 200, pools.stats());
       return;
     }
-    if (req.method === "GET" && url === "/healthz") {
+    if (req.method === "GET" && pathname === "/healthz") {
       sendJson(res, 200, { ok: true });
       return;
     }
     sendJson(res, 404, { error: { type: "not_found" } });
   });
+
 
   let shuttingDown: Promise<void> | undefined;
 

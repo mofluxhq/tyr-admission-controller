@@ -8,6 +8,16 @@
 import type { LLMRequest, TokenUsage } from "async-bulkhead-llm";
 import { createSSEUsageExtractor, type UsageObservation } from "./sse.js";
 import { createOpenAISSEUsageExtractor } from "./sse-openai.js";
+import {
+  isNonEmptyString,
+  isPlainObject,
+  validateMessages,
+  validateOptionalBoolean,
+  validateOutputLimit,
+  validateStreamOptions,
+  validateSystemPrompt,
+  validateTools,
+} from "./validation.js";
 
 export type ApiShape = "anthropic" | "openai";
 
@@ -16,6 +26,10 @@ export type StreamExtractor = {
   current(): UsageObservation | undefined;
 };
 
+export type ValidationResult =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; errors: string[] };
+
 export type Adapter = {
   shape: ApiShape;
   /** Route path this adapter serves, e.g. "/v1/messages". */
@@ -23,6 +37,13 @@ export type Adapter = {
   /** Headers forwarded verbatim to the upstream (auth passthrough — the
    * gateway holds no provider keys). */
   forwardHeaders: readonly string[];
+  /**
+   * Validates the parsed JSON body against this provider's required shape.
+   * Must be called — and must return `ok: true` — before `toLLMRequest` /
+   * `isStreamRequested` are trusted with the body; those functions assume
+   * a validated shape and use defensive fallbacks only as a last resort.
+   */
+  validate(body: unknown, opts: { maxOutputTokens: number }): ValidationResult;
   /** Extract the minimal admission view of the request body. */
   toLLMRequest(body: Record<string, unknown>): LLMRequest;
   /** Whether the client requested a streaming response. */
@@ -36,10 +57,32 @@ export type Adapter = {
 };
 
 function toMessages(body: Record<string, unknown>): LLMRequest["messages"] {
-  return Array.isArray(body["messages"])
-    ? (body["messages"] as LLMRequest["messages"])
-    : [];
+  if (!Array.isArray(body["messages"])) return [];
+  return (body["messages"] as unknown[]).filter(
+    (m): m is LLMRequest["messages"][number] =>
+      isPlainObject(m) &&
+      typeof m["role"] === "string" &&
+      (typeof m["content"] === "string" || Array.isArray(m["content"])),
+  );
 }
+
+function isAnthropicTool(tool: unknown): boolean {
+  if (!isPlainObject(tool)) return false;
+  return isNonEmptyString(tool["name"]) && isPlainObject(tool["input_schema"]);
+}
+
+function isOpenAITool(tool: unknown): boolean {
+  if (!isPlainObject(tool)) return false;
+  if (tool["type"] !== "function") return false;
+  const fn = tool["function"];
+  return isPlainObject(fn) && isNonEmptyString(fn["name"]);
+}
+
+const ANTHROPIC_ROLES = ["user", "assistant"] as const;
+const OPENAI_ROLES = ["system", "user", "assistant", "tool", "function"] as const;
+// OpenAI assistant turns issuing tool calls (and tool-result turns) may
+// carry `content: null`.
+const OPENAI_NULLABLE_CONTENT_ROLES = ["assistant", "tool", "function"] as const;
 
 export const anthropicAdapter: Adapter = {
   shape: "anthropic",
@@ -51,6 +94,31 @@ export const anthropicAdapter: Adapter = {
     "anthropic-version",
     "anthropic-beta",
   ],
+  validate(body, opts) {
+    const errors: string[] = [];
+    if (!isPlainObject(body)) {
+      return { ok: false, errors: ["request body must be a JSON object"] };
+    }
+    if (!isNonEmptyString(body["model"])) {
+      errors.push("model must be a non-empty string");
+    }
+    errors.push(
+      ...validateMessages(body["messages"], { allowedRoles: ANTHROPIC_ROLES }),
+    );
+    // Anthropic requires max_tokens.
+    if (body["max_tokens"] === undefined) {
+      errors.push("max_tokens is required");
+    } else {
+      errors.push(
+        ...validateOutputLimit(body["max_tokens"], "max_tokens", opts.maxOutputTokens),
+      );
+    }
+    errors.push(...validateOptionalBoolean(body["stream"], "stream"));
+    errors.push(...validateSystemPrompt(body["system"]));
+    errors.push(...validateTools(body["tools"], isAnthropicTool));
+    if (errors.length > 0) return { ok: false, errors };
+    return { ok: true, value: body };
+  },
   toLLMRequest(body) {
     const model = typeof body["model"] === "string" ? body["model"] : "";
     return {
@@ -94,6 +162,37 @@ export const openaiAdapter: Adapter = {
     "openai-organization",
     "openai-project",
   ],
+  validate(body, opts) {
+    const errors: string[] = [];
+    if (!isPlainObject(body)) {
+      return { ok: false, errors: ["request body must be a JSON object"] };
+    }
+    if (!isNonEmptyString(body["model"])) {
+      errors.push("model must be a non-empty string");
+    }
+    errors.push(
+      ...validateMessages(body["messages"], {
+        allowedRoles: OPENAI_ROLES,
+        nullableContentRoles: OPENAI_NULLABLE_CONTENT_ROLES,
+      }),
+    );
+    // Both are optional in OpenAI's API; validate bounds when present.
+    errors.push(
+      ...validateOutputLimit(body["max_tokens"], "max_tokens", opts.maxOutputTokens),
+    );
+    errors.push(
+      ...validateOutputLimit(
+        body["max_completion_tokens"],
+        "max_completion_tokens",
+        opts.maxOutputTokens,
+      ),
+    );
+    errors.push(...validateOptionalBoolean(body["stream"], "stream"));
+    errors.push(...validateStreamOptions(body["stream_options"]));
+    errors.push(...validateTools(body["tools"], isOpenAITool));
+    if (errors.length > 0) return { ok: false, errors };
+    return { ok: true, value: body };
+  },
   toLLMRequest(body) {
     const model = typeof body["model"] === "string" ? body["model"] : "";
     // Newer OpenAI models use max_completion_tokens; older ones use

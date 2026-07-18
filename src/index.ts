@@ -18,8 +18,13 @@ const maxRequestBodyBytes = process.env["MAX_REQUEST_BODY_BYTES"]
   ? Number(process.env["MAX_REQUEST_BODY_BYTES"])
   : undefined;
 
+const maxOutputTokens = process.env["MAX_OUTPUT_TOKENS"]
+  ? Number(process.env["MAX_OUTPUT_TOKENS"])
+  : undefined;
+
 
 if (!upstreamUrl && !openaiUpstreamUrl) {
+
   throw new Error(
     "at least one of UPSTREAM_URL or OPENAI_UPSTREAM_URL must be set",
   );
@@ -33,9 +38,11 @@ const { server, shutdown } = createGateway({
   ...(idleTimeoutMs !== undefined ? { idleTimeoutMs } : {}),
   ...(clientStallTimeoutMs !== undefined ? { clientStallTimeoutMs } : {}),
   ...(maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes } : {}),
+  ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
 
 
   pools: [
+
 
     {
       name: "default",

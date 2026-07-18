@@ -8,7 +8,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-18
+
+### Fixed
+
+- **Requests are now validated before admission.** Previously, the JSON
+  body was cast to `Record<string, unknown>` without checking it was
+  actually a non-array object, and `toMessages()` accepted any array
+  without validating its elements. This let malformed client input reach
+  the bulkhead and surface as an infrastructure failure rather than a
+  client error:
+  - A body of `null` (or any non-object JSON value) returned `500
+    internal` instead of `400`.
+  - `max_tokens: -1` (or any negative/non-integer/oversized output limit)
+    was forwarded upstream and came back as `502 upstream_error`.
+  - A message without `content` threw `content is not iterable` deep in
+    the adapter, surfacing as `502 upstream_error`.
+
+  Each provider adapter (`src/adapters.ts`) now exposes a `validate()`
+  that checks, before the bulkhead ever sees the request: the top-level
+  JSON value is a non-array object; `model` is a non-empty string;
+  `messages` is an array of valid `{ role, content }` entries (string or
+  content-block array content, valid roles); output-limit fields
+  (`max_tokens` / `max_completion_tokens`) are non-negative safe integers
+  below a configured ceiling (`maxOutputTokens`, default 200,000, see
+  `GatewayOptions.maxOutputTokens` / `MAX_OUTPUT_TOKENS`); Anthropic-
+  required (`max_tokens`) and OpenAI-required fields are present; and
+  `stream`, `stream_options`, `tools`, `system`, and multimodal content
+  blocks have valid shapes when present. Shared shape-checking helpers
+  live in the new `src/validation.ts`. Invalid client input now returns
+  `400` with `error.type: "invalid_request"` and an `errors` array
+  describing every problem found — never `500` or `502`.
+
+- **An unsupported `model` now returns `422`, not `404`.** The route
+  exists and the request body is well-formed; it simply doesn't match any
+  configured pool. `error.type` is now `"unsupported_model"`.
+
+- **Route matching now compares the request's pathname, not its complete
+  raw URL.** Previously `/v1/messages?x=1` incorrectly 404'd because the
+  router compared `req.url` verbatim against `"/v1/messages"`. Routing now
+  parses `new URL(req.url, base).pathname` for matching, so query strings
+  no longer affect routing.
+
 ## [0.5.0] - 2026-07-17
+
 
 ### Added
 
@@ -154,7 +197,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/janbalangue/torii-gateway/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/janbalangue/torii-gateway/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/janbalangue/torii-gateway/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/janbalangue/torii-gateway/compare/v0.3.0...v0.4.0
