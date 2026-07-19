@@ -3,7 +3,7 @@
   "version": "0.6.1",
   "private": true,
   "license": "UNLICENSED",
-  "description": "Admission-first AI gateway: fail-fast token-budget admission control in front of LLM providers. Built on async-bulkhead-llm.",
+  "description": "Tyr is a capacity guard for LLM traffic that reserves expected token capacity before execution, sheds requests that would overcommit a model pool, and reconciles reservations from live provider usage.",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -18,7 +18,7 @@
     "release:check": "npm run typecheck && npm test && npm run build && npm run smoke"
   },
   "dependencies": {
-    "async-bulkhead-llm": "^3.5.0"
+    "async-bulkhead-llm": "^3.6.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
