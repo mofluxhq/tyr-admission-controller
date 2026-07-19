@@ -1,6 +1,6 @@
-# tyr-gateway (private)
+# tyr-admission-controller (private)
 
-`tyr-gateway` is an admission-first proxy for Anthropic Messages and
+`tyr-admission-controller` is an admission-first proxy for Anthropic Messages and
 OpenAI Chat Completions. Before an upstream call starts, it reserves estimated
 input tokens plus the request's maximum output allowance against a model-routed
 bulkhead. Requests that do not fit are rejected immediately instead of queued
