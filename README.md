@@ -6,7 +6,7 @@ input tokens plus the request's maximum output allowance against a model-routed
 bulkhead. Requests that do not fit are rejected immediately instead of queued
 behind saturated capacity.
 
-Built on [`async-bulkhead-llm@3.5`](https://www.npmjs.com/package/async-bulkhead-llm),
+Built on [`async-bulkhead-llm@3.6`](https://www.npmjs.com/package/async-bulkhead-llm),
 which provides admission, usage reporting, refunds, priority reserves,
 rejection detail, and graceful draining.
 
