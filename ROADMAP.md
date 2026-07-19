@@ -1,6 +1,6 @@
-# Tyr Gateway Roadmap
+# Tyr Admission Controller Roadmap
 
-Tyr is an admission-first LLM gateway. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
+Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
 This roadmap prioritizes the shortest path from the current `v0.6.1` prototype to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
