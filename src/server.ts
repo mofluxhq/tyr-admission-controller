@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import {
   LLMBulkheadRejectedError,
   type LLMRejectReason,
-  type LLMRequest,
+  type LLMPriority,
 } from "async-bulkhead-llm";
 import { createPools, parsePriority, type PoolConfig, type Pools } from "./pools.js";
 import { anthropicAdapter, openaiAdapter, type Adapter } from "./adapters.js";
@@ -67,6 +67,20 @@ export type GatewayOptions = {
    * are controlled by `PoolConfig.outputCap`. Defaults to 200,000.
    */
   maxOutputTokens?: number;
+  /**
+   * Resolve admission priority from an authenticated/trusted request context.
+   * This is the preferred way to grant high-priority capacity.
+   */
+  resolvePriority?: (
+    req: IncomingMessage,
+  ) => LLMPriority | Promise<LLMPriority>;
+  /**
+   * Trust the raw client-supplied `x-priority` header. Disabled by default
+   * because an unauthenticated caller could otherwise self-assign the
+   * reserved high-priority tier. Enable only behind a trusted proxy that
+   * strips client copies and injects the header itself.
+   */
+  trustPriorityHeader?: boolean;
   pools: PoolConfig[];
 };
 
@@ -189,11 +203,66 @@ export function waitForDrain(
 }
 
 
+function assertOptionalInteger(
+  value: number | undefined,
+  field: string,
+  min: number,
+): void {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || value < min) {
+    throw new Error(`${field} must be a safe integer >= ${min}`);
+  }
+}
+
+function normalizeUpstreamUrl(
+  value: string | undefined,
+  field: string,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (value.trim().length === 0) throw new Error(`${field} must not be empty`);
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${field} must be a valid absolute URL`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${field} must use http: or https:`);
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error(`${field} must not include a query string or fragment`);
+  }
+  return parsed.toString().replace(/\/$/, "");
+}
+
+function validateGatewayOptions(opts: GatewayOptions): void {
+  assertOptionalInteger(opts.responseTimeoutMs, "responseTimeoutMs", 0);
+  assertOptionalInteger(opts.idleTimeoutMs, "idleTimeoutMs", 0);
+  assertOptionalInteger(opts.clientStallTimeoutMs, "clientStallTimeoutMs", 0);
+  assertOptionalInteger(opts.maxRequestBodyBytes, "maxRequestBodyBytes", 1);
+  assertOptionalInteger(opts.maxOutputTokens, "maxOutputTokens", 0);
+  if (
+    opts.resolvePriority !== undefined &&
+    typeof opts.resolvePriority !== "function"
+  ) {
+    throw new Error("resolvePriority must be a function");
+  }
+  if (
+    opts.trustPriorityHeader !== undefined &&
+    typeof opts.trustPriorityHeader !== "boolean"
+  ) {
+    throw new Error("trustPriorityHeader must be a boolean");
+  }
+}
 
 export function createGateway(opts: GatewayOptions) {
+  validateGatewayOptions(opts);
   const pools: Pools = createPools(opts.pools);
-  const anthropicUpstream = opts.upstreamUrl?.replace(/\/$/, "");
-  const openaiUpstream = opts.openaiUpstreamUrl?.replace(/\/$/, "");
+  const anthropicUpstream = normalizeUpstreamUrl(opts.upstreamUrl, "upstreamUrl");
+  const openaiUpstream = normalizeUpstreamUrl(
+    opts.openaiUpstreamUrl,
+    "openaiUpstreamUrl",
+  );
   const responseTimeoutMs = opts.responseTimeoutMs;
   const idleTimeoutMs = opts.idleTimeoutMs;
   // Bounds how long the gateway waits for a backpressured client to drain
@@ -205,6 +274,8 @@ export function createGateway(opts: GatewayOptions) {
   const maxRequestBodyBytes =
     opts.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
   const maxOutputTokens = opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  const resolvePriority = opts.resolvePriority;
+  const trustPriorityHeader = opts.trustPriorityHeader ?? false;
 
 
 
@@ -259,14 +330,24 @@ export function createGateway(opts: GatewayOptions) {
         return;
       }
 
-      // Admission view of the (now-validated) request.
-      const llmRequest: LLMRequest = adapter.toLLMRequest(body);
+      // Complete token-bearing admission projection of the validated request.
+      const llmRequest = adapter.toAdmissionRequest(body);
 
-      const priority = parsePriority(
-        typeof req.headers["x-priority"] === "string"
-          ? req.headers["x-priority"]
-          : undefined,
-      );
+      let priority: LLMPriority = "normal";
+      if (resolvePriority !== undefined) {
+        priority = await resolvePriority(req);
+        if (priority !== "normal" && priority !== "high") {
+          throw new Error(
+            `resolvePriority returned invalid priority: ${String(priority)}`,
+          );
+        }
+      } else if (trustPriorityHeader) {
+        priority = parsePriority(
+          typeof req.headers["x-priority"] === "string"
+            ? req.headers["x-priority"]
+            : undefined,
+        );
+      }
       const wantsStream = adapter.isStreamRequested(body);
 
       // Abort upstream work if the client disconnects. Response-timeout and

@@ -6,6 +6,7 @@
  * the pool/bulkhead admission machinery.
  */
 import type { LLMRequest, TokenUsage } from "async-bulkhead-llm";
+import { createAdmissionRequest } from "./admission.js";
 import { createSSEUsageExtractor, type UsageObservation } from "./sse.js";
 import { createOpenAISSEUsageExtractor } from "./sse-openai.js";
 import {
@@ -39,13 +40,13 @@ export type Adapter = {
   forwardHeaders: readonly string[];
   /**
    * Validates the parsed JSON body against this provider's required shape.
-   * Must be called — and must return `ok: true` — before `toLLMRequest` /
+   * Must be called — and must return `ok: true` — before `toAdmissionRequest` /
    * `isStreamRequested` are trusted with the body; those functions assume
    * a validated shape and use defensive fallbacks only as a last resort.
    */
   validate(body: unknown, opts: { maxOutputTokens: number }): ValidationResult;
-  /** Extract the minimal admission view of the request body. */
-  toLLMRequest(body: Record<string, unknown>): LLMRequest;
+  /** Build the complete token-bearing admission projection. */
+  toAdmissionRequest(body: Record<string, unknown>): LLMRequest;
   /** Whether the client requested a streaming response. */
   isStreamRequested(body: Record<string, unknown>): boolean;
   /** Parse actual usage from a complete (non-streaming) JSON response body. */
@@ -55,16 +56,6 @@ export type Adapter = {
     onUsage: (usage: UsageObservation) => void,
   ): StreamExtractor;
 };
-
-function toMessages(body: Record<string, unknown>): LLMRequest["messages"] {
-  if (!Array.isArray(body["messages"])) return [];
-  return (body["messages"] as unknown[]).filter(
-    (m): m is LLMRequest["messages"][number] =>
-      isPlainObject(m) &&
-      typeof m["role"] === "string" &&
-      (typeof m["content"] === "string" || Array.isArray(m["content"])),
-  );
-}
 
 function isAnthropicTool(tool: unknown): boolean {
   if (!isPlainObject(tool)) return false;
@@ -119,15 +110,20 @@ export const anthropicAdapter: Adapter = {
     if (errors.length > 0) return { ok: false, errors };
     return { ok: true, value: body };
   },
-  toLLMRequest(body) {
+  toAdmissionRequest(body) {
     const model = typeof body["model"] === "string" ? body["model"] : "";
-    return {
+    return createAdmissionRequest({
       model,
-      messages: toMessages(body),
       ...(typeof body["max_tokens"] === "number"
-        ? { max_tokens: body["max_tokens"] }
+        ? { maxTokens: body["max_tokens"] }
         : {}),
-    };
+      prompt: {
+        system: body["system"],
+        messages: body["messages"],
+        tools: body["tools"],
+        tool_choice: body["tool_choice"],
+      },
+    });
   },
   isStreamRequested(body) {
     return body["stream"] === true;
@@ -193,7 +189,7 @@ export const openaiAdapter: Adapter = {
     if (errors.length > 0) return { ok: false, errors };
     return { ok: true, value: body };
   },
-  toLLMRequest(body) {
+  toAdmissionRequest(body) {
     const model = typeof body["model"] === "string" ? body["model"] : "";
     // Newer OpenAI models use max_completion_tokens; older ones use
     // max_tokens. Prefer the former when both are present.
@@ -203,11 +199,19 @@ export const openaiAdapter: Adapter = {
         : typeof body["max_tokens"] === "number"
           ? body["max_tokens"]
           : undefined;
-    return {
+    return createAdmissionRequest({
       model,
-      messages: toMessages(body),
-      ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
-    };
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
+      prompt: {
+        messages: body["messages"],
+        tools: body["tools"],
+        tool_choice: body["tool_choice"],
+        functions: body["functions"],
+        function_call: body["function_call"],
+        response_format: body["response_format"],
+        prediction: body["prediction"],
+      },
+    });
   },
   isStreamRequested(body) {
     return body["stream"] === true;

@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-19
+
+### Security
+
+- Client-supplied `x-priority: high` is no longer trusted by default.
+  High-priority admission can be derived with `GatewayOptions.resolvePriority`,
+  or raw header trust can be explicitly enabled with
+  `trustPriorityHeader` / `TRUST_X_PRIORITY_HEADER=true` only behind a trusted
+  proxy. This prevents unauthenticated callers from self-assigning reserved
+  capacity.
+
+### Fixed
+
+- Admission estimates now include provider-specific prompt material that was
+  previously forwarded upstream without consuming budget: Anthropic `system`,
+  `tools`, and `tool_choice`; OpenAI tool/function schemas and calls,
+  `response_format`, `prediction`, and null-content assistant/tool turns.
+  Opaque image, audio, document, file, and video blocks now receive a
+  conservative 2,048-token minimum surcharge while inline binary data is
+  omitted from literal text estimation.
+- Startup configuration now fails before listening when URLs, ports, numeric
+  ranges, pool names, model prefixes, duplicate names/prefixes, budgets, or
+  priority reserves are invalid. Environment parsing no longer accepts `NaN`,
+  fractional, negative, or out-of-range values silently.
+- `npm start` is compatible with the declared Node.js 20+ engine: it builds and
+  starts `dist/index.js` instead of using Node's experimental TypeScript
+  stripping on `src/index.ts`. The process banner now says `tyr-gateway`.
+
+### Changed
+
+- Documentation now describes the token budget accurately as an admission-time
+  ceiling. Reported usage overruns can temporarily raise the active hold above
+  the configured budget; the gateway blocks new admissions but does not abort
+  the already-running request.
+- Added `npm run smoke` and `npm run release:check`; CI now imports the built
+  runtime on every supported Node version.
+- Completed the project rename and upgraded `async-bulkhead-llm` from 3.4.1 to
+  3.5.0.
+
 ## [0.6.0] - 2026-07-18
 
 ### Fixed
@@ -197,12 +236,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/torii-gateway/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/janbalangue/torii-gateway/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/janbalangue/torii-gateway/compare/v0.4.1...v0.5.0
-[0.4.1]: https://github.com/janbalangue/torii-gateway/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/janbalangue/torii-gateway/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/janbalangue/torii-gateway/compare/v0.2.0...v0.3.0
-
-[0.2.0]: https://github.com/janbalangue/torii-gateway/releases/tag/v0.2.0
-[0.1.0]: https://github.com/janbalangue/torii-gateway/compare/72236af...96e0097
+[Unreleased]: https://github.com/janbalangue/tyr-gateway/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/janbalangue/tyr-gateway/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/janbalangue/tyr-gateway/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/janbalangue/tyr-gateway/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/janbalangue/tyr-gateway/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/janbalangue/tyr-gateway/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/janbalangue/tyr-gateway/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/janbalangue/tyr-gateway/releases/tag/v0.2.0
+[0.1.0]: https://github.com/janbalangue/tyr-gateway/compare/72236af...96e0097

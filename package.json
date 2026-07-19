@@ -1,19 +1,24 @@
 {
-  "name": "torii-gateway",
-  "version": "0.6.0",
+  "name": "tyr-gateway",
+  "version": "0.6.1",
   "private": true,
   "license": "UNLICENSED",
   "description": "Admission-first AI gateway: fail-fast token-budget admission control in front of LLM providers. Built on async-bulkhead-llm.",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start": "node --experimental-strip-types src/index.ts"
+    "prestart": "npm run build",
+    "start": "node dist/index.js",
+    "smoke": "node --input-type=module -e \"await import('./dist/server.js'); await import('./dist/adapters.js');\"",
+    "release:check": "npm run typecheck && npm test && npm run build && npm run smoke"
   },
   "dependencies": {
-    "async-bulkhead-llm": "^3.4.1"
+    "async-bulkhead-llm": "^3.5.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

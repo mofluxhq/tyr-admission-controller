@@ -6,7 +6,12 @@ import {
   type ServerResponse,
 } from "node:http";
 import { connect as netConnect, type AddressInfo } from "node:net";
-import { createGateway, waitForDrain } from "../src/server.js";
+import {
+  createGateway,
+  waitForDrain,
+  type GatewayOptions,
+} from "../src/server.js";
+import { loadRuntimeConfig } from "../src/config.js";
 
 // Parses one complete HTTP/1.1 response (status line + headers + body,
 // using Content-Length to know where the body ends) off the front of
@@ -232,6 +237,8 @@ function startGateway(
     responseTimeoutMs?: number;
     idleTimeoutMs?: number;
     maxRequestBodyBytes?: number;
+    trustPriorityHeader?: boolean;
+    resolvePriority?: GatewayOptions["resolvePriority"];
   } = {},
 ): Promise<{ server: Server; url: string; shutdown: () => Promise<void> }> {
   const { server, shutdown } = createGateway({
@@ -245,6 +252,12 @@ function startGateway(
       : {}),
     ...(opts.maxRequestBodyBytes !== undefined
       ? { maxRequestBodyBytes: opts.maxRequestBodyBytes }
+      : {}),
+    ...(opts.trustPriorityHeader !== undefined
+      ? { trustPriorityHeader: opts.trustPriorityHeader }
+      : {}),
+    ...(opts.resolvePriority !== undefined
+      ? { resolvePriority: opts.resolvePriority }
       : {}),
     pools: [
       {
@@ -355,14 +368,46 @@ describe("admission-gateway", () => {
     }
   });
 
-  it("admits x-priority: high when normal traffic is budget-blocked", async () => {
-
-    // budget 2400, reserve 1200 → normal ceiling 1200 (one fits, two don't).
+  it("ignores an untrusted client x-priority header by default", async () => {
     const gw = await startGateway({
       maxConcurrent: 10,
       budget: 2400,
       highPriorityReserve: 1200,
     });
+    try {
+      const p1 = fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("slow one")),
+      });
+      await new Promise((r) => setTimeout(r, 80));
+
+      const spoofedHigh = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-priority": "high",
+        },
+        body: JSON.stringify(msg("hi")),
+      });
+      expect(spoofedHigh.status).toBe(429);
+      expect(spoofedHigh.headers.get("x-admission-reason")).toBe("budget_limit");
+      await p1;
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("admits x-priority: high only when the header is explicitly trusted", async () => {
+    // budget 2400, reserve 1200 → normal ceiling 1200 (one fits, two don't).
+    const gw = await startGateway(
+      {
+        maxConcurrent: 10,
+        budget: 2400,
+        highPriorityReserve: 1200,
+      },
+      { trustPriorityHeader: true },
+    );
     try {
       const p1 = fetch(`${gw.url}/v1/messages`, {
         method: "POST",
@@ -389,6 +434,156 @@ describe("admission-gateway", () => {
       expect(high.status).toBe(200);
 
       await p1;
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("supports authenticated priority resolution without trusting the raw header", async () => {
+    const gw = await startGateway(
+      {
+        maxConcurrent: 10,
+        budget: 2400,
+        highPriorityReserve: 1200,
+      },
+      {
+        resolvePriority: (req) =>
+          req.headers.authorization === "Bearer premium" ? "high" : "normal",
+      },
+    );
+    try {
+      const p1 = fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("slow one")),
+      });
+      await new Promise((r) => setTimeout(r, 80));
+
+      const premium = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer premium",
+        },
+        body: JSON.stringify(msg("hi")),
+      });
+      expect(premium.status).toBe(200);
+      await p1;
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("charges Anthropic system prompts against admission budget", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 400 });
+    try {
+      const small = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi", { max_tokens: 100 })),
+      });
+      expect(small.status).toBe(200);
+
+      const largeSystem = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(
+          msg("hi", { max_tokens: 100, system: "policy ".repeat(500) }),
+        ),
+      });
+      expect(largeSystem.status).toBe(429);
+      expect(largeSystem.headers.get("x-admission-reason")).toBe("budget_limit");
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("charges OpenAI tool schemas and null-content tool calls against admission budget", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 500 });
+    try {
+      const withToolSchema = await fetch(`${gw.url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "lookup",
+                description: "schema ".repeat(500),
+                parameters: { type: "object", properties: {} },
+              },
+            },
+          ],
+        }),
+      });
+      expect(withToolSchema.status).toBe(429);
+      expect(withToolSchema.headers.get("x-admission-reason")).toBe("budget_limit");
+
+      const withToolCall = await fetch(`${gw.url}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          max_tokens: 100,
+          messages: [
+            { role: "user", content: "hi" },
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: {
+                    name: "lookup",
+                    arguments: JSON.stringify({ query: "x".repeat(2_000) }),
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      expect(withToolCall.status).toBe(429);
+      expect(withToolCall.headers.get("x-admission-reason")).toBe("budget_limit");
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("applies a conservative token surcharge to opaque media blocks", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 1_500 });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "describe this" },
+                {
+                  type: "image",
+                  source: {
+                    type: "base64",
+                    media_type: "image/png",
+                    data: "aGVsbG8=",
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(429);
+      expect(res.headers.get("x-admission-reason")).toBe("budget_limit");
     } finally {
       gw.server.close();
     }
@@ -1328,6 +1523,61 @@ describe("admission-gateway", () => {
       socket.destroy();
     }
   });
+
+  it("rejects invalid gateway and pool configuration before listening", () => {
+    const basePool = {
+      name: "default",
+      modelPrefixes: ["claude"],
+      model: "claude-sonnet-4",
+      maxConcurrent: 1,
+    };
+
+    expect(() =>
+      createGateway({ upstreamUrl: "ftp://example.com", pools: [basePool] }),
+    ).toThrow(/http: or https:/);
+    expect(() =>
+      createGateway({
+        upstreamUrl: "https://example.com",
+        maxRequestBodyBytes: 0,
+        pools: [basePool],
+      }),
+    ).toThrow(/maxRequestBodyBytes/);
+    expect(() =>
+      createGateway({
+        upstreamUrl: "https://example.com",
+        pools: [
+          basePool,
+          {
+            ...basePool,
+            name: "other",
+            modelPrefixes: ["claude"],
+          },
+        ],
+      }),
+    ).toThrow(/duplicate model prefix/);
+  });
+
+  it("validates environment configuration with actionable errors", () => {
+    expect(() =>
+      loadRuntimeConfig({
+        UPSTREAM_URL: "https://example.com",
+        MAX_CONCURRENT: "0",
+      }),
+    ).toThrow(/MAX_CONCURRENT/);
+    expect(() =>
+      loadRuntimeConfig({
+        UPSTREAM_URL: "https://example.com",
+        PORT: "70000",
+      }),
+    ).toThrow(/PORT/);
+    expect(() =>
+      loadRuntimeConfig({
+        UPSTREAM_URL: "https://example.com",
+        TRUST_X_PRIORITY_HEADER: "sometimes",
+      }),
+    ).toThrow(/TRUST_X_PRIORITY_HEADER/);
+  });
+
 });
 
 

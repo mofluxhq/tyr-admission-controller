@@ -3,6 +3,7 @@ import {
   type LLMPriority,
   type LLMStats,
 } from "async-bulkhead-llm";
+import { createAdmissionTokenEstimator } from "./admission.js";
 
 export type PoolConfig = {
   /** Pool name for stats and logs. */
@@ -16,19 +17,16 @@ export type PoolConfig = {
   model: string;
   maxConcurrent: number;
   /**
-   * In-flight token ceiling. Tri-state:
+   * Admission-time in-flight token ceiling. Tri-state:
    *  - omitted: token-aware admission is disabled entirely (unlimited).
    *  - 0: a legal, intentional "admit nothing" pool — every budget-gated
    *    request is rejected (429, `x-admission-reason: budget_limit`)
-   *    immediately, without ever calling upstream. Useful for taking a pool
-   *    out of rotation (e.g. during an incident) without deleting it from
-   *    config. Requires async-bulkhead-llm >=3.3.1 — under 3.2.0 this threw
-   *    at construction (`assertPositiveInteger`); 3.3.1 made 0 a valid
-   *    budget that simply never admits.
-   *  - N > 0: the actual in-flight token ceiling.
+   *    immediately, without ever calling upstream.
+   *  - N > 0: the admission-time in-flight token ceiling. Usage overruns
+   *    reported after admission may temporarily raise the live hold above
+   *    this ceiling; new requests remain blocked until usage releases.
    */
   budget?: number;
-
   /** Budget headroom reserved for priority: "high" requests. */
   highPriorityReserve?: number;
   /** Fallback output reservation when max_tokens is absent. */
@@ -52,12 +50,79 @@ export type Pools = {
   drain(): Promise<void>;
 };
 
+function assertNonEmptyString(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${field} must be a non-empty string`);
+  }
+}
+
+function assertInteger(
+  value: unknown,
+  field: string,
+  opts: { min: number },
+): asserts value is number {
+  if (!Number.isSafeInteger(value) || (value as number) < opts.min) {
+    throw new Error(`${field} must be a safe integer >= ${opts.min}`);
+  }
+}
+
+function validatePoolConfigs(configs: PoolConfig[]): void {
+  if (!Array.isArray(configs) || configs.length === 0) {
+    throw new Error("at least one pool is required");
+  }
+
+  const names = new Set<string>();
+  const prefixes = new Map<string, string>();
+  configs.forEach((config, index) => {
+    const base = `pools[${index}]`;
+    assertNonEmptyString(config.name, `${base}.name`);
+    if (names.has(config.name)) {
+      throw new Error(`duplicate pool name: ${config.name}`);
+    }
+    names.add(config.name);
+
+    assertNonEmptyString(config.model, `${base}.model`);
+    assertInteger(config.maxConcurrent, `${base}.maxConcurrent`, { min: 1 });
+
+    if (!Array.isArray(config.modelPrefixes) || config.modelPrefixes.length === 0) {
+      throw new Error(`${base}.modelPrefixes must be a non-empty array`);
+    }
+    config.modelPrefixes.forEach((prefix, prefixIndex) => {
+      assertNonEmptyString(prefix, `${base}.modelPrefixes[${prefixIndex}]`);
+      const existing = prefixes.get(prefix);
+      if (existing !== undefined) {
+        throw new Error(
+          `duplicate model prefix ${JSON.stringify(prefix)} in pools ${existing} and ${config.name}`,
+        );
+      }
+      prefixes.set(prefix, config.name);
+    });
+
+    if (config.budget !== undefined) {
+      assertInteger(config.budget, `${base}.budget`, { min: 0 });
+    }
+    if (config.highPriorityReserve !== undefined) {
+      assertInteger(config.highPriorityReserve, `${base}.highPriorityReserve`, {
+        min: 0,
+      });
+      if (config.budget === undefined) {
+        throw new Error(`${base}.highPriorityReserve requires ${base}.budget`);
+      }
+      if (config.highPriorityReserve > config.budget) {
+        throw new Error(`${base}.highPriorityReserve must not exceed ${base}.budget`);
+      }
+    }
+    if (config.outputCap !== undefined) {
+      assertInteger(config.outputCap, `${base}.outputCap`, { min: 0 });
+    }
+  });
+}
 
 export function createPools(configs: PoolConfig[]): Pools {
-  if (configs.length === 0) throw new Error("at least one pool is required");
+  validatePoolConfigs(configs);
 
   const pools: { prefixes: string[]; pool: Pool }[] = configs.map((c) => ({
-    prefixes: c.modelPrefixes,
+    prefixes: [...c.modelPrefixes],
     pool: {
       name: c.name,
       bulkhead: createLLMBulkhead({
@@ -67,12 +132,11 @@ export function createPools(configs: PoolConfig[]): Pools {
           ? {
               tokenBudget: {
                 budget: c.budget,
+                estimator: createAdmissionTokenEstimator(c.model, c.outputCap),
                 ...(c.highPriorityReserve !== undefined
                   ? { highPriorityReserve: c.highPriorityReserve }
                   : {}),
-                ...(c.outputCap !== undefined
-                  ? { outputCap: c.outputCap }
-                  : {}),
+                ...(c.outputCap !== undefined ? { outputCap: c.outputCap } : {}),
               },
             }
           : {}),
@@ -83,11 +147,11 @@ export function createPools(configs: PoolConfig[]): Pools {
   function select(model: string): Pool | undefined {
     let best: Pool | undefined;
     let bestLen = -1;
-    for (const { prefixes, pool } of pools) {
-      for (const p of prefixes) {
-        if (model.startsWith(p) && p.length > bestLen) {
+    for (const { prefixes: modelPrefixes, pool } of pools) {
+      for (const prefix of modelPrefixes) {
+        if (model.startsWith(prefix) && prefix.length > bestLen) {
           best = pool;
-          bestLen = p.length;
+          bestLen = prefix.length;
         }
       }
     }
@@ -101,22 +165,12 @@ export function createPools(configs: PoolConfig[]): Pools {
   }
 
   async function drain(): Promise<void> {
-    // async-bulkhead-llm's `drain()` alone only waits for in-flight work
-    // to finish — it does NOT stop new admissions. The library's own docs
-    // say to "compose as close() -> drain()" for graceful shutdown:
-    // `close()` stops admitting new requests immediately (rejecting with
-    // reason "shutdown"), and `drain()` then resolves once all in-flight
-    // work has completed. Without the `close()` call here, a request that
-    // reaches the handler during a "drain" would still be admitted
-    // normally instead of getting the documented 503.
     for (const { pool } of pools) pool.bulkhead.close();
     await Promise.all(pools.map(({ pool }) => pool.bulkhead.drain()));
   }
 
-
   return { select, stats, drain };
 }
-
 
 export function parsePriority(header: string | undefined): LLMPriority {
   return header === "high" ? "high" : "normal";

@@ -1,178 +1,182 @@
-# torii-gateway (private)
+# tyr-gateway (private)
 
-An **admission-first** AI gateway. Unlike gateways that do windowed rate
-limiting and after-the-fact spend tracking, this one enforces a true in-flight
-**token-budget ceiling** at admission: every request reserves its estimated
-input + `max_tokens` before it runs, refunds the surplus as real usage arrives
-(including mid-stream), and **fails fast** the moment the ceiling is hit — no
-retry storms, no queue collapse.
+`tyr-gateway` is an admission-first proxy for Anthropic Messages and
+OpenAI Chat Completions. Before an upstream call starts, it reserves estimated
+input tokens plus the request's maximum output allowance against a model-routed
+bulkhead. Requests that do not fit are rejected immediately instead of queued
+behind saturated capacity.
 
-Built on [`async-bulkhead-llm`](https://www.npmjs.com/package/async-bulkhead-llm)
-(≥ 3.2.0), which provides the reserve → report → refund → release lifecycle,
-priority admission, and rejection detail.
+Built on [`async-bulkhead-llm@3.5`](https://www.npmjs.com/package/async-bulkhead-llm),
+which provides admission, usage reporting, refunds, priority reserves,
+rejection detail, and graceful draining.
 
-> **Status:** v0.2, single-process. Cluster-wide budget coordination is
-> designed but not implemented — see `DESIGN-distributed-token-budget.md`.
-> **Private / UNLICENSED.** Not for redistribution.
+> **Status:** v0.6.1, single-process, private / UNLICENSED.
 
-## What it does
+## Capacity semantics
 
-- **Proxies** `POST /v1/messages` (Anthropic-shaped) and
-  `POST /v1/chat/completions` (OpenAI-shaped) to their respective upstreams,
-  passing auth headers through verbatim. The gateway holds no provider keys.
-  Each route proxies to its own upstream and wire shape — there is no
-  cross-format translation between the two.
-- **Admits** each request against a model-routed pool with a fail-fast token
-  budget and concurrency limit. Both endpoints share the same pool/bulkhead
-  admission machinery, so a pool can serve models from either provider.
-- **Reports usage mid-stream** by parsing SSE events as they arrive, so a
-  long-running stream's budget hold is corrected live:
-  - Anthropic: `message_start` / `message_delta` events (partial usage
-    available early — see `src/sse.ts`).
-  - OpenAI: cumulative `usage` on the final `chat.completion.chunk`, present
-    only when the client sets `stream_options: { include_usage: true }` (see
-    `src/sse-openai.ts`). Without it, no mid-stream signal is available and
-    the pre-admission reservation is used at release.
-- **Caps request body buffering.** Incoming request bodies are buffered up to
-  `maxRequestBodyBytes` (default 1 MiB); anything larger is rejected with
-  `413 Payload Too Large` before it consumes further memory.
-- **Validates requests before admission.** Each route's provider adapter
-  validates the parsed JSON body's shape (non-array object, required fields,
-  message roles/content, `stream`/`tools`/`system` shapes, output-limit
-  bounds) before the request is ever handed to the bulkhead. Malformed
-  client input is rejected with `400` — it is never treated as an
-  infrastructure failure (`500`/`502`).
+A pool's `budget` is an **admission-time in-flight ceiling**. Each admitted
+request reserves estimated input plus `max_tokens` (or the pool's `outputCap`).
+Actual provider usage refunds unused capacity at completion, and streaming
+usage can correct the hold while the response is still running.
 
-- **Applies streaming backpressure.** When proxying a streaming response, the
-  gateway honors `res.write()`'s return value and pauses pulling further
-  chunks from the upstream body whenever the client's write buffer is full,
-  resuming once it drains. A fast upstream paired with a slow-reading client
-  can no longer force the gateway to buffer an entire response in memory.
-- **Rejects** with `429`/`503`/`504` plus an `x-admission-reason` header and a
+Usage reported after admission can exceed the original estimate. In that case,
+`async-bulkhead-llm` expands the active hold, so `inFlightTokens` may temporarily
+exceed `budget`. The gateway blocks new admissions until capacity releases; it
+does not abort the already-running request. This is deliberate overrun
+accounting, not a strict post-admission kill switch.
 
-  JSON `detail` capacity snapshot — no fabricated `Retry-After`.
-- **Routes** by longest model-prefix match across pools.
-- **Shuts down gracefully.** `SIGTERM`/`SIGINT` stop the server from accepting
-  new connections and drain every pool's bulkhead — in-flight requests finish
-  normally while new admissions are rejected with `503` (`x-admission-reason:
-  shutdown`) until drain completes.
+Admission estimation includes the provider-specific prompt material that the
+gateway forwards upstream:
 
+- Anthropic `system`, `messages`, `tools`, and `tool_choice`.
+- OpenAI `messages`, tool/function definitions and calls, `response_format`,
+  and `prediction`.
+- Null-content OpenAI assistant/tool turns, including their tool-call arguments.
+- A conservative 2,048-token minimum surcharge for each opaque image, audio,
+  document, file, or video block. Inline binary payload text is not counted as
+  literal prompt text.
 
-## Endpoints
+The estimate remains a load-shedding approximation, not billing-grade token
+accounting.
+
+## Routes
 
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/v1/messages` | Admission-gated proxy to the Anthropic-shaped upstream |
 | POST | `/v1/chat/completions` | Admission-gated proxy to the OpenAI-shaped upstream |
-| GET | `/stats` | Per-pool live stats (budget, slots, refunds) |
+| GET | `/stats` | Per-pool live stats |
 | GET | `/healthz` | Liveness |
 
-Each route is enabled only when its corresponding upstream URL is configured
-(`UPSTREAM_URL` for Anthropic, `OPENAI_UPSTREAM_URL` for OpenAI). Requesting a
-route with no configured upstream returns `404`. A request whose `model`
-doesn't match any configured pool returns `422` (`error.type:
-"unsupported_model"`) — the route exists and the payload is well-formed, it
-simply isn't routed anywhere. A malformed request body (wrong JSON shape,
-missing required fields, invalid roles/content, out-of-range `max_tokens`,
-etc.) returns `400` (`error.type: "invalid_request"`) with an `errors` array
-describing every problem found.
+Each provider route is enabled only when its upstream URL is configured.
+Malformed requests return `400`; unsupported models return `422`; admission
+rejections return `429`, `503`, or `504` with `x-admission-reason` and a
+capacity snapshot. The gateway never fabricates `Retry-After`.
 
+Provider authentication headers are forwarded verbatim. The gateway stores no
+provider keys.
 
-Request headers: `x-priority: high` opts a request into the high-priority
-budget tier (see `highPriorityReserve`). Provider auth headers are forwarded
-as-is: `x-api-key` / `authorization` / `anthropic-version` / `anthropic-beta`
-for Anthropic, `authorization` / `openai-organization` / `openai-project` for
-OpenAI.
+## Priority safety
+
+Client-supplied `x-priority` is ignored by default. This prevents an
+unauthenticated caller from assigning itself the high-priority budget reserve.
+
+For application integrations, supply `GatewayOptions.resolvePriority` and
+derive priority from an authenticated identity or trusted policy:
+
+```ts
+createGateway({
+  resolvePriority: async (req) => {
+    const identity = await authenticate(req);
+    return identity.plan === "interactive" ? "high" : "normal";
+  },
+  // ...upstreams and pools
+});
+```
+
+The env-configured entrypoint can opt into raw-header trust with
+`TRUST_X_PRIORITY_HEADER=true`. Enable that only behind a trusted proxy that
+removes client-provided copies and injects its own header.
 
 ## Run
 
+Node.js 20 or newer is supported.
+
 ```bash
-npm install
-npm test          # mock upstreams, no network
-npm run build
+npm ci
+npm run release:check
+
 UPSTREAM_URL=https://api.anthropic.com \
 OPENAI_UPSTREAM_URL=https://api.openai.com \
 TOKEN_BUDGET=500000 MAX_CONCURRENT=50 \
 npm start
 ```
 
-See `.env.example` for configuration. At least one of `UPSTREAM_URL` /
-`OPENAI_UPSTREAM_URL` must be set.
+`npm start` runs the TypeScript build first and starts `dist/index.js`; it does
+not depend on Node's experimental TypeScript stripping.
+
+At least one of `UPSTREAM_URL` or `OPENAI_UPSTREAM_URL` must be set. Invalid
+URLs, ports, numeric ranges, pool names, duplicate model prefixes, and reserve
+relationships fail during startup before the server begins listening.
 
 ## Configuration
 
-`src/index.ts` wires a single "default" pool from env vars for convenience.
-For real deployments, define pools explicitly in code — one pool per model (or
-model family) is the intended pattern, since the token estimator is
-model-aware:
+`src/index.ts` loads one default pool from environment variables. For real
+deployments, define pools in code, preferably one per model or closely related
+model family:
 
 ```ts
 createGateway({
   upstreamUrl: "https://api.anthropic.com",
   openaiUpstreamUrl: "https://api.openai.com",
-  responseTimeoutMs: 30_000, // optional — upstream must send headers within 30s
-  idleTimeoutMs: 30_000,     // optional — stream must not stall for 30s between chunks
-  maxRequestBodyBytes: 1_048_576, // optional, defaults to 1 MiB
-  maxOutputTokens: 200_000,  // optional — ceiling for max_tokens/max_completion_tokens
+  responseTimeoutMs: 30_000,
+  idleTimeoutMs: 30_000,
+  clientStallTimeoutMs: 30_000,
+  maxRequestBodyBytes: 1_048_576,
+  maxOutputTokens: 200_000,
   pools: [
-
-
-    { name: "sonnet", modelPrefixes: ["claude-sonnet-4"], model: "claude-sonnet-4-5",
-      maxConcurrent: 40, budget: 400_000, highPriorityReserve: 80_000 },
-    { name: "haiku",  modelPrefixes: ["claude-haiku-4"],  model: "claude-haiku-4-5",
-      maxConcurrent: 80, budget: 200_000 },
-    { name: "gpt",    modelPrefixes: ["gpt-4o", "gpt-5"], model: "gpt-4o",
-      maxConcurrent: 60, budget: 300_000 },
+    {
+      name: "sonnet",
+      modelPrefixes: ["claude-sonnet-4"],
+      model: "claude-sonnet-4-5",
+      maxConcurrent: 40,
+      budget: 400_000,
+      highPriorityReserve: 80_000,
+    },
+    {
+      name: "gpt",
+      modelPrefixes: ["gpt-4o", "gpt-5"],
+      model: "gpt-4o",
+      maxConcurrent: 60,
+      budget: 300_000,
+    },
   ],
 });
 ```
 
-`upstreamUrl` and `openaiUpstreamUrl` are both optional — omit either to
-disable its route entirely (e.g. an Anthropic-only or OpenAI-only deployment).
+`budget` is tri-state: omit it to disable token-budget admission, set it to `0`
+to reject all budget-gated calls, or set a positive integer for an active
+ceiling. `highPriorityReserve` requires a configured budget and cannot exceed
+it. Duplicate pool names and duplicate model prefixes are rejected.
 
-`maxRequestBodyBytes` caps how much of an incoming request body the gateway
-will buffer into memory before responding `413 Payload Too Large`; it defaults
-to 1 MiB (1,048,576 bytes) and can be overridden via the `MAX_REQUEST_BODY_BYTES`
-env var when using the default `src/index.ts` entrypoint.
+See `.env.example` for the complete env-configured entrypoint settings.
 
-`maxOutputTokens` is a sanity ceiling for output-limit fields (`max_tokens` /
-`max_completion_tokens`); requests specifying a value above it are rejected
-with `400` before admission. It defaults to 200,000 and can be overridden via
-the `MAX_OUTPUT_TOKENS` env var when using the default `src/index.ts`
-entrypoint. This is distinct from a pool's `outputCap`, which controls the
-default output-token reservation used for admission accounting.
+## Proxy behavior
 
+Request bodies are buffered up to `maxRequestBodyBytes` (1 MiB by default).
+Streaming responses honor downstream backpressure, abort upstream work when
+the client disconnects, and support separate response-header, upstream-idle,
+and client-stall timeouts. Non-streaming responses are buffered and returned
+with an explicit `content-length`.
 
-## Known limitations (v0.2)
+`SIGTERM` and `SIGINT` stop new admissions, close the HTTP server, and drain
+in-flight bulkhead work. Requests reaching an existing keep-alive connection
+during shutdown receive `503` with `x-admission-reason: shutdown`.
 
-- **Single-process budget.** N replicas enforce N × budget. Divide by replica
-  count manually until the distributed ledger lands.
-- **SSE parsing is unverified against live APIs.** The `message_start`/
-  `message_delta` usage shapes in `src/sse.ts` (Anthropic) and the
-  `chat.completion.chunk` usage shape in `src/sse-openai.ts` (OpenAI) are
-  based on documented formats; confirm against the current provider APIs
-  before relying on mid-stream refunds in production. If a shape is wrong,
-  streams still proxy correctly — only the mid-stream refund is missed, and
-  release-time usage still applies.
-- **No format translation.** The gateway does not convert between Anthropic
-  and OpenAI wire shapes — each route proxies verbatim to its own upstream.
-  A client speaking the OpenAI shape must hit `/v1/chat/completions`, and an
-  Anthropic-shaped client must hit `/v1/messages`.
-- **No auth, no persistence, no Gemini adapter yet.**
-- **`wouldAdmit` / stats are per-process** snapshots.
+## Known limitations
+
+- Budgets and stats are per process. N replicas can admit approximately N times
+  a per-replica budget unless capacity is partitioned or coordinated outside
+  this gateway.
+- SSE usage extraction should be verified against the exact provider/API
+  versions used in production. Missing usage affects refunds, not proxying.
+- There is no Anthropic/OpenAI format translation.
+- `/stats` and provider routes have no built-in authentication or persistence.
+- There is no active-stream termination policy for usage overruns.
 
 ## Layout
 
-```
+```text
 src/
-  index.ts       entrypoint (env-configured single pool)
-  server.ts       HTTP server, proxy, admission, adapter wiring
-  pools.ts        model→pool routing + bulkhead construction
-  adapters.ts     per-provider request/response/usage translation
-  validation.ts   shared shape-validation helpers used by adapter validate()
-  sse.ts          incremental SSE usage extractor (Anthropic)
-  sse-openai.ts   incremental SSE usage extractor (OpenAI)
+  admission.ts    complete prompt projection and media surcharge estimator
+  adapters.ts     provider validation, admission projection, usage parsing
+  config.ts       validated environment configuration
+  index.ts        env-configured process entrypoint
+  pools.ts        pool validation, routing, and bulkhead construction
+  server.ts       HTTP proxy, admission, timeouts, and shutdown
+  sse.ts          Anthropic streaming usage extraction
+  sse-openai.ts   OpenAI streaming usage extraction
+  validation.ts   provider-agnostic request shape validation
 test/
-  gateway.test.ts   end-to-end tests against mock upstreams
+  gateway.test.ts end-to-end and configuration regression tests
 ```
-
