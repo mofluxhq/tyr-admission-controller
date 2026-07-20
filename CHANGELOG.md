@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-20
+
+### Added
+
+- Added versioned, startup-only YAML configuration selected with
+  `TYR_CONFIG_FILE`, including strict unknown-field validation, multi-pool
+  routing, deterministic rejection of mixed file/environment configuration,
+  and a safe configuration fingerprint in startup logs.
+- Added `tyr validate --config <path>` / `npm run validate:config` for offline
+  validation without opening a listener.
+- Added `config/tyr.example.yaml`, a JSON Schema, focused configuration tests,
+  a production Dockerfile, and a file-mounted Compose example.
+
+### Changed
+
+- Legacy environment configuration remains supported as a single-pool fallback,
+  while new deployments can use one standard image with customer-specific
+  read-only configuration files.
+- The process banner now identifies the service as `tyr-admission-controller`.
+
 ## [0.6.1] - 2026-07-19
 
 ### Security

@@ -1,8 +1,19 @@
 import { loadRuntimeConfig } from "./config.js";
 import { createGateway } from "./server.js";
 
-const { port, gateway } = loadRuntimeConfig();
+const runtime = loadRuntimeConfig();
+const { port, gateway, source } = runtime;
 const { server, shutdown } = createGateway(gateway);
+
+if (source.kind === "file") {
+  console.log(
+    `configuration loaded source=${source.path} version=${source.version} fingerprint=sha256:${source.fingerprint} pools=${gateway.pools.map((pool) => pool.name).join(",")}`,
+  );
+} else {
+  console.log(
+    `configuration loaded source=environment pools=${gateway.pools.map((pool) => pool.name).join(",")}`,
+  );
+}
 
 server.listen(port, () => {
   const routes = [
@@ -11,7 +22,7 @@ server.listen(port, () => {
       ? `/v1/chat/completions -> ${gateway.openaiUpstreamUrl}`
       : undefined,
   ].filter(Boolean);
-  console.log(`tyr-gateway listening on :${port} (${routes.join(", ")})`);
+  console.log(`tyr-admission-controller listening on :${port} (${routes.join(", ")})`);
 });
 
 let shuttingDown = false;

@@ -1,33 +1,105 @@
-# tyr-admission-controller (private)
 
+Claude finished the response
+
+CHANGELOG.md
+268 lines
+
+md
+
+
+ROADMAP.md
+244 lines
+
+md
+
+
+README.md
+377 lines
+
+md
+
+look at changelog and update roadmap and readme as needed
+
+
+Restructuring roadmap versions and flagging documentation discrepancies
+Restructuring roadmap versions and flagging documentation discrepancies
+Now the milestone renumbering — this is the significant structural change, which I'll flag clearly afterward:
+
+
+Edited 6 files
+Edited 6 files
+Now let me verify there's nothing left unaddressed and double-check the full diff:
+
+
+Ran 2 commands
+Ran 2 commands
+Consistent throughout. Now copying the finished files to outputs:
+
+
+Identified key findings and flagged misconceptions regarding documentation
+Identified key findings and flagged misconceptions regarding documentation
+Here's the likely misconception, and it's the important one: your roadmap's v0.7.0 milestone doesn't match what actually shipped as v0.7.0.
+
+The roadmap's "v0.7.0 — Observable and identifiable" milestone calls for OpenTelemetry metrics, JWT auth, structured audit events, /readyz. But the CHANGELOG's actual v0.7.0 entry is entirely different work: YAML file configuration, tyr validate, JSON Schema, Dockerfile, Compose example. None of the observability/identity work has shipped yet — it's just that the version number it was assigned to has now been used for something else.
+
+I've reconciled this by:
+
+Updating "Current baseline" in ROADMAP.md to v0.7.0, listing what actually shipped (the file-config work).
+Renumbering every subsequent milestone up by one minor version, since v0.7.0 is now taken (Observable/identifiable → v0.8.0, Ecosystem → v0.9.0, Distributed leases → v0.10.0, Tenant policy → v0.11.0), and updated the cross-references to those versions.
+Updated README's status line from v0.6.1 → v0.7.0.
+This renumbering is my inference, not a certainty — I don't know if your team intended to bump every later milestone, or if the config-file work was meant to be an out-of-band 0.7.x patch with the observability milestone still becoming "v0.7.0" later (which would itself violate semver ordering, but people do this). Confirm the renumbering matches your intent before you rely on it.
+
+One thing I did not change because I'm not sure which is right: README says "Built on async-bulkhead-llm@3.6", but the CHANGELOG only documents an upgrade to 3.5.0 (in 0.6.1) and never mentions 3.6 anywhere. Either the README is stale, or there's an undocumented dependency bump the CHANGELOG missed — I can't tell which from what's in front of me, so I left it alone rather than guess.
+
+Separate, minor note (not something I touched): the CHANGELOG's own footnote links at the bottom stop at [0.6.1] — there's no [0.7.0] link, and [Unreleased] still points at compare/v0.6.1...HEAD instead of v0.7.0...HEAD. Worth a quick fix on your end.
+
+
+Roadmap
+Document · MD 
+
+Readme
+Document · MD 
+
+
+
+
+
+Claude is AI and can make mistakes. Please double-check responses.
+
+
+Readme · MD
+# tyr-admission-controller (private)
+ 
 `tyr-admission-controller` is an admission-first proxy for Anthropic Messages and
 OpenAI Chat Completions. Before an upstream call starts, it reserves estimated
 input tokens plus the request's maximum output allowance against a model-routed
 bulkhead. Requests that do not fit are rejected immediately instead of queued
 behind saturated capacity.
-
+ 
 Built on [`async-bulkhead-llm@3.6`](https://www.npmjs.com/package/async-bulkhead-llm),
 which provides admission, usage reporting, refunds, priority reserves,
 rejection detail, and graceful draining.
-
-> **Status:** v0.6.1, single-process, private / UNLICENSED.
-
+ 
+> **Status:** v0.7.0, single-process, private / UNLICENSED.
+ 
 ## Capacity semantics
-
-A pool's `budget` is an **admission-time in-flight ceiling**. Each admitted
-request reserves estimated input plus `max_tokens` (or the pool's `outputCap`).
-Actual provider usage refunds unused capacity at completion, and streaming
-usage can correct the hold while the response is still running.
-
+ 
+A pool's `inFlightTokenBudget` is an **admission-time in-flight ceiling**. Each
+admitted request reserves estimated input plus `max_tokens` or
+`max_completion_tokens`, falling back to the pool's
+`defaultOutputReservation`. Actual provider usage refunds unused capacity at
+completion, and streaming usage can correct the hold while the response is
+still running.
+ 
 Usage reported after admission can exceed the original estimate. In that case,
 `async-bulkhead-llm` expands the active hold, so `inFlightTokens` may temporarily
-exceed `budget`. The gateway blocks new admissions until capacity releases; it
-does not abort the already-running request. This is deliberate overrun
-accounting, not a strict post-admission kill switch.
-
+exceed the configured ceiling. Tyr blocks new admissions until capacity
+releases; it does not abort the already-running request. This is deliberate
+overrun accounting, not a strict post-admission kill switch.
+ 
 Admission estimation includes the provider-specific prompt material that the
 gateway forwards upstream:
-
+ 
 - Anthropic `system`, `messages`, `tools`, and `tool_choice`.
 - OpenAI `messages`, tool/function definitions and calls, `response_format`,
   and `prediction`.
@@ -35,35 +107,262 @@ gateway forwards upstream:
 - A conservative 2,048-token minimum surcharge for each opaque image, audio,
   document, file, or video block. Inline binary payload text is not counted as
   literal prompt text.
-
 The estimate remains a load-shedding approximation, not billing-grade token
 accounting.
-
+ 
 ## Routes
-
+ 
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/v1/messages` | Admission-gated proxy to the Anthropic-shaped upstream |
 | POST | `/v1/chat/completions` | Admission-gated proxy to the OpenAI-shaped upstream |
 | GET | `/stats` | Per-pool live stats |
 | GET | `/healthz` | Liveness |
-
+ 
 Each provider route is enabled only when its upstream URL is configured.
 Malformed requests return `400`; unsupported models return `422`; admission
 rejections return `429`, `503`, or `504` with `x-admission-reason` and a
-capacity snapshot. The gateway never fabricates `Retry-After`.
-
-Provider authentication headers are forwarded verbatim. The gateway stores no
-provider keys.
-
+capacity snapshot. Tyr never fabricates `Retry-After`.
+ 
+Provider authentication headers are forwarded verbatim. Tyr stores no provider
+keys, and provider credentials do not belong in the Tyr configuration file.
+ 
+## Quick start with file configuration
+ 
+Node.js 20 or newer is supported.
+ 
+1. Install dependencies and verify the repository:
+```bash
+   npm ci
+   npm run release:check
+```
+ 
+2. Copy the example configuration:
+```bash
+   cp config/tyr.example.yaml tyr.yaml
+```
+ 
+3. Edit `tyr.yaml` for the upstreams, model prefixes, and capacity limits used
+   by the deployment.
+4. Validate it without opening a listening socket:
+```bash
+   npm run validate:config -- --config ./tyr.yaml
+```
+ 
+   Successful validation prints the resolved file path, schema version,
+   SHA-256 configuration fingerprint, port, pool names, and enabled routes.
+ 
+5. Start Tyr:
+```bash
+   TYR_CONFIG_FILE=./tyr.yaml npm start
+```
+ 
+At startup, Tyr validates the complete file before calling `server.listen()`.
+Unreadable files, malformed YAML, unknown properties, invalid URLs, duplicate
+pool names or model prefixes, unsafe numeric values, and invalid reserve
+relationships cause the process to exit nonzero.
+ 
+Configuration is immutable for the lifetime of the process. To apply a change,
+validate the edited file and restart Tyr. Hot reload is intentionally not
+implemented because existing pools may still own live concurrency and token
+reservations.
+ 
+## File selection and precedence
+ 
+Set one environment variable to choose file mode. Relative paths are resolved
+from the process working directory:
+ 
+```bash
+TYR_CONFIG_FILE=/etc/tyr/config.yaml
+```
+ 
+Configuration values are literal; Tyr does not expand `${ENV_VAR}` placeholders
+inside YAML. Keep provider credentials in the calling application or its secret
+manager rather than in this file.
+ 
+File mode does not merge with legacy Tyr environment variables. When
+`TYR_CONFIG_FILE` is present, setting variables such as `PORT`,
+`UPSTREAM_URL`, `TOKEN_BUDGET`, or `MAX_CONCURRENT` is a startup error. This
+keeps the effective policy deterministic and reviewable.
+ 
+When `TYR_CONFIG_FILE` is absent, Tyr preserves the original single-pool
+environment configuration described in `.env.example`.
+ 
+## Configuration schema
+ 
+Every file must declare an explicit schema version:
+ 
+```yaml
+version: 1
+```
+ 
+The shipped example is [`config/tyr.example.yaml`](config/tyr.example.yaml).
+A machine-readable editor schema is available at
+[`config/tyr.schema.json`](config/tyr.schema.json). Runtime validation remains
+the source of truth and additionally checks cross-field rules such as duplicate
+pool routing and priority reserve limits.
+ 
+### Complete example
+ 
+```yaml
+version: 1
+ 
+server:
+  port: 8787
+  maxRequestBodyBytes: 1048576
+  maxOutputTokens: 200000
+ 
+upstreams:
+  anthropic:
+    baseUrl: https://api.anthropic.com
+  openai:
+    baseUrl: https://api.openai.com
+ 
+timeouts:
+  responseHeadersMs: 30000
+  streamIdleMs: 30000
+  clientStallMs: 30000
+ 
+priority:
+  trustHeader: false
+ 
+pools:
+  - name: interactive-claude
+    modelPrefixes:
+      - claude-sonnet-4
+      - claude-haiku-4
+    estimatorModel: claude-sonnet-4-5
+    maxConcurrent: 40
+    inFlightTokenBudget: 400000
+    highPriorityTokenReserve: 80000
+    defaultOutputReservation: 8192
+ 
+  - name: batch-openai
+    modelPrefixes:
+      - gpt-4o
+      - gpt-5
+    estimatorModel: gpt-4o
+    maxConcurrent: 20
+    inFlightTokenBudget: 250000
+    defaultOutputReservation: 4096
+```
+ 
+### Field reference
+ 
+| Field | Required | Meaning |
+|---|---:|---|
+| `version` | Yes | Configuration schema version; currently `1` |
+| `server.port` | No | Listen port, default `8787` |
+| `server.maxRequestBodyBytes` | No | Maximum buffered request body; gateway default is 1 MiB |
+| `server.maxOutputTokens` | No | Validation ceiling for request output-limit fields |
+| `upstreams.anthropic.baseUrl` | One upstream required | Enables `POST /v1/messages` |
+| `upstreams.openai.baseUrl` | One upstream required | Enables `POST /v1/chat/completions` |
+| `timeouts.responseHeadersMs` | No | Maximum wait for upstream response headers |
+| `timeouts.streamIdleMs` | No | Maximum gap between streaming upstream chunks |
+| `timeouts.clientStallMs` | No | Maximum wait for a backpressured client to drain |
+| `priority.trustHeader` | No | Trust raw `x-priority`; default `false` |
+| `pools[].name` | Yes | Unique pool name used in stats and rejection detail |
+| `pools[].modelPrefixes` | Yes | Unique prefixes; longest matching prefix wins |
+| `pools[].estimatorModel` | Yes | Model used for estimator ratio lookup; does not rewrite requests |
+| `pools[].maxConcurrent` | Yes | Maximum active requests in that pool |
+| `pools[].inFlightTokenBudget` | No | Admission-time in-flight token ceiling |
+| `pools[].highPriorityTokenReserve` | No | Token headroom reserved for high-priority requests |
+| `pools[].defaultOutputReservation` | No | Output reservation when the request omits an output limit |
+ 
+`inFlightTokenBudget` is tri-state:
+ 
+- Omit it to disable token-budget admission for the pool.
+- Set it to `0` to reject all budget-gated requests.
+- Set a positive integer to enforce an in-flight ceiling.
+`highPriorityTokenReserve` requires `inFlightTokenBudget` and cannot exceed it.
+It preserves token headroom only; it does not reserve a concurrent-request slot
+or preempt normal work.
+ 
+## Validate in CI
+ 
+A deployment repository can validate its checked-in policy before publishing:
+ 
+```bash
+npm ci
+npm run validate:config -- --config ./deploy/tyr.yaml
+```
+ 
+The direct built CLI is also available:
+ 
+```bash
+npm run build
+node dist/cli.js validate --config ./deploy/tyr.yaml
+```
+ 
+The package declares a `tyr` binary, so an installed package can use:
+ 
+```bash
+tyr validate --config ./deploy/tyr.yaml
+```
+ 
+## Container usage
+ 
+Build the included image:
+ 
+```bash
+docker build -t tyr-admission-controller:local .
+```
+ 
+Run it with a read-only mounted configuration:
+ 
+```bash
+docker run --rm \
+  --name tyr \
+  -p 127.0.0.1:8787:8787 \
+  -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
+  -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
+  tyr-admission-controller:local
+```
+ 
+Or use the included Compose example:
+ 
+```bash
+docker compose -f compose.example.yaml up --build
+```
+ 
+For a private registry, customers would pull a versioned image and mount their
+own policy:
+ 
+```bash
+docker run --rm \
+  -p 127.0.0.1:8787:8787 \
+  -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
+  -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
+  ghcr.io/your-organization/tyr:VERSION
+```
+ 
+Replace `VERSION` with the released tag. Pin production deployments to a version or image digest rather than a mutable
+`latest` tag.
+ 
+The application continues to own its provider credential and sends ordinary
+provider-shaped requests through Tyr. For example, an OpenAI SDK points its
+base URL at `http://tyr:8787/v1`; an Anthropic client sends Messages requests to
+`http://tyr:8787/v1/messages`.
+ 
 ## Priority safety
-
+ 
 Client-supplied `x-priority` is ignored by default. This prevents an
-unauthenticated caller from assigning itself the high-priority budget reserve.
-
-For application integrations, supply `GatewayOptions.resolvePriority` and
-derive priority from an authenticated identity or trusted policy:
-
+unauthenticated caller from assigning itself the high-priority token reserve.
+ 
+In file mode, raw-header trust is enabled with:
+ 
+```yaml
+priority:
+  trustHeader: true
+```
+ 
+Enable that only behind a trusted proxy that removes client-provided copies,
+authenticates the caller, and injects its own header.
+ 
+For application integrations that instantiate `createGateway()` directly,
+prefer `GatewayOptions.resolvePriority` and derive priority from an authenticated
+identity or trusted policy:
+ 
 ```ts
 createGateway({
   resolvePriority: async (req) => {
@@ -73,110 +372,68 @@ createGateway({
   // ...upstreams and pools
 });
 ```
-
-The env-configured entrypoint can opt into raw-header trust with
-`TRUST_X_PRIORITY_HEADER=true`. Enable that only behind a trusted proxy that
-removes client-provided copies and injects its own header.
-
-## Run
-
-Node.js 20 or newer is supported.
-
+ 
+## Legacy environment mode
+ 
+The original environment entrypoint remains available for simple single-pool
+deployments:
+ 
 ```bash
-npm ci
-npm run release:check
-
 UPSTREAM_URL=https://api.anthropic.com \
 OPENAI_UPSTREAM_URL=https://api.openai.com \
-TOKEN_BUDGET=500000 MAX_CONCURRENT=50 \
+TOKEN_BUDGET=500000 \
+MAX_CONCURRENT=50 \
 npm start
 ```
-
-`npm start` runs the TypeScript build first and starts `dist/index.js`; it does
-not depend on Node's experimental TypeScript stripping.
-
-At least one of `UPSTREAM_URL` or `OPENAI_UPSTREAM_URL` must be set. Invalid
-URLs, ports, numeric ranges, pool names, duplicate model prefixes, and reserve
-relationships fail during startup before the server begins listening.
-
-## Configuration
-
-`src/index.ts` loads one default pool from environment variables. For real
-deployments, define pools in code, preferably one per model or closely related
-model family:
-
-```ts
-createGateway({
-  upstreamUrl: "https://api.anthropic.com",
-  openaiUpstreamUrl: "https://api.openai.com",
-  responseTimeoutMs: 30_000,
-  idleTimeoutMs: 30_000,
-  clientStallTimeoutMs: 30_000,
-  maxRequestBodyBytes: 1_048_576,
-  maxOutputTokens: 200_000,
-  pools: [
-    {
-      name: "sonnet",
-      modelPrefixes: ["claude-sonnet-4"],
-      model: "claude-sonnet-4-5",
-      maxConcurrent: 40,
-      budget: 400_000,
-      highPriorityReserve: 80_000,
-    },
-    {
-      name: "gpt",
-      modelPrefixes: ["gpt-4o", "gpt-5"],
-      model: "gpt-4o",
-      maxConcurrent: 60,
-      budget: 300_000,
-    },
-  ],
-});
-```
-
-`budget` is tri-state: omit it to disable token-budget admission, set it to `0`
-to reject all budget-gated calls, or set a positive integer for an active
-ceiling. `highPriorityReserve` requires a configured budget and cannot exceed
-it. Duplicate pool names and duplicate model prefixes are rejected.
-
-See `.env.example` for the complete env-configured entrypoint settings.
-
+ 
+See `.env.example` for every legacy variable. New multi-pool deployments should
+use file configuration rather than defining pools in TypeScript or building a
+customer-specific image.
+ 
 ## Proxy behavior
-
+ 
 Request bodies are buffered up to `maxRequestBodyBytes` (1 MiB by default).
 Streaming responses honor downstream backpressure, abort upstream work when
 the client disconnects, and support separate response-header, upstream-idle,
 and client-stall timeouts. Non-streaming responses are buffered and returned
 with an explicit `content-length`.
-
+ 
 `SIGTERM` and `SIGINT` stop new admissions, close the HTTP server, and drain
 in-flight bulkhead work. Requests reaching an existing keep-alive connection
 during shutdown receive `503` with `x-admission-reason: shutdown`.
-
+ 
 ## Known limitations
-
+ 
 - Budgets and stats are per process. N replicas can admit approximately N times
   a per-replica budget unless capacity is partitioned or coordinated outside
-  this gateway.
+  Tyr.
+- Configuration is loaded only at startup; there is no hot reload.
 - SSE usage extraction should be verified against the exact provider/API
   versions used in production. Missing usage affects refunds, not proxying.
 - There is no Anthropic/OpenAI format translation.
 - `/stats` and provider routes have no built-in authentication or persistence.
 - There is no active-stream termination policy for usage overruns.
-
 ## Layout
-
+ 
 ```text
+config/
+  tyr.example.yaml documented configuration template
+  tyr.schema.json  JSON Schema for editor and CI integration
 src/
-  admission.ts    complete prompt projection and media surcharge estimator
-  adapters.ts     provider validation, admission projection, usage parsing
-  config.ts       validated environment configuration
-  index.ts        env-configured process entrypoint
-  pools.ts        pool validation, routing, and bulkhead construction
-  server.ts       HTTP proxy, admission, timeouts, and shutdown
-  sse.ts          Anthropic streaming usage extraction
-  sse-openai.ts   OpenAI streaming usage extraction
-  validation.ts   provider-agnostic request shape validation
+  admission.ts     complete prompt projection and media surcharge estimator
+  adapters.ts      provider validation, admission projection, usage parsing
+  cli.ts           offline configuration validation command
+  config.ts        YAML and legacy environment configuration loading
+  index.ts         validated process entrypoint
+  pools.ts         pool validation, routing, and bulkhead construction
+  server.ts        HTTP proxy, admission, timeouts, and shutdown
+  sse.ts           Anthropic streaming usage extraction
+  sse-openai.ts    OpenAI streaming usage extraction
+  validation.ts    provider-agnostic request shape validation
 test/
-  gateway.test.ts end-to-end and configuration regression tests
+  config.test.ts   file-schema and environment compatibility regression tests
+  gateway.test.ts  gateway end-to-end tests
+Dockerfile         production multi-stage image
+compose.example.yaml local file-configured container example
 ```
+ 

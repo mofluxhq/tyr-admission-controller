@@ -1,0 +1,241 @@
+TYR PROPRIETARY SOFTWARE LICENSE TERMS
+
+Copyright © 2026 Jan Balangue. All rights reserved.
+
+These Tyr Proprietary Software License Terms (the "License Terms") govern use
+of the Tyr admission controller software, including its object code, container
+images, command-line tools, configuration schemas, documentation, updates, and
+other materials supplied with these terms (collectively, the "Software").
+
+"Licensor" means Jan Balangue or the legal entity identified as licensor in the
+applicable Order Form. "Customer" means the person or legal entity authorized
+to use the Software under an Order Form or other written authorization issued
+by Licensor. "Order Form" means a written ordering document, statement of work,
+evaluation authorization, or other agreement that identifies the Software and
+is accepted by Licensor.
+
+THE SOFTWARE IS PROPRIETARY. POSSESSION OF, ACCESS TO, OR PAYMENT FOR THE
+SOFTWARE DOES NOT BY ITSELF GRANT A LICENSE. NO LICENSE IS GRANTED EXCEPT UNDER
+AN APPLICABLE ORDER FORM OR OTHER EXPRESS WRITTEN AUTHORIZATION FROM LICENSOR.
+
+1. LICENSE GRANT
+
+Subject to Customer's compliance with these License Terms and the applicable
+Order Form, Licensor grants Customer, during the authorized term, a limited,
+non-exclusive, non-transferable, non-sublicensable license to:
+
+(a) install and run the object-code or container-image form of the Software for
+    Customer's internal business purposes in the environments and quantities
+    authorized by the Order Form;
+
+(b) make a reasonable number of archival and disaster-recovery copies, provided
+    that all proprietary and third-party notices are preserved; and
+
+(c) permit Customer's employees and contractors to operate the Software solely
+    on Customer's behalf, provided that they are bound by confidentiality and
+    use restrictions at least as protective as these License Terms. Customer is
+    responsible for their compliance.
+
+No right is granted to use the Software for the benefit of an unaffiliated third
+party, except as expressly stated in the applicable Order Form.
+
+2. EVALUATION USE
+
+If Licensor expressly authorizes evaluation use, Customer may use the Software
+only for the evaluation period, environment, and purpose stated in the written
+evaluation authorization. Evaluation use is non-production unless that writing
+expressly permits a production pilot. Evaluation access may be suspended or
+terminated at any time as stated in the evaluation authorization.
+
+3. RESTRICTIONS
+
+Except to the extent expressly permitted by the applicable Order Form or by law
+notwithstanding this restriction, Customer will not, and will not permit any
+third party to:
+
+(a) sell, resell, rent, lease, sublicense, distribute, publish, transfer, or
+    otherwise make the Software available to any unaffiliated third party;
+
+(b) operate the Software itself as a service bureau, hosted service, managed
+    service, or other offering for unaffiliated third parties, or use the
+    Software or Licensor's confidential information to provide a competing
+    hosted admission-control product or service;
+
+(c) copy the Software except as expressly authorized in Section 1;
+
+(d) modify, adapt, translate, or create derivative works of the Software;
+
+(e) reverse engineer, decompile, disassemble, attempt to derive source code,
+    protocols, algorithms, or non-public interfaces from the Software, or
+    circumvent technical restrictions or license controls;
+
+(f) remove, obscure, or alter copyright, trademark, attribution, license, or
+    proprietary notices;
+
+(g) disclose source code, non-public documentation, registry credentials,
+    license keys, or other access credentials to unauthorized persons; or
+
+(h) use the Software in violation of applicable law, export-control rules,
+    sanctions, or the rights of any third party.
+
+The restriction in Section 3(e) does not apply to the limited extent that
+applicable law expressly permits reverse engineering despite a contractual
+restriction, provided that Customer first gives Licensor written notice and an
+opportunity to provide the information needed to achieve lawful interoperability.
+Nothing in this Section prohibits Customer from independently developing a
+product without use of the Software, source code, or Licensor's confidential
+information.
+
+4. AUTHORIZED DEPLOYMENT AND ACCESS
+
+Customer may deploy the Software only within the environments, accounts,
+clusters, regions, or other limits stated in the Order Form. Customer will use
+reasonable administrative, technical, and physical safeguards to prevent
+unauthorized access, copying, or distribution. Customer will promptly notify
+Licensor of any known unauthorized use or disclosure.
+
+Registry credentials, download links, license files, and repository access are
+issued for Customer's authorized use only and may not be shared outside the
+scope of the Order Form.
+
+5. OWNERSHIP AND RESERVATION OF RIGHTS
+
+The Software is licensed, not sold. Licensor and its licensors retain all right,
+title, and interest in and to the Software, including all intellectual-property
+rights, modifications, improvements, and derivative works. Customer receives
+only the rights expressly granted in these License Terms and the applicable
+Order Form. All other rights are reserved.
+
+Customer owns its data, prompts, responses, credentials, policies, and
+configuration content. No ownership interest in Customer data is transferred to
+Licensor merely because the Software processes or transmits it.
+
+6. FEEDBACK
+
+If Customer voluntarily provides suggestions, ideas, or feedback about the
+Software, Customer grants Licensor a perpetual, worldwide, irrevocable,
+royalty-free right to use and incorporate that feedback without restriction or
+obligation. This section does not grant Licensor rights in Customer's
+confidential information or data.
+
+7. THIRD-PARTY COMPONENTS
+
+The Software may include or depend on third-party components governed by their
+own license terms. Those components are identified in THIRD_PARTY_NOTICES.txt.
+The applicable third-party licenses govern those components only. They do not
+grant rights to the proprietary portions of the Software. To the extent required
+by a third-party license, its terms control over conflicting provisions of these
+License Terms solely with respect to that third-party component.
+
+8. UPDATES, SUPPORT, AND PROFESSIONAL SERVICES
+
+Any support, maintenance, updates, upgrades, service levels, professional
+services, or security-response commitments are provided only if stated in the
+applicable Order Form or a separate written agreement. Licensor may change or
+discontinue versions not covered by an active support commitment.
+
+9. CONFIDENTIALITY
+
+Non-public source code, product roadmaps, security information, credentials,
+license keys, pricing, and non-public technical documentation supplied by
+Licensor are Licensor's confidential information. Customer will protect that
+information using at least reasonable care and will use it only to exercise the
+rights granted under the applicable Order Form. This section does not apply to
+information that Customer can document: (a) is publicly available without
+breach; (b) was lawfully known without restriction; (c) was independently
+developed without use of the confidential information; or (d) was lawfully
+received from a third party without confidentiality obligations.
+
+If disclosure is legally required, Customer will, where legally permitted, give
+Licensor prompt notice and reasonable assistance to seek protective treatment.
+
+10. TERM AND TERMINATION
+
+These License Terms apply for the term stated in the applicable Order Form. If
+no term is stated, the authorization continues only for the period expressly
+confirmed in writing by Licensor.
+
+Either party may terminate the applicable license for a material breach that is
+not cured within thirty (30) days after written notice. Licensor may terminate
+immediately for unauthorized redistribution, disclosure of source code or
+credentials, infringement or misappropriation of Licensor's intellectual
+property, or use that creates a material security or legal risk.
+
+Upon expiration or termination, Customer will stop using the Software and delete
+or destroy all copies, except for copies retained solely where required by law
+or in routine backups that are not restored for active use. Sections that by
+their nature should survive will survive, including Sections 3, 5, 6, 7, 9, 11,
+12, 13, and 14.
+
+11. DISCLAIMER OF WARRANTIES
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, AND EXCEPT FOR ANY EXPRESS WARRANTY IN A
+SIGNED AGREEMENT, THE SOFTWARE, DOCUMENTATION, EVALUATION FEATURES, AND SUPPORT
+ARE PROVIDED "AS IS" AND "AS AVAILABLE." LICENSOR DISCLAIMS ALL EXPRESS,
+IMPLIED, STATUTORY, AND OTHER WARRANTIES, INCLUDING WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT,
+ACCURACY, QUIET ENJOYMENT, AND WARRANTIES ARISING FROM COURSE OF DEALING OR
+USAGE OF TRADE.
+
+THE SOFTWARE PERFORMS PREDICTIVE ADMISSION CONTROL USING CONFIGURATION AND TOKEN
+ESTIMATES. LICENSOR DOES NOT WARRANT THAT THE SOFTWARE WILL PREVENT ALL
+OVERLOAD, PROVIDER THROTTLING, COST OVERRUNS, SERVICE INTERRUPTIONS, DATA LOSS,
+OR SECURITY INCIDENTS, OR THAT IT WILL BE ERROR-FREE OR UNINTERRUPTED. CUSTOMER
+IS RESPONSIBLE FOR CONFIGURATION, CAPACITY PLANNING, MONITORING, BACKUPS,
+FAILOVER, PROVIDER TERMS, AND DECISIONS MADE IN RESPONSE TO ADMISSION RESULTS.
+
+12. LIMITATION OF LIABILITY
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, NEITHER PARTY WILL BE LIABLE UNDER THESE
+LICENSE TERMS FOR ANY INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY,
+OR PUNITIVE DAMAGES, OR FOR LOSS OF PROFITS, REVENUE, GOODWILL, BUSINESS,
+OPPORTUNITY, OR DATA, EVEN IF ADVISED OF THE POSSIBILITY OF THOSE DAMAGES.
+
+EXCEPT FOR CUSTOMER'S PAYMENT OBLIGATIONS, BREACH OF SECTION 3 OR 9,
+INFRINGEMENT OR MISAPPROPRIATION OF THE OTHER PARTY'S INTELLECTUAL PROPERTY, OR
+LIABILITY THAT CANNOT LAWFULLY BE LIMITED, EACH PARTY'S AGGREGATE LIABILITY
+ARISING OUT OF OR RELATING TO THE SOFTWARE OR THESE LICENSE TERMS WILL NOT
+EXCEED THE AMOUNTS PAID OR PAYABLE BY CUSTOMER FOR THE SOFTWARE DURING THE
+TWELVE (12) MONTHS BEFORE THE EVENT GIVING RISE TO LIABILITY. IF THE SOFTWARE
+WAS PROVIDED WITHOUT CHARGE, LICENSOR'S AGGREGATE LIABILITY WILL NOT EXCEED ONE
+HUNDRED U.S. DOLLARS (US $100).
+
+Some jurisdictions do not allow certain warranty exclusions or liability
+limitations. In those jurisdictions, these provisions apply only to the maximum
+extent permitted by law.
+
+13. COMPLIANCE
+
+Customer is responsible for ensuring that its use of the Software and all data
+processed through it complies with applicable law, industry obligations,
+provider agreements, and internal policies. Customer will not export, re-export,
+transfer, or use the Software in violation of applicable export-control or
+sanctions laws.
+
+14. GENERAL
+
+The applicable Order Form, any mutually signed master agreement, these License
+Terms, and the documents expressly incorporated by them form the agreement
+regarding the Software. If they conflict, the following order controls unless a
+signed agreement expressly states otherwise: (1) the signed master agreement;
+(2) the Order Form; (3) these License Terms; and (4) the documentation.
+
+Customer may not assign or transfer its rights or obligations without Licensor's
+prior written consent, except in connection with a merger, reorganization, or
+sale of substantially all assets where the successor is not a competitor of
+Licensor and agrees in writing to be bound. Licensor may assign these License
+Terms to an affiliate or successor to the Software business.
+
+If any provision is unenforceable, it will be modified to the minimum extent
+necessary to make it enforceable, and the remaining provisions will remain in
+effect. Failure to enforce a provision is not a waiver. Headings are for
+convenience only. "Including" means "including without limitation."
+
+Governing law, venue, notices, payment terms, and any negotiated security,
+privacy, indemnity, service-level, or support obligations are as stated in the
+applicable Order Form or other signed agreement.
+
+15. CONTACT
+
+Legal notices to Licensor must be sent using the notice details stated in the
+applicable Order Form.

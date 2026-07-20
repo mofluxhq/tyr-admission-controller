@@ -1,0 +1,20 @@
+services:
+  tyr:
+    build: .
+    image: tyr-admission-controller:local
+    restart: unless-stopped
+    environment:
+      TYR_CONFIG_FILE: /etc/tyr/config.yaml
+    volumes:
+      - ./config/tyr.example.yaml:/etc/tyr/config.yaml:ro
+    ports:
+      - "127.0.0.1:8787:8787"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 3

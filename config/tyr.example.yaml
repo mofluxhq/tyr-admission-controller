@@ -1,0 +1,60 @@
+# Tyr file configuration, schema version 1.
+# Changes are loaded only when the process starts; restart Tyr to apply them.
+version: 1
+
+server:
+  port: 8787
+  maxRequestBodyBytes: 1048576
+  maxOutputTokens: 200000
+
+# Configure at least one provider-shaped upstream. Tyr forwards the caller's
+# supported provider authentication headers; API keys do not belong here.
+upstreams:
+  anthropic:
+    baseUrl: https://api.anthropic.com
+  openai:
+    baseUrl: https://api.openai.com
+
+timeouts:
+  # Maximum wait for upstream response headers. Omit for no timeout.
+  responseHeadersMs: 30000
+  # Maximum gap between streaming response chunks. Omit for no timeout.
+  streamIdleMs: 30000
+  # Maximum wait for a backpressured client to drain. When omitted, this
+  # defaults to streamIdleMs in the gateway.
+  clientStallMs: 30000
+
+priority:
+  # Keep false unless a trusted proxy strips client copies of x-priority and
+  # injects an authenticated value.
+  trustHeader: false
+
+pools:
+  - name: interactive-claude
+    # Longest model-prefix match wins across all pools.
+    modelPrefixes:
+      - claude-sonnet-4
+      - claude-haiku-4
+    # Used by the admission estimator; it does not rewrite the requested model.
+    estimatorModel: claude-sonnet-4-5
+    maxConcurrent: 40
+    # Omit to disable token-budget admission, use 0 to admit no budget-gated
+    # work, or set a positive in-flight token ceiling.
+    inFlightTokenBudget: 400000
+    # Reserves token headroom for priority=high; it does not reserve a
+    # concurrency slot and does not preempt running work.
+    highPriorityTokenReserve: 80000
+    # Used when the request does not specify max_tokens/max_completion_tokens.
+    defaultOutputReservation: 8192
+
+  - name: batch-openai
+    modelPrefixes:
+      - gpt-4o
+      - gpt-5
+      - o1
+      - o3
+      - o4
+    estimatorModel: gpt-4o
+    maxConcurrent: 20
+    inFlightTokenBudget: 250000
+    defaultOutputReservation: 4096
