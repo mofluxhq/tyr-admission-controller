@@ -46,6 +46,9 @@ pools:
     highPriorityTokenReserve: 80000
     # Used when the request does not specify max_tokens/max_completion_tokens.
     defaultOutputReservation: 8192
+    # Fixed surcharge per opaque image/audio/document/file/video block.
+    # Omit for the conservative default of 2048; set 0 to disable it.
+    opaqueMediaInputTokenReservation: 2048
 
   - name: batch-openai
     modelPrefixes:

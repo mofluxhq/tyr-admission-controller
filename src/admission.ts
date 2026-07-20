@@ -1,5 +1,7 @@
 import {
   createModelAwareTokenEstimator,
+  type ContentBlock,
+  type LLMMessage,
   type LLMRequest,
   type TokenEstimator,
 } from "async-bulkhead-llm";
@@ -10,17 +12,7 @@ import {
  */
 export const OPAQUE_MEDIA_INPUT_TOKENS = 2_048;
 
-const OPAQUE_INPUT_TOKENS = Symbol("tyr.opaqueInputTokens");
-
-type AdmissionRequest = LLMRequest & {
-  [OPAQUE_INPUT_TOKENS]?: number;
-};
-
-type ProjectionState = {
-  opaqueInputTokens: number;
-};
-
-const MEDIA_BLOCK_TYPES = new Set([
+const MEDIA_BLOCK_TYPES = [
   "audio",
   "document",
   "file",
@@ -30,7 +22,9 @@ const MEDIA_BLOCK_TYPES = new Set([
   "input_file",
   "input_image",
   "video",
-]);
+] as const;
+
+const metadataEstimator = createModelAwareTokenEstimator({ outputCap: 0 });
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -41,13 +35,11 @@ function isInlineBinary(value: string): boolean {
 }
 
 /**
- * Produces a JSON-safe prompt projection while omitting inline binary payloads.
- * Media/document blocks receive a fixed token surcharge instead. Object keys
- * are sorted to keep estimates deterministic for semantically identical input.
+ * Produces a JSON-safe prompt value while omitting inline binary payloads.
+ * Object keys are sorted to keep estimation deterministic.
  */
 function normalizePromptValue(
   value: unknown,
-  state: ProjectionState,
   insideMedia = false,
   key = "",
 ): unknown {
@@ -57,26 +49,29 @@ function normalizePromptValue(
   if (typeof value === "string") {
     if (
       insideMedia &&
-      (key === "data" || key === "bytes" || key === "file_data" || isInlineBinary(value))
+      (key === "data" ||
+        key === "bytes" ||
+        key === "file_data" ||
+        isInlineBinary(value))
     ) {
       return `[opaque binary omitted: ${value.length} characters]`;
     }
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map((item) => normalizePromptValue(item, state, insideMedia));
+    return value.map((item) => normalizePromptValue(item, insideMedia));
   }
   if (!isPlainObject(value)) return undefined;
 
   const type = typeof value["type"] === "string" ? value["type"] : undefined;
-  const isMediaBlock = type !== undefined && MEDIA_BLOCK_TYPES.has(type);
-  if (isMediaBlock) state.opaqueInputTokens += OPAQUE_MEDIA_INPUT_TOKENS;
+  const isMediaBlock =
+    type !== undefined &&
+    (MEDIA_BLOCK_TYPES as readonly string[]).includes(type);
 
   const normalized: Record<string, unknown> = {};
   for (const childKey of Object.keys(value).sort()) {
     const child = normalizePromptValue(
       value[childKey],
-      state,
       insideMedia || isMediaBlock,
       childKey,
     );
@@ -85,51 +80,149 @@ function normalizePromptValue(
   return normalized;
 }
 
+function normalizeContent(value: unknown): string | ContentBlock[] {
+  if (typeof value === "string") return value;
+  if (value === null) return "";
+  if (!Array.isArray(value)) return "";
+
+  const blocks: ContentBlock[] = [];
+  for (const block of value) {
+    const normalized = normalizePromptValue(block);
+    if (
+      isPlainObject(normalized) &&
+      typeof normalized["type"] === "string"
+    ) {
+      blocks.push(normalized as ContentBlock);
+    }
+  }
+  return blocks;
+}
+
+function normalizeMessages(value: unknown): LLMMessage[] {
+  if (!Array.isArray(value)) return [];
+  const messages: LLMMessage[] = [];
+  for (const message of value) {
+    if (!isPlainObject(message)) continue;
+    messages.push({
+      role: typeof message["role"] === "string" ? message["role"] : "",
+      content: normalizeContent(message["content"]),
+    });
+  }
+  return messages;
+}
+
+/**
+ * Builds the portion of a provider message that the library's character-based
+ * estimator cannot see: roles, tool calls, names, and opaque block payloads.
+ * Text itself is intentionally removed because it is counted through the
+ * first-class LLMRequest messages/system fields.
+ */
+function projectMessageMetadata(value: unknown): unknown[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((message) => {
+    if (!isPlainObject(message)) return {};
+    const projected: Record<string, unknown> = {};
+    for (const key of Object.keys(message).sort()) {
+      if (key !== "content") {
+        const normalized = normalizePromptValue(message[key]);
+        if (normalized !== undefined) projected[key] = normalized;
+        continue;
+      }
+
+      const content = message[key];
+      if (!Array.isArray(content)) continue;
+      projected[key] = content.map((block) => {
+        if (!isPlainObject(block)) return {};
+        if (block["type"] === "text" && typeof block["text"] === "string") {
+          return { type: "text" };
+        }
+        return normalizePromptValue(block);
+      });
+    }
+    return projected;
+  });
+}
+
+function projectSystemMetadata(value: unknown): unknown {
+  if (typeof value === "string") return "";
+  if (!Array.isArray(value)) return undefined;
+  return value.map((block) => {
+    if (!isPlainObject(block)) return {};
+    if (block["type"] === "text" && typeof block["text"] === "string") {
+      return { type: "text" };
+    }
+    return normalizePromptValue(block);
+  });
+}
+
+function estimateExtraInputTokens(
+  model: string,
+  metadata: Record<string, unknown>,
+): number {
+  const serialized = JSON.stringify(metadata);
+  return metadataEstimator({
+    model,
+    messages: [{ role: "user", content: serialized }],
+    max_tokens: 0,
+  }).input;
+}
+
+/**
+ * Builds an async-bulkhead-llm v3.7 request using its first-class `system`,
+ * `extraInputTokens`, and opaque-block estimation surfaces. Provider prompt
+ * material that is not represented by message text is projected into a stable
+ * metadata estimate rather than hidden on a symbol or folded into a synthetic
+ * user message.
+ */
 export function createAdmissionRequest(opts: {
   model: string;
   maxTokens?: number;
-  prompt: Record<string, unknown>;
+  messages: unknown;
+  system?: unknown;
+  promptExtras?: Record<string, unknown>;
 }): LLMRequest {
-  const state: ProjectionState = { opaqueInputTokens: 0 };
-  const normalizedPrompt = normalizePromptValue(opts.prompt, state);
-  const estimationText = JSON.stringify(normalizedPrompt ?? {});
-  const request: AdmissionRequest = {
-    model: opts.model,
-    // The library estimator counts message content. A single normalized
-    // projection avoids silently dropping system prompts, tool schemas,
-    // tool-call arguments, and other provider-specific prompt material.
-    messages: [{ role: "user", content: estimationText }],
-    ...(opts.maxTokens !== undefined ? { max_tokens: opts.maxTokens } : {}),
+  const metadata: Record<string, unknown> = {
+    messages: projectMessageMetadata(opts.messages),
   };
-  Object.defineProperty(request, OPAQUE_INPUT_TOKENS, {
-    value: state.opaqueInputTokens,
-    enumerable: false,
-    configurable: false,
-    writable: false,
-  });
+
+  if (opts.system !== undefined) {
+    metadata["system"] = projectSystemMetadata(opts.system);
+  }
+  if (opts.promptExtras !== undefined) {
+    for (const key of Object.keys(opts.promptExtras).sort()) {
+      const normalized = normalizePromptValue(opts.promptExtras[key]);
+      if (normalized !== undefined) metadata[key] = normalized;
+    }
+  }
+
+  const request: LLMRequest = {
+    model: opts.model,
+    messages: normalizeMessages(opts.messages),
+    ...(opts.maxTokens !== undefined ? { max_tokens: opts.maxTokens } : {}),
+    ...(opts.system !== undefined
+      ? { system: normalizeContent(opts.system) }
+      : {}),
+    extraInputTokens: estimateExtraInputTokens(opts.model, metadata),
+  };
   return request;
 }
 
 /**
- * Wraps async-bulkhead-llm's model-aware text estimator with the gateway's
- * conservative surcharge for opaque media/document blocks.
+ * Creates the pool estimator with a conservative fixed surcharge for provider
+ * media/document blocks. v3.7 applies this policy directly while also counting
+ * first-class system prompts and `extraInputTokens`.
  */
 export function createAdmissionTokenEstimator(
   defaultModel: string,
   outputCap?: number,
+  opaqueMediaInputTokens = OPAQUE_MEDIA_INPUT_TOKENS,
 ): TokenEstimator {
-  const base = createModelAwareTokenEstimator({
+  const byType = Object.fromEntries(
+    MEDIA_BLOCK_TYPES.map((type) => [type, opaqueMediaInputTokens]),
+  );
+  return createModelAwareTokenEstimator({
     defaultModel,
     ...(outputCap !== undefined ? { outputCap } : {}),
+    opaqueBlockTokens: { byType },
   });
-
-  return (request) => {
-    const estimate = base(request);
-    const opaqueInputTokens =
-      (request as AdmissionRequest)[OPAQUE_INPUT_TOKENS] ?? 0;
-    return {
-      input: estimate.input + opaqueInputTokens,
-      maxOutput: estimate.maxOutput,
-    };
-  };
 }

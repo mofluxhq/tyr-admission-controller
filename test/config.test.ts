@@ -49,6 +49,7 @@ pools:
     inFlightTokenBudget: 400000
     highPriorityTokenReserve: 80000
     defaultOutputReservation: 8192
+    opaqueMediaInputTokenReservation: 3072
   - name: batch
     modelPrefixes: [gpt-4o, gpt-5]
     estimatorModel: gpt-4o
@@ -75,6 +76,7 @@ describe("file configuration", () => {
         budget: 400_000,
         highPriorityReserve: 80_000,
         outputCap: 8192,
+        opaqueMediaInputTokens: 3072,
       },
       {
         name: "batch",
@@ -108,6 +110,23 @@ pools:
     expect(config.port).toBe(8787);
     expect(config.gateway.trustPriorityHeader).toBe(false);
     expect(config.gateway.pools[0]?.budget).toBe(0);
+  });
+
+  it("loads the v3.7 opaque-media reservation override", () => {
+    const path = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: http://localhost:8000 }
+pools:
+  - name: local
+    modelPrefixes: [local-]
+    estimatorModel: gpt-4o
+    maxConcurrent: 2
+    inFlightTokenBudget: 10000
+    opaqueMediaInputTokenReservation: 0
+`);
+    const config = loadRuntimeConfigFile(path);
+    expect(config.gateway.pools[0]?.opaqueMediaInputTokens).toBe(0);
   });
 
   it("supports Anthropic-only and OpenAI-only configurations", () => {
@@ -263,8 +282,26 @@ pools:
     const config = loadRuntimeConfig({
       OPENAI_UPSTREAM_URL: "https://api.openai.com",
       TOKEN_BUDGET: "0",
+      OPAQUE_MEDIA_INPUT_TOKENS: "4096",
     });
     expect(config.source).toEqual({ kind: "environment" });
     expect(config.gateway.pools[0]?.budget).toBe(0);
+  });
+
+  it("loads the v3.7 opaque-media reservation override", () => {
+    const path = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: http://localhost:8000 }
+pools:
+  - name: local
+    modelPrefixes: [local-]
+    estimatorModel: gpt-4o
+    maxConcurrent: 2
+    inFlightTokenBudget: 10000
+    opaqueMediaInputTokenReservation: 0
+`);
+    const config = loadRuntimeConfigFile(path);
+    expect(config.gateway.pools[0]?.opaqueMediaInputTokens).toBe(0);
   });
 });

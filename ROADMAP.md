@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.7.0` prototype to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.8.0` prototype to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.7.0
+## Current baseline: v0.8.0
 
 The current release provides:
 
@@ -29,7 +29,10 @@ The current release provides:
 - Model-prefix routing to independently configured local pools.
 - Fail-fast concurrent-request and token-budget admission.
 - Priority reserve support with secure-by-default priority handling.
-- Provider-aware prompt, tool-schema, tool-call, and media admission estimates.
+- Provider-aware prompt, tool-schema, tool-call, and configurable media
+  admission estimates using `async-bulkhead-llm` 3.7 request surfaces.
+- Immutable reservation previews supplied as exact per-call admission overrides.
+- Stable admission UUIDs exposed as `x-admission-id` on admitted responses.
 - Streaming usage correction, backpressure, response and idle timeouts.
 - Graceful shutdown, local statistics, strict startup validation, and Node.js 20+ support.
 - Versioned, startup-only YAML configuration (`TYR_CONFIG_FILE`) with strict
@@ -40,17 +43,52 @@ The current release provides:
   `npm run validate:config`), an example configuration file, a JSON Schema,
   a production Dockerfile, and a file-mounted Compose example.
 
-Known commercial limitations include single-process capacity, no built-in
-request identity, no standard metrics exporter, no durable audit trail,
+Known commercial limitations include single-process capacity, no authenticated
+tenant/application identity, no standard metrics exporter, no durable audit trail,
 limited protocol coverage, and no fully supported deployment package (the
-v0.7.0 Dockerfile and Compose example are a starting point; SBOM, provenance,
+v0.8.0 Dockerfile and Compose example are a starting point; SBOM, provenance,
 multi-architecture builds, and a Helm chart remain planned for v1.0.0).
 
 ## Release sequence
 
-### v0.8.0 — Observable and identifiable
+### v0.8.0 — Exact and correlatable admission
 
-**Target duration:** 2–3 weeks  
+**Status:** Released 2026-07-20
+**Goal:** Align Tyr's admission model with `async-bulkhead-llm` 3.7.0 and make admitted requests reliably correlatable.
+
+Delivered:
+
+- Upgraded `async-bulkhead-llm` from 3.6.0 to 3.7.0.
+- Replaced synthetic JSON prompt projection and hidden-symbol metadata with
+  first-class `system`, `extraInputTokens`, and `opaqueBlockTokens` request
+  surfaces.
+- Added configurable per-pool and legacy-environment opaque media/document
+  token reservations.
+- Frozen one reservation preview per request and supplied it as the exact
+  per-call reservation override, so the preview and admission decision use the
+  same immutable estimate.
+- Exposed the stable bulkhead admission UUID as `x-admission-id` on admitted
+  responses.
+- Added regression coverage and synchronized the configuration schema,
+  examples, README, changelog, generated runtime, and release metadata.
+
+Outcome:
+
+- Provider-only prompt metadata and opaque blocks participate in admission
+  without being serialized into fake user content.
+- The reservation shown before execution cannot drift from the reservation
+  used to admit the request.
+- Clients and operators can correlate an admitted HTTP request with its
+  reservation lifecycle using one stable identifier.
+
+Remaining limitations carried into the next milestone:
+
+- No standard metrics exporter, authenticated tenant/application identity,
+  protected operational endpoints, or structured audit event stream.
+
+### v0.9.0 — Observable and identifiable
+
+**Target duration:** 2–3 weeks
 **Goal:** Make Tyr safe to pilot and capable of proving that admission control improves production outcomes.
 
 Planned work:
@@ -79,9 +117,9 @@ Deferred from this release:
 - Durable audit storage or a search UI.
 - Per-tenant bulkhead instances.
 
-### v0.9.0 — Ecosystem and modern OpenAI support
+### v0.10.0 — Ecosystem and modern OpenAI support
 
-**Target duration:** 2–3 weeks  
+**Target duration:** 2–3 weeks
 **Goal:** Reduce adoption friction and support the most commercially important modern OpenAI workload.
 
 Planned work:
@@ -108,9 +146,9 @@ Deferred from this release:
 - Generic MCP session accounting.
 - Native Kong or Envoy extensions.
 
-### v0.10.0 — Distributed token leases
+### v0.11.0 — Distributed token leases
 
-**Target duration:** 4–6 weeks  
+**Target duration:** 4–6 weeks
 **Goal:** Enforce one capacity budget across multiple Tyr replicas.
 
 Planned work:
@@ -138,9 +176,9 @@ Non-goals:
 - Automatically discovering provider quotas.
 - Kubernetes-only budget partitioning as the primary correctness mechanism.
 
-### v0.11.0 — Tenant policy and fairness
+### v0.12.0 — Tenant policy and fairness
 
-**Target duration:** 2–4 weeks  
+**Target duration:** 2–4 weeks
 **Goal:** Support paid multi-tenant deployments without creating unbounded gateway state.
 
 Planned work:
@@ -163,7 +201,7 @@ Exit criteria:
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.11.0  
+**Target duration:** 3–5 weeks after v0.12.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:
@@ -251,4 +289,4 @@ A milestone may ship only when:
 - Upgrade and rollback behavior is documented.
 - The release notes distinguish admission-time guarantees from post-admission usage overruns.
 
-Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder post-v0.9 protocol and integration work, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.
+Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.10, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.

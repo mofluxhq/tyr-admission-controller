@@ -117,9 +117,9 @@ export const anthropicAdapter: Adapter = {
       ...(typeof body["max_tokens"] === "number"
         ? { maxTokens: body["max_tokens"] }
         : {}),
-      prompt: {
-        system: body["system"],
-        messages: body["messages"],
+      messages: body["messages"],
+      ...(body["system"] !== undefined ? { system: body["system"] } : {}),
+      promptExtras: {
         tools: body["tools"],
         tool_choice: body["tool_choice"],
       },
@@ -202,8 +202,8 @@ export const openaiAdapter: Adapter = {
     return createAdmissionRequest({
       model,
       ...(maxTokens !== undefined ? { maxTokens } : {}),
-      prompt: {
-        messages: body["messages"],
+      messages: body["messages"],
+      promptExtras: {
         tools: body["tools"],
         tool_choice: body["tool_choice"],
         functions: body["functions"],

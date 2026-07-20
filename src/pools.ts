@@ -31,6 +31,8 @@ export type PoolConfig = {
   highPriorityReserve?: number;
   /** Fallback output reservation when max_tokens is absent. */
   outputCap?: number;
+  /** Fixed surcharge for each opaque media/document block. Defaults to 2,048. */
+  opaqueMediaInputTokens?: number;
 };
 
 export type Pool = {
@@ -115,6 +117,13 @@ function validatePoolConfigs(configs: PoolConfig[]): void {
     if (config.outputCap !== undefined) {
       assertInteger(config.outputCap, `${base}.outputCap`, { min: 0 });
     }
+    if (config.opaqueMediaInputTokens !== undefined) {
+      assertInteger(
+        config.opaqueMediaInputTokens,
+        `${base}.opaqueMediaInputTokens`,
+        { min: 0 },
+      );
+    }
   });
 }
 
@@ -132,7 +141,11 @@ export function createPools(configs: PoolConfig[]): Pools {
           ? {
               tokenBudget: {
                 budget: c.budget,
-                estimator: createAdmissionTokenEstimator(c.model, c.outputCap),
+                estimator: createAdmissionTokenEstimator(
+                  c.model,
+                  c.outputCap,
+                  c.opaqueMediaInputTokens,
+                ),
                 ...(c.highPriorityReserve !== undefined
                   ? { highPriorityReserve: c.highPriorityReserve }
                   : {}),

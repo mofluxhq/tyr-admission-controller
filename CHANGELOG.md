@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-20
+
+### Added
+
+- Successful admitted responses now include `x-admission-id`, exposing
+  `async-bulkhead-llm`'s stable UUID for correlation across client logs,
+  gateway traces, streaming usage updates, and release events.
+- Added per-pool `opaqueMediaInputTokenReservation` and legacy
+  `OPAQUE_MEDIA_INPUT_TOKENS` configuration. The default remains a conservative
+  2,048-token surcharge per opaque media/document block; `0` disables it.
+
+### Changed
+
+- Upgraded `async-bulkhead-llm` from 3.6.0 to 3.7.0.
+- Admission projection now uses v3.7's first-class `system`,
+  `extraInputTokens`, and `opaqueBlockTokens` surfaces instead of a hidden
+  symbol and a synthetic JSON user message.
+- Tyr now computes one exact reservation preview and supplies it through the
+  v3.7 per-call reservation override, ensuring the preview and actual admission
+  use the same immutable token estimate.
+- Removed an accidentally pasted assistant transcript from the beginning of
+  `README.md` and updated the documentation for the 3.7 integration.
+
 ## [0.7.0] - 2026-07-19
 
 ### Added

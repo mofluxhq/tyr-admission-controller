@@ -32,6 +32,7 @@ const LEGACY_CONFIG_ENV_NAMES = [
   "MAX_CONCURRENT",
   "TOKEN_BUDGET",
   "HIGH_PRIORITY_RESERVE",
+  "OPAQUE_MEDIA_INPUT_TOKENS",
   "TRUST_X_PRIORITY_HEADER",
 ] as const;
 
@@ -121,6 +122,11 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
   if (highPriorityReserve > budget) {
     throw new Error("HIGH_PRIORITY_RESERVE must not exceed TOKEN_BUDGET");
   }
+  const opaqueMediaInputTokens = optionalIntegerEnv(
+    env,
+    "OPAQUE_MEDIA_INPUT_TOKENS",
+    { min: 0 },
+  );
   const trustPriorityHeader = booleanEnv(
     env,
     "TRUST_X_PRIORITY_HEADER",
@@ -146,6 +152,9 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
           maxConcurrent,
           budget,
           highPriorityReserve,
+          ...(opaqueMediaInputTokens !== undefined
+            ? { opaqueMediaInputTokens }
+            : {}),
         },
       ],
     },
@@ -280,6 +289,7 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       "inFlightTokenBudget",
       "highPriorityTokenReserve",
       "defaultOutputReservation",
+      "opaqueMediaInputTokenReservation",
     ],
     field,
   );
@@ -324,6 +334,12 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     `${field}.defaultOutputReservation`,
     { min: 0 },
   );
+  const opaqueMediaInputTokens = optionalInteger(
+    pool,
+    "opaqueMediaInputTokenReservation",
+    `${field}.opaqueMediaInputTokenReservation`,
+    { min: 0 },
+  );
 
   if (reserve !== undefined && budget === undefined) {
     throw new Error(
@@ -344,6 +360,9 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     ...(budget !== undefined ? { budget } : {}),
     ...(reserve !== undefined ? { highPriorityReserve: reserve } : {}),
     ...(outputCap !== undefined ? { outputCap } : {}),
+    ...(opaqueMediaInputTokens !== undefined
+      ? { opaqueMediaInputTokens }
+      : {}),
   };
 }
 

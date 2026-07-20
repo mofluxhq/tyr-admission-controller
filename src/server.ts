@@ -332,6 +332,17 @@ export function createGateway(opts: GatewayOptions) {
 
       // Complete token-bearing admission projection of the validated request.
       const llmRequest = adapter.toAdmissionRequest(body);
+      // Freeze one authoritative reservation calculation before any async work.
+      // v3.7's per-call override makes admission use this exact preview rather
+      // than re-running the estimator later in the request lifecycle.
+      const reservationPreview = pool.bulkhead.estimate(llmRequest);
+      const reservation =
+        reservationPreview === null
+          ? undefined
+          : {
+              input: reservationPreview.input,
+              maxOutput: reservationPreview.maxOutput,
+            };
 
       let priority: LLMPriority = "normal";
       if (resolvePriority !== undefined) {
@@ -374,6 +385,12 @@ export function createGateway(opts: GatewayOptions) {
         await pool.bulkhead.run(
           llmRequest,
           async (signal, ctx) => {
+            if (ctx !== undefined) {
+              // Stable v3.7 admission identity for correlating the client
+              // response with gateway traces, usage updates, and release.
+              res.setHeader("x-admission-id", ctx.admissionId);
+            }
+
             // Response timeout: bounds how long we wait for the upstream to
             // send response headers (i.e. for fetch() to resolve). Cleared
             // the instant headers arrive — it has no bearing on how long a
@@ -476,6 +493,7 @@ export function createGateway(opts: GatewayOptions) {
           {
             priority,
             signal: admissionSignal,
+            ...(reservation !== undefined ? { reservation } : {}),
             getUsage: (r) => r.usage,
           },
 

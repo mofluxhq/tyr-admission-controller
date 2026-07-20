@@ -138,6 +138,11 @@
         "defaultOutputReservation": {
           "type": "integer",
           "minimum": 0
+        },
+        "opaqueMediaInputTokenReservation": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 2048
         }
       }
     }

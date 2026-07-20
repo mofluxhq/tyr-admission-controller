@@ -232,6 +232,7 @@ function startGateway(
     maxConcurrent: number;
     budget?: number;
     highPriorityReserve?: number;
+    opaqueMediaInputTokens?: number;
   },
   opts: {
     responseTimeoutMs?: number;
@@ -297,6 +298,9 @@ describe("admission-gateway", () => {
         body: JSON.stringify(msg("hi")),
       });
       expect(res.status).toBe(200);
+      expect(res.headers.get("x-admission-id")).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
       const body = (await res.json()) as { id: string };
       expect(body.id).toBe("msg_mock");
 
@@ -584,6 +588,39 @@ describe("admission-gateway", () => {
       });
       expect(res.status).toBe(429);
       expect(res.headers.get("x-admission-reason")).toBe("budget_limit");
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("supports a per-pool opaque media reservation override", async () => {
+    const gw = await startGateway({
+      maxConcurrent: 4,
+      budget: 500,
+      opaqueMediaInputTokens: 0,
+    });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-5",
+          max_tokens: 100,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "describe this" },
+                {
+                  type: "image",
+                  source: { type: "url", url: "https://example.test/image.png" },
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(200);
     } finally {
       gw.server.close();
     }
