@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-21
+
+### Added
+
+- Added per-pool `admissionMode: enforce | observe`. Observe mode records the
+  same detailed capacity decision as enforcement while proxying capacity
+  rejections upstream with a synthetic `shadow-...` admission ID.
+- Added adaptive per-model input estimation backed by
+  `createAdaptiveTokenEstimator`, enabled by default for budgeted pools and
+  configurable through `adaptiveEstimation` / legacy environment variables.
+- Added v3.8 advisory response headers: `x-admission-mode`,
+  `x-admission-preview`, `x-admission-preview-reason`, and
+  `x-admission-reserved-tokens`.
+- Added per-pool Tyr policy telemetry under `/stats`, including advisory
+  decisions, shadow bypasses, race bypasses, and adaptive correction snapshots.
+- Added bounded shutdown configuration through `shutdown.drainTimeoutMs` and
+  `SHUTDOWN_DRAIN_TIMEOUT_MS`, returning per-pool outstanding-work snapshots.
+- Added focused v3.8 tests for exact reservation reuse, detailed previews,
+  shadow execution, adaptive calibration, shutdown safety, and bounded drain.
+
+### Changed
+
+- Upgraded and pinned `async-bulkhead-llm` to exactly 3.8.0.
+- Re-architected pool handling into a policy runtime that owns preparation,
+  advisory decisions, enforcement/observation, calibration, statistics, and
+  drain behavior. The HTTP server no longer calls bulkhead primitives directly.
+- The complete immutable object returned by `bulkhead.estimate()` is now passed
+  verbatim to both `wouldAdmit()` and authoritative admission, including the
+  v3.8 `reserved` consistency check.
+- Shutdown now closes remaining HTTP connections when a configured bounded drain
+  expires instead of waiting indefinitely on stalled work.
+
+
 ## [0.8.0] - 2026-07-20
 
 ### Added

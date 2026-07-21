@@ -1,33 +1,32 @@
 # Tyr Admission Controller
 
 Tyr is an admission-first proxy for Anthropic Messages and OpenAI Chat
-Completions. Before an upstream request begins, Tyr reserves estimated input
-capacity plus the request's maximum output allowance against a model-routed
-bulkhead. Requests that would exceed concurrency or token capacity are rejected
-immediately instead of waiting behind already-saturated work.
+Completions. Before an upstream request begins, Tyr projects the request into a
+token reservation, evaluates current concurrency and token pressure, and either
+enforces or observes the resulting admission decision.
 
-Tyr 0.8.0 is built on
-[`async-bulkhead-llm@3.7.0`](https://www.npmjs.com/package/async-bulkhead-llm),
-using its first-class system-prompt accounting, extra input-token charges,
-opaque-block policies, exact per-call reservation overrides, stable admission
-IDs, usage reconciliation, priority reserves, rejection details, and graceful
-draining.
+Tyr 0.9.0 is built on
+[`async-bulkhead-llm@3.8.0`](https://www.npmjs.com/package/async-bulkhead-llm).
+The pool runtime uses immutable reservation previews, detailed `wouldAdmit()`
+snapshots, per-model adaptive estimation, stable admission identities, streaming
+usage reconciliation, priority reserves, and bounded drain results.
 
-> **Status:** v0.8.0, single-process, proprietary software. See
-> [`LICENSE.txt`](LICENSE.txt). The current product roadmap starts with
-> observability and authenticated identity in v0.9.0.
+> **Status:** v0.9.0, single-process, proprietary software. See
+> [`LICENSE.txt`](LICENSE.txt). Tyr is suitable for controlled design-partner
+> pilots; distributed capacity coordination and standard telemetry exporters
+> remain roadmap work.
 
-## What shipped in v0.8.0
+## What shipped in v0.9.0
 
-- Native `async-bulkhead-llm` 3.7.0 request projection through `system`,
-  `extraInputTokens`, and `opaqueBlockTokens`.
-- One immutable reservation preview per request, supplied as the exact
-  reservation used for admission.
-- Stable `x-admission-id` UUIDs on admitted responses.
-- Configurable per-pool opaque media/document reservations, with a conservative
-  default of 2,048 tokens per block.
-- Regression coverage for system prompts, tools, tool calls, opaque content,
-  configuration compatibility, and admission response headers.
+- A pool runtime that separates HTTP forwarding from admission policy.
+- Exact v3.8 reservation objects passed verbatim to advisory and authoritative
+  admission paths.
+- Detailed capacity previews on every validated request.
+- Per-pool `enforce` and `observe` modes for safe shadow rollouts.
+- Adaptive per-model input estimation using provider-reported release usage.
+- Bounded shutdown drains with per-pool outstanding-work snapshots.
+- Admission-preview headers and expanded `/stats` policy telemetry.
+- Focused v3.8 regression tests in addition to the existing gateway suite.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the complete release history and
 [`ROADMAP.md`](ROADMAP.md) for planned work.
@@ -39,12 +38,12 @@ For each provider request, Tyr:
 1. Buffers and validates the JSON body within the configured size limit.
 2. Routes the model to the longest matching pool prefix.
 3. Projects provider prompt content into an admission request.
-4. Computes one reservation preview for estimated input and maximum output.
-5. Attempts fail-fast admission against the pool's concurrency and token
-   limits.
-6. Proxies the original request body and supported provider headers unchanged.
-7. Reconciles the reservation from provider usage, including during supported
-   streaming responses.
+4. Computes one immutable reservation preview.
+5. Calls v3.8 `wouldAdmit(..., { detail: true })` with that exact reservation.
+6. In `enforce` mode, performs authoritative admission with the same object. In
+   `observe` mode, capacity rejections are recorded but proxied upstream.
+7. Reconciles live and final provider usage. Adaptive pools feed completed input
+   usage back into their per-model estimator.
 8. Releases remaining capacity when the request completes, fails, or the client
    disconnects.
 
@@ -65,7 +64,7 @@ temporarily exceed the configured ceiling. Tyr blocks new admissions until
 capacity is released; it does not abort an already-running request. This is
 deliberate overrun accounting, not a strict post-admission kill switch.
 
-Admission estimation uses the v3.7 request surfaces instead of folding the
+Admission estimation uses the v3.8 request surfaces instead of folding the
 entire provider request into a synthetic user message:
 
 - Anthropic `system` and provider messages remain first-class request fields.
@@ -78,6 +77,25 @@ entire provider request into a synthetic user message:
 
 The estimate is intended for load shedding and capacity protection. It is not a
 billing-grade tokenizer or a substitute for provider usage records.
+
+For token-budgeted pools, adaptive estimation is enabled by default. Tyr records
+provider-reported input usage on release and applies the library's bounded
+per-model EWMA correction after the configured minimum sample count. Output
+reservations are never adapted. Calibration is local, in-memory, and reset when
+the process restarts.
+
+## Admission modes
+
+`enforce` is the default and returns the normal `429`/`503` admission response.
+`observe` runs the same reservation and capacity decision but proxies requests
+that would have failed for budget, concurrency, queue, or admission timeout.
+Those bypasses receive a synthetic `shadow-...` admission ID and are counted in
+`/stats`. Shutdown and client-abort behavior are never shadowed.
+
+Observe mode models the system that would exist under enforcement: requests
+that would be rejected do not consume simulated pool capacity. It is therefore
+appropriate for measuring prospective rejection rates before enabling policy,
+not for representing actual upstream load while bypasses are running.
 
 ## HTTP routes
 
@@ -104,13 +122,20 @@ by the calling application and must not be placed in Tyr configuration files.
 
 ### Admission response headers
 
-Successfully admitted requests receive a stable `x-admission-id` UUID. The
-identifier can be used to correlate client logs with Tyr traces, usage updates,
-and reservation release events.
+Every validated, pool-routed request includes an advisory snapshot:
 
-Admission rejections include `x-admission-reason`. Tyr does not fabricate a
-`Retry-After` header because it does not know when enough capacity will become
-available.
+| Header | Meaning |
+|---|---|
+| `x-admission-mode` | `enforce` or `observe` |
+| `x-admission-preview` | Advisory `admit` or `reject` result at request arrival |
+| `x-admission-preview-reason` | Present when the advisory result rejects |
+| `x-admission-reserved-tokens` | Exact input-plus-output reservation when a token budget exists |
+| `x-admission-id` | Bulkhead UUID, or `shadow-...` for an observe-mode bypass |
+
+Actual admission rejections also include `x-admission-reason`. Tyr does not
+fabricate a `Retry-After` header because a fail-fast capacity snapshot cannot
+provide an honest availability time. Advisory results are not guarantees;
+capacity can change before authoritative admission.
 
 ### Error contract
 
@@ -262,30 +287,35 @@ timeouts:
   streamIdleMs: 30000
   clientStallMs: 30000
 
+shutdown:
+  drainTimeoutMs: 30000
+
 priority:
   trustHeader: false
 
 pools:
   - name: interactive-claude
-    modelPrefixes:
-      - claude-sonnet-4
-      - claude-haiku-4
+    modelPrefixes: [claude-sonnet-4, claude-haiku-4]
     estimatorModel: claude-sonnet-4-5
     maxConcurrent: 40
+    admissionMode: enforce
     inFlightTokenBudget: 400000
     highPriorityTokenReserve: 80000
     defaultOutputReservation: 8192
     opaqueMediaInputTokenReservation: 2048
+    adaptiveEstimation:
+      enabled: true
+      smoothing: 0.2
+      minSamples: 5
+      minCorrection: 0.5
+      maxCorrection: 2
+      maxModels: 64
 
   - name: batch-openai
-    modelPrefixes:
-      - gpt-4o
-      - gpt-5
-      - o1
-      - o3
-      - o4
+    modelPrefixes: [gpt-4o, gpt-5, o1, o3, o4]
     estimatorModel: gpt-4o
     maxConcurrent: 20
+    admissionMode: observe
     inFlightTokenBudget: 250000
     defaultOutputReservation: 4096
 ```
@@ -303,15 +333,23 @@ pools:
 | `timeouts.responseHeadersMs` | No | Maximum wait for upstream response headers |
 | `timeouts.streamIdleMs` | No | Maximum gap between upstream stream chunks |
 | `timeouts.clientStallMs` | No | Maximum wait for a backpressured client to drain |
+| `shutdown.drainTimeoutMs` | No | Bounded graceful-drain deadline; omit for unbounded drain |
 | `priority.trustHeader` | No | Trust raw `x-priority`; default `false` |
 | `pools[].name` | Yes | Unique pool name used in stats and rejection details |
 | `pools[].modelPrefixes` | Yes | Unique prefixes; longest matching prefix wins |
 | `pools[].estimatorModel` | Yes | Model used for estimator ratios; requests are not rewritten |
 | `pools[].maxConcurrent` | Yes | Maximum active requests in the pool |
+| `pools[].admissionMode` | No | `enforce` (default) or shadow `observe` |
 | `pools[].inFlightTokenBudget` | No | Admission-time in-flight token ceiling |
 | `pools[].highPriorityTokenReserve` | No | Token headroom reserved for high-priority requests |
 | `pools[].defaultOutputReservation` | No | Output reservation used when the request omits an output limit |
 | `pools[].opaqueMediaInputTokenReservation` | No | Fixed surcharge per opaque media/document block; default `2048`, `0` disables it |
+| `pools[].adaptiveEstimation.enabled` | No | Enables local per-model correction; default `true` for budgeted pools |
+| `pools[].adaptiveEstimation.smoothing` | No | EWMA smoothing in `(0, 1]`; default `0.2` |
+| `pools[].adaptiveEstimation.minSamples` | No | Samples before applying correction; default `5` |
+| `pools[].adaptiveEstimation.minCorrection` | No | Lower factor clamp; default `0.5` |
+| `pools[].adaptiveEstimation.maxCorrection` | No | Upper factor clamp; default `2` |
+| `pools[].adaptiveEstimation.maxModels` | No | Maximum tracked model keys; default `64` |
 
 `inFlightTokenBudget` is tri-state:
 
@@ -327,6 +365,14 @@ preempt running work.
 to each opaque image, audio, document, file, or video block. Omit it for 2,048
 tokens per block. Set it to `0` only when another estimator or upstream policy
 accounts for that cost.
+
+`adaptiveEstimation` requires no external state. Set `enabled: false` when a
+custom exact tokenizer is already supplying reservations or when deterministic
+estimates across process restarts are more important than local calibration.
+
+`shutdown.drainTimeoutMs` uses the v3.8 bounded drain result. When the deadline
+expires, Tyr records the outstanding count, closes remaining HTTP connections,
+and returns the snapshot from `shutdown()`.
 
 ## Priority safety
 
@@ -382,7 +428,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.8.0 .
+docker build -t tyr-admission-controller:0.9.0 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -393,7 +439,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.8.0
+  tyr-admission-controller:0.9.0
 ```
 
 Or use the included Compose example:
@@ -418,6 +464,8 @@ deployments:
 UPSTREAM_URL=https://api.anthropic.com \
 OPENAI_UPSTREAM_URL=https://api.openai.com \
 TOKEN_BUDGET=500000 \
+ADMISSION_MODE=enforce \
+ADAPTIVE_ESTIMATION=true \
 OPAQUE_MEDIA_INPUT_TOKENS=2048 \
 MAX_CONCURRENT=50 \
 npm start
@@ -436,17 +484,22 @@ explicit `content-length`.
 
 `SIGTERM` and `SIGINT` stop new admissions, close the HTTP server, and drain
 in-flight bulkhead work. Requests reaching an existing keep-alive connection
-during shutdown receive `503` with `x-admission-reason: shutdown`.
+during shutdown receive `503` with `x-admission-reason: shutdown`. When
+`shutdown.drainTimeoutMs` is configured, Tyr closes remaining connections after
+the bounded v3.8 drain snapshot reports outstanding work.
 
-`/stats` exposes the live statistics returned by each pool's bulkhead. The
-endpoint is operational data and is currently unauthenticated; protect it at the
-network or reverse-proxy layer.
+`/stats` exposes the live bulkhead statistics plus a `tyr` object for each pool.
+That object contains admission mode, advisory admit/reject counts, observe-mode
+bypass counts, and adaptive correction snapshots. The endpoint is operational
+data and is currently unauthenticated; protect it at the network or
+reverse-proxy layer.
 
 ## Known limitations
 
 - Budgets and statistics are per process. N replicas can collectively admit
   approximately N times a per-replica budget unless capacity is externally
   partitioned or coordinated.
+- Configuration and adaptive calibration are local to one process. Calibration is loaded only from live observations and is not persisted across restarts.
 - Configuration is loaded only at startup; there is no hot reload.
 - `/stats` and provider routes have no built-in authentication or authorization.
 - There is no OpenTelemetry or Prometheus exporter and no durable audit trail.
@@ -467,20 +520,21 @@ config/
   tyr.example.yaml  documented configuration template
   tyr.schema.json   JSON Schema for editor and CI integration
 src/
-  admission.ts      v3.7 request projection and reservation estimator
+  admission.ts      v3.8 request projection and estimator policy
   adapters.ts       provider validation, projection, and usage parsing
   cli.ts            offline configuration validation command
   config.ts         YAML and legacy environment configuration loading
   index.ts          validated process entrypoint
-  pools.ts          pool validation, routing, and bulkhead construction
+  pools.ts          v3.8 policy runtime, shadow mode, adaptation, and drain
   server.ts         HTTP proxy, admission, timeouts, and shutdown
   sse.ts            Anthropic streaming usage extraction
   sse-openai.ts     OpenAI streaming usage extraction
   validation.ts     provider-agnostic request shape validation
 test/
-  admission.test.ts v3.7 projection and estimator regression tests
+  admission.test.ts request projection and estimator regression tests
   config.test.ts    file-schema and environment compatibility tests
   gateway.test.ts   gateway end-to-end tests
+  pools-v38.test.ts exact preview, observe, adaptive, and drain tests
 Dockerfile          production multi-stage image
 compose.example.yaml local file-configured container example
 ```

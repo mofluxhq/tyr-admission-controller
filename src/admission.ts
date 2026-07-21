@@ -3,6 +3,7 @@ import {
   type ContentBlock,
   type LLMMessage,
   type LLMRequest,
+  type ModelAwareEstimatorOptions,
   type TokenEstimator,
 } from "async-bulkhead-llm";
 
@@ -168,7 +169,7 @@ function estimateExtraInputTokens(
 }
 
 /**
- * Builds an async-bulkhead-llm v3.7 request using its first-class `system`,
+ * Builds an async-bulkhead-llm v3.8 request using its first-class `system`,
  * `extraInputTokens`, and opaque-block estimation surfaces. Provider prompt
  * material that is not represented by message text is projected into a stable
  * metadata estimate rather than hidden on a symbol or folded into a synthetic
@@ -208,21 +209,34 @@ export function createAdmissionRequest(opts: {
 }
 
 /**
- * Creates the pool estimator with a conservative fixed surcharge for provider
- * media/document blocks. v3.7 applies this policy directly while also counting
- * first-class system prompts and `extraInputTokens`.
+ * Builds the model-aware estimator options shared by the static and adaptive
+ * v3.8 estimators. Keeping this projection in one place guarantees that
+ * previews, actual reservations, and adaptive observations use the same
+ * opaque-content and output-reservation policy.
  */
+export function admissionEstimatorOptions(
+  defaultModel: string,
+  outputCap?: number,
+  opaqueMediaInputTokens = OPAQUE_MEDIA_INPUT_TOKENS,
+): ModelAwareEstimatorOptions {
+  const byType = Object.fromEntries(
+    MEDIA_BLOCK_TYPES.map((type) => [type, opaqueMediaInputTokens]),
+  );
+  const options: ModelAwareEstimatorOptions = {
+    defaultModel,
+    ...(outputCap !== undefined ? { outputCap } : {}),
+    opaqueBlockTokens: { byType },
+  };
+  return options;
+}
+
+/** Creates the non-adaptive estimator used when calibration is disabled. */
 export function createAdmissionTokenEstimator(
   defaultModel: string,
   outputCap?: number,
   opaqueMediaInputTokens = OPAQUE_MEDIA_INPUT_TOKENS,
 ): TokenEstimator {
-  const byType = Object.fromEntries(
-    MEDIA_BLOCK_TYPES.map((type) => [type, opaqueMediaInputTokens]),
+  return createModelAwareTokenEstimator(
+    admissionEstimatorOptions(defaultModel, outputCap, opaqueMediaInputTokens),
   );
-  return createModelAwareTokenEstimator({
-    defaultModel,
-    ...(outputCap !== undefined ? { outputCap } : {}),
-    opaqueBlockTokens: { byType },
-  });
 }

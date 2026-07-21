@@ -34,6 +34,14 @@ const LEGACY_CONFIG_ENV_NAMES = [
   "HIGH_PRIORITY_RESERVE",
   "OPAQUE_MEDIA_INPUT_TOKENS",
   "TRUST_X_PRIORITY_HEADER",
+  "ADMISSION_MODE",
+  "SHUTDOWN_DRAIN_TIMEOUT_MS",
+  "ADAPTIVE_ESTIMATION",
+  "ADAPTIVE_SMOOTHING",
+  "ADAPTIVE_MIN_SAMPLES",
+  "ADAPTIVE_MIN_CORRECTION",
+  "ADAPTIVE_MAX_CORRECTION",
+  "ADAPTIVE_MAX_MODELS",
 ] as const;
 
 function envString(env: NodeJS.ProcessEnv, name: string): string | undefined {
@@ -52,6 +60,44 @@ function parseInteger(
   }
   if (opts.max !== undefined && value > opts.max) {
     throw new Error(`${name} must be an integer <= ${opts.max}`);
+  }
+  return value;
+}
+
+function parseFiniteNumber(
+  raw: string,
+  name: string,
+  opts: { exclusiveMin?: number; min?: number; max?: number },
+): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value)) throw new Error(`${name} must be a finite number`);
+  if (opts.exclusiveMin !== undefined && value <= opts.exclusiveMin) {
+    throw new Error(`${name} must be > ${opts.exclusiveMin}`);
+  }
+  if (opts.min !== undefined && value < opts.min) {
+    throw new Error(`${name} must be >= ${opts.min}`);
+  }
+  if (opts.max !== undefined && value > opts.max) {
+    throw new Error(`${name} must be <= ${opts.max}`);
+  }
+  return value;
+}
+
+function optionalNumberEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  opts: { exclusiveMin?: number; min?: number; max?: number },
+): number | undefined {
+  const raw = envString(env, name);
+  return raw === undefined ? undefined : parseFiniteNumber(raw, name, opts);
+}
+
+function admissionModeEnv(
+  env: NodeJS.ProcessEnv,
+): "enforce" | "observe" {
+  const value = envString(env, "ADMISSION_MODE")?.toLowerCase() ?? "enforce";
+  if (value !== "enforce" && value !== "observe") {
+    throw new Error('ADMISSION_MODE must be "enforce" or "observe"');
   }
   return value;
 }
@@ -114,6 +160,11 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
   const maxOutputTokens = optionalIntegerEnv(env, "MAX_OUTPUT_TOKENS", {
     min: 0,
   });
+  const shutdownDrainTimeoutMs = optionalIntegerEnv(
+    env,
+    "SHUTDOWN_DRAIN_TIMEOUT_MS",
+    { min: 0 },
+  );
   const maxConcurrent = integerEnv(env, "MAX_CONCURRENT", 50, { min: 1 });
   const budget = integerEnv(env, "TOKEN_BUDGET", 500_000, { min: 0 });
   const highPriorityReserve = integerEnv(env, "HIGH_PRIORITY_RESERVE", 0, {
@@ -132,6 +183,56 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
     "TRUST_X_PRIORITY_HEADER",
     false,
   );
+  const admissionMode = admissionModeEnv(env);
+  const adaptiveSmoothing = optionalNumberEnv(env, "ADAPTIVE_SMOOTHING", {
+    exclusiveMin: 0,
+    max: 1,
+  });
+  const adaptiveMinSamples = optionalIntegerEnv(
+    env,
+    "ADAPTIVE_MIN_SAMPLES",
+    { min: 1 },
+  );
+  const adaptiveMinCorrection = optionalNumberEnv(
+    env,
+    "ADAPTIVE_MIN_CORRECTION",
+    { exclusiveMin: 0 },
+  );
+  const adaptiveMaxCorrection = optionalNumberEnv(
+    env,
+    "ADAPTIVE_MAX_CORRECTION",
+    { exclusiveMin: 0 },
+  );
+  const adaptiveMaxModels = optionalIntegerEnv(env, "ADAPTIVE_MAX_MODELS", {
+    min: 1,
+  });
+  if (
+    adaptiveMinCorrection !== undefined &&
+    adaptiveMaxCorrection !== undefined &&
+    adaptiveMaxCorrection < adaptiveMinCorrection
+  ) {
+    throw new Error(
+      "ADAPTIVE_MAX_CORRECTION must be >= ADAPTIVE_MIN_CORRECTION",
+    );
+  }
+  const adaptiveEstimation = {
+    enabled: booleanEnv(env, "ADAPTIVE_ESTIMATION", true),
+    ...(adaptiveSmoothing !== undefined
+      ? { smoothing: adaptiveSmoothing }
+      : {}),
+    ...(adaptiveMinSamples !== undefined
+      ? { minSamples: adaptiveMinSamples }
+      : {}),
+    ...(adaptiveMinCorrection !== undefined
+      ? { minCorrection: adaptiveMinCorrection }
+      : {}),
+    ...(adaptiveMaxCorrection !== undefined
+      ? { maxCorrection: adaptiveMaxCorrection }
+      : {}),
+    ...(adaptiveMaxModels !== undefined
+      ? { maxModels: adaptiveMaxModels }
+      : {}),
+  };
 
   return {
     port,
@@ -143,6 +244,9 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
       ...(clientStallTimeoutMs !== undefined ? { clientStallTimeoutMs } : {}),
       ...(maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      ...(shutdownDrainTimeoutMs !== undefined
+        ? { shutdownDrainTimeoutMs }
+        : {}),
       trustPriorityHeader,
       pools: [
         {
@@ -152,6 +256,8 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
           maxConcurrent,
           budget,
           highPriorityReserve,
+          admissionMode,
+          adaptiveEstimation,
           ...(opaqueMediaInputTokens !== undefined
             ? { opaqueMediaInputTokens }
             : {}),
@@ -229,6 +335,36 @@ function optionalInteger(
   return value === undefined ? undefined : requiredInteger(value, field, opts);
 }
 
+function requiredNumber(
+  value: unknown,
+  field: string,
+  opts: { exclusiveMin?: number; min?: number; max?: number },
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${field} must be a finite number`);
+  }
+  if (opts.exclusiveMin !== undefined && value <= opts.exclusiveMin) {
+    throw new Error(`${field} must be > ${opts.exclusiveMin}`);
+  }
+  if (opts.min !== undefined && value < opts.min) {
+    throw new Error(`${field} must be >= ${opts.min}`);
+  }
+  if (opts.max !== undefined && value > opts.max) {
+    throw new Error(`${field} must be <= ${opts.max}`);
+  }
+  return value;
+}
+
+function optionalNumber(
+  parent: ObjectValue,
+  key: string,
+  field: string,
+  opts: { exclusiveMin?: number; min?: number; max?: number },
+): number | undefined {
+  const value = parent[key];
+  return value === undefined ? undefined : requiredNumber(value, field, opts);
+}
+
 function optionalBoolean(
   parent: ObjectValue,
   key: string,
@@ -290,6 +426,8 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       "highPriorityTokenReserve",
       "defaultOutputReservation",
       "opaqueMediaInputTokenReservation",
+      "admissionMode",
+      "adaptiveEstimation",
     ],
     field,
   );
@@ -341,6 +479,88 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     { min: 0 },
   );
 
+  const admissionModeValue = pool["admissionMode"];
+  let admissionMode: "enforce" | "observe" | undefined;
+  if (admissionModeValue !== undefined) {
+    if (admissionModeValue !== "enforce" && admissionModeValue !== "observe") {
+      throw new Error(`${field}.admissionMode must be "enforce" or "observe"`);
+    }
+    admissionMode = admissionModeValue;
+  }
+
+  const adaptiveValue = optionalObjectValue(
+    pool,
+    "adaptiveEstimation",
+    `${field}.adaptiveEstimation`,
+  );
+  let adaptiveEstimation: PoolConfig["adaptiveEstimation"];
+  if (adaptiveValue !== undefined) {
+    assertKnownKeys(
+      adaptiveValue,
+      [
+        "enabled",
+        "smoothing",
+        "minSamples",
+        "minCorrection",
+        "maxCorrection",
+        "maxModels",
+      ],
+      `${field}.adaptiveEstimation`,
+    );
+    const enabled = optionalBoolean(
+      adaptiveValue,
+      "enabled",
+      `${field}.adaptiveEstimation.enabled`,
+    );
+    const smoothing = optionalNumber(
+      adaptiveValue,
+      "smoothing",
+      `${field}.adaptiveEstimation.smoothing`,
+      { exclusiveMin: 0, max: 1 },
+    );
+    const minSamples = optionalInteger(
+      adaptiveValue,
+      "minSamples",
+      `${field}.adaptiveEstimation.minSamples`,
+      { min: 1 },
+    );
+    const minCorrection = optionalNumber(
+      adaptiveValue,
+      "minCorrection",
+      `${field}.adaptiveEstimation.minCorrection`,
+      { exclusiveMin: 0 },
+    );
+    const maxCorrection = optionalNumber(
+      adaptiveValue,
+      "maxCorrection",
+      `${field}.adaptiveEstimation.maxCorrection`,
+      { exclusiveMin: 0 },
+    );
+    const maxModels = optionalInteger(
+      adaptiveValue,
+      "maxModels",
+      `${field}.adaptiveEstimation.maxModels`,
+      { min: 1 },
+    );
+    if (
+      minCorrection !== undefined &&
+      maxCorrection !== undefined &&
+      maxCorrection < minCorrection
+    ) {
+      throw new Error(
+        `${field}.adaptiveEstimation.maxCorrection must be >= ${field}.adaptiveEstimation.minCorrection`,
+      );
+    }
+    adaptiveEstimation = {
+      ...(enabled !== undefined ? { enabled } : {}),
+      ...(smoothing !== undefined ? { smoothing } : {}),
+      ...(minSamples !== undefined ? { minSamples } : {}),
+      ...(minCorrection !== undefined ? { minCorrection } : {}),
+      ...(maxCorrection !== undefined ? { maxCorrection } : {}),
+      ...(maxModels !== undefined ? { maxModels } : {}),
+    };
+  }
+
   if (reserve !== undefined && budget === undefined) {
     throw new Error(
       `${field}.highPriorityTokenReserve requires ${field}.inFlightTokenBudget`,
@@ -363,6 +583,8 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     ...(opaqueMediaInputTokens !== undefined
       ? { opaqueMediaInputTokens }
       : {}),
+    ...(admissionMode !== undefined ? { admissionMode } : {}),
+    ...(adaptiveEstimation !== undefined ? { adaptiveEstimation } : {}),
   };
 }
 
@@ -373,7 +595,15 @@ function normalizeFileConfiguration(
   const root = objectValue(raw, "configuration");
   assertKnownKeys(
     root,
-    ["version", "server", "upstreams", "timeouts", "priority", "pools"],
+    [
+      "version",
+      "server",
+      "upstreams",
+      "timeouts",
+      "shutdown",
+      "priority",
+      "pools",
+    ],
     "configuration",
   );
 
@@ -442,6 +672,15 @@ function normalizeFileConfiguration(
     { min: 0 },
   );
 
+  const shutdown = optionalObjectValue(root, "shutdown", "shutdown") ?? {};
+  assertKnownKeys(shutdown, ["drainTimeoutMs"], "shutdown");
+  const shutdownDrainTimeoutMs = optionalInteger(
+    shutdown,
+    "drainTimeoutMs",
+    "shutdown.drainTimeoutMs",
+    { min: 0 },
+  );
+
   const priority = optionalObjectValue(root, "priority", "priority") ?? {};
   assertKnownKeys(priority, ["trustHeader"], "priority");
   const trustPriorityHeader =
@@ -481,6 +720,9 @@ function normalizeFileConfiguration(
       ...(clientStallTimeoutMs !== undefined ? { clientStallTimeoutMs } : {}),
       ...(maxRequestBodyBytes !== undefined ? { maxRequestBodyBytes } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      ...(shutdownDrainTimeoutMs !== undefined
+        ? { shutdownDrainTimeoutMs }
+        : {}),
       trustPriorityHeader,
       pools,
     },

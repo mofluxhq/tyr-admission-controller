@@ -12,6 +12,11 @@ import {
   type GatewayOptions,
 } from "../src/server.js";
 import { loadRuntimeConfig } from "../src/config.js";
+import type {
+  AdaptiveEstimationConfig,
+  AdmissionMode,
+  PoolsDrainResult,
+} from "../src/pools.js";
 
 // Parses one complete HTTP/1.1 response (status line + headers + body,
 // using Content-Length to know where the body ends) off the front of
@@ -233,15 +238,22 @@ function startGateway(
     budget?: number;
     highPriorityReserve?: number;
     opaqueMediaInputTokens?: number;
+    admissionMode?: AdmissionMode;
+    adaptiveEstimation?: AdaptiveEstimationConfig;
   },
   opts: {
     responseTimeoutMs?: number;
     idleTimeoutMs?: number;
     maxRequestBodyBytes?: number;
+    shutdownDrainTimeoutMs?: number;
     trustPriorityHeader?: boolean;
     resolvePriority?: GatewayOptions["resolvePriority"];
   } = {},
-): Promise<{ server: Server; url: string; shutdown: () => Promise<void> }> {
+): Promise<{
+  server: Server;
+  url: string;
+  shutdown: () => Promise<PoolsDrainResult>;
+}> {
   const { server, shutdown } = createGateway({
     upstreamUrl: upstream.url,
     openaiUpstreamUrl: openaiUpstream.url,
@@ -253,6 +265,9 @@ function startGateway(
       : {}),
     ...(opts.maxRequestBodyBytes !== undefined
       ? { maxRequestBodyBytes: opts.maxRequestBodyBytes }
+      : {}),
+    ...(opts.shutdownDrainTimeoutMs !== undefined
+      ? { shutdownDrainTimeoutMs: opts.shutdownDrainTimeoutMs }
       : {}),
     ...(opts.trustPriorityHeader !== undefined
       ? { trustPriorityHeader: opts.trustPriorityHeader }
@@ -342,6 +357,56 @@ describe("admission-gateway", () => {
       expect(body.error.detail.tokenBudget.available).toBeLessThan(1100);
 
       expect((await p1).status).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("observes a budget rejection without blocking upstream traffic", async () => {
+    const gw = await startGateway({
+      maxConcurrent: 10,
+      budget: 0,
+      admissionMode: "observe",
+      adaptiveEstimation: { enabled: false },
+    });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi")),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-admission-mode")).toBe("observe");
+      expect(res.headers.get("x-admission-preview")).toBe("reject");
+      expect(res.headers.get("x-admission-preview-reason")).toBe(
+        "budget_limit",
+      );
+      expect(res.headers.get("x-admission-id")).toMatch(/^shadow-/);
+
+      const stats = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
+        string,
+        {
+          llm: { admitted: number };
+          tyr: {
+            advisory: {
+              wouldReject: number;
+              rejectedByReason: { budget_limit?: number };
+            };
+            observe: { bypassed: number };
+          };
+        }
+      >;
+      expect(stats["test-pool"]).toMatchObject({
+        llm: { admitted: 0 },
+        tyr: {
+          advisory: {
+            wouldReject: 1,
+            rejectedByReason: { budget_limit: 1 },
+          },
+          observe: { bypassed: 1 },
+        },
+      });
     } finally {
       gw.server.close();
     }
@@ -1559,6 +1624,28 @@ describe("admission-gateway", () => {
     } finally {
       socket.destroy();
     }
+  });
+
+  it("bounds shutdown and reports outstanding work", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 1, budget: 5000 },
+      { shutdownDrainTimeoutMs: 20 },
+    );
+    const inFlight = fetch(`${gw.url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(msg("slow please")),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const result = await gw.shutdown();
+    expect(result).toMatchObject({ drained: false, inFlight: 1, pending: 0 });
+    expect(result.pools["test-pool"]).toMatchObject({
+      drained: false,
+      inFlight: 1,
+      pending: 0,
+    });
+    await inFlight.catch(() => undefined);
   });
 
   it("rejects invalid gateway and pool configuration before listening", () => {

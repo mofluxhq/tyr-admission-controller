@@ -34,6 +34,8 @@ timeouts:
   responseHeadersMs: 10000
   streamIdleMs: 20000
   clientStallMs: 30000
+shutdown:
+  drainTimeoutMs: 45000
 priority:
   trustHeader: false
 upstreams:
@@ -50,6 +52,14 @@ pools:
     highPriorityTokenReserve: 80000
     defaultOutputReservation: 8192
     opaqueMediaInputTokenReservation: 3072
+    admissionMode: observe
+    adaptiveEstimation:
+      enabled: true
+      smoothing: 0.3
+      minSamples: 3
+      minCorrection: 0.6
+      maxCorrection: 1.8
+      maxModels: 32
   - name: batch
     modelPrefixes: [gpt-4o, gpt-5]
     estimatorModel: gpt-4o
@@ -67,6 +77,7 @@ describe("file configuration", () => {
     expect(config.gateway.responseTimeoutMs).toBe(10_000);
     expect(config.gateway.idleTimeoutMs).toBe(20_000);
     expect(config.gateway.clientStallTimeoutMs).toBe(30_000);
+    expect(config.gateway.shutdownDrainTimeoutMs).toBe(45_000);
     expect(config.gateway.pools).toEqual([
       {
         name: "interactive",
@@ -77,6 +88,15 @@ describe("file configuration", () => {
         highPriorityReserve: 80_000,
         outputCap: 8192,
         opaqueMediaInputTokens: 3072,
+        admissionMode: "observe",
+        adaptiveEstimation: {
+          enabled: true,
+          smoothing: 0.3,
+          minSamples: 3,
+          minCorrection: 0.6,
+          maxCorrection: 1.8,
+          maxModels: 32,
+        },
       },
       {
         name: "batch",
@@ -112,7 +132,7 @@ pools:
     expect(config.gateway.pools[0]?.budget).toBe(0);
   });
 
-  it("loads the v3.7 opaque-media reservation override", () => {
+  it("loads the opaque-media reservation override", () => {
     const path = tempConfig(`
 version: 1
 upstreams:
@@ -252,6 +272,44 @@ pools:
     expect(() => loadRuntimeConfigFile(tooLarge)).toThrow(/must not exceed/);
   });
 
+  it("validates v3.8 admission and adaptive-estimation settings", () => {
+    const badMode = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: https://api.openai.com }
+pools:
+  - name: pool
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 1
+    admissionMode: audit
+`, "bad-mode.yaml");
+    expect(() => loadRuntimeConfigFile(badMode)).toThrow(/admissionMode/);
+
+    const badAdaptive = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: https://api.openai.com }
+pools:
+  - name: pool
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 1
+    inFlightTokenBudget: 1000
+    adaptiveEstimation:
+      smoothing: 0
+`, "bad-adaptive.yaml");
+    expect(() => loadRuntimeConfigFile(badAdaptive)).toThrow(/smoothing must be > 0/);
+
+    expect(() =>
+      loadRuntimeConfig({
+        OPENAI_UPSTREAM_URL: "https://api.openai.com",
+        ADAPTIVE_MIN_CORRECTION: "2",
+        ADAPTIVE_MAX_CORRECTION: "1",
+      }),
+    ).toThrow(/ADAPTIVE_MAX_CORRECTION/);
+  });
+
   it("reports malformed YAML and missing files", () => {
     const malformed = tempConfig("version: 1\npools: [\n");
     expect(() => loadRuntimeConfigFile(malformed)).toThrow(/invalid YAML/);
@@ -283,12 +341,32 @@ pools:
       OPENAI_UPSTREAM_URL: "https://api.openai.com",
       TOKEN_BUDGET: "0",
       OPAQUE_MEDIA_INPUT_TOKENS: "4096",
+      ADMISSION_MODE: "observe",
+      ADAPTIVE_ESTIMATION: "true",
+      ADAPTIVE_SMOOTHING: "0.4",
+      ADAPTIVE_MIN_SAMPLES: "2",
+      ADAPTIVE_MIN_CORRECTION: "0.7",
+      ADAPTIVE_MAX_CORRECTION: "1.7",
+      ADAPTIVE_MAX_MODELS: "10",
+      SHUTDOWN_DRAIN_TIMEOUT_MS: "25000",
     });
     expect(config.source).toEqual({ kind: "environment" });
-    expect(config.gateway.pools[0]?.budget).toBe(0);
+    expect(config.gateway.shutdownDrainTimeoutMs).toBe(25_000);
+    expect(config.gateway.pools[0]).toMatchObject({
+      budget: 0,
+      admissionMode: "observe",
+      adaptiveEstimation: {
+        enabled: true,
+        smoothing: 0.4,
+        minSamples: 2,
+        minCorrection: 0.7,
+        maxCorrection: 1.7,
+        maxModels: 10,
+      },
+    });
   });
 
-  it("loads the v3.7 opaque-media reservation override", () => {
+  it("loads the opaque-media reservation override", () => {
     const path = tempConfig(`
 version: 1
 upstreams:

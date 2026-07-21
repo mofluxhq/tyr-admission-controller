@@ -79,6 +79,16 @@
       "items": {
         "$ref": "#/$defs/pool"
       }
+    },
+    "shutdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "drainTimeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
     }
   },
   "$defs": {
@@ -143,6 +153,50 @@
           "type": "integer",
           "minimum": 0,
           "default": 2048
+        },
+        "admissionMode": {
+          "type": "string",
+          "enum": [
+            "enforce",
+            "observe"
+          ],
+          "default": "enforce"
+        },
+        "adaptiveEstimation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "smoothing": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 1,
+              "default": 0.2
+            },
+            "minSamples": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 5
+            },
+            "minCorrection": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 0.5
+            },
+            "maxCorrection": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "default": 2
+            },
+            "maxModels": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 64
+            }
+          }
         }
       }
     }

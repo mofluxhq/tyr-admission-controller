@@ -32,7 +32,12 @@ function handleShutdownSignal(signal: string): void {
   shuttingDown = true;
   console.log(`${signal} received, draining in-flight requests...`);
   shutdown()
-    .then(() => {
+    .then((result) => {
+      if (!result.drained) {
+        console.warn(
+          `shutdown drain deadline reached inFlight=${result.inFlight} pending=${result.pending}`,
+        );
+      }
       console.log("shutdown complete");
       process.exit(0);
     })

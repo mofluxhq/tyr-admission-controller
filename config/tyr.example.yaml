@@ -24,6 +24,12 @@ timeouts:
   # defaults to streamIdleMs in the gateway.
   clientStallMs: 30000
 
+shutdown:
+  # Uses async-bulkhead-llm v3.8 bounded drain. At the deadline Tyr reports
+  # outstanding work and closes remaining HTTP connections. Omit to wait
+  # indefinitely, preserving the previous behavior.
+  drainTimeoutMs: 30000
+
 priority:
   # Keep false unless a trusted proxy strips client copies of x-priority and
   # injects an authenticated value.
@@ -38,6 +44,9 @@ pools:
     # Used by the admission estimator; it does not rewrite the requested model.
     estimatorModel: claude-sonnet-4-5
     maxConcurrent: 40
+    # enforce: reject overload. observe: record the same decision but proxy
+    # capacity rejections upstream, allowing a safe shadow-mode rollout.
+    admissionMode: enforce
     # Omit to disable token-budget admission, use 0 to admit no budget-gated
     # work, or set a positive in-flight token ceiling.
     inFlightTokenBudget: 400000
@@ -49,6 +58,15 @@ pools:
     # Fixed surcharge per opaque image/audio/document/file/video block.
     # Omit for the conservative default of 2048; set 0 to disable it.
     opaqueMediaInputTokenReservation: 2048
+    # v3.8 per-model EWMA calibration. Enabled by default for budgeted pools.
+    # It learns only from provider-reported input usage and is local/in-memory.
+    adaptiveEstimation:
+      enabled: true
+      smoothing: 0.2
+      minSamples: 5
+      minCorrection: 0.5
+      maxCorrection: 2
+      maxModels: 64
 
   - name: batch-openai
     modelPrefixes:
@@ -59,5 +77,7 @@ pools:
       - o4
     estimatorModel: gpt-4o
     maxConcurrent: 20
+    # Observe first to measure prospective rejections before enforcement.
+    admissionMode: observe
     inFlightTokenBudget: 250000
     defaultOutputReservation: 4096

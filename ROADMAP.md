@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.8.0` prototype to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.9.0` pilot release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,33 +21,26 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.8.0
+## Current baseline: v0.9.0
 
 The current release provides:
 
 - Anthropic Messages and OpenAI Chat Completions proxy routes.
 - Model-prefix routing to independently configured local pools.
-- Fail-fast concurrent-request and token-budget admission.
-- Priority reserve support with secure-by-default priority handling.
-- Provider-aware prompt, tool-schema, tool-call, and configurable media
-  admission estimates using `async-bulkhead-llm` 3.7 request surfaces.
-- Immutable reservation previews supplied as exact per-call admission overrides.
-- Stable admission UUIDs exposed as `x-admission-id` on admitted responses.
-- Streaming usage correction, backpressure, response and idle timeouts.
-- Graceful shutdown, local statistics, strict startup validation, and Node.js 20+ support.
-- Versioned, startup-only YAML configuration (`TYR_CONFIG_FILE`) with strict
-  unknown-field validation, multi-pool routing, deterministic rejection of
-  mixed file/environment configuration, and a safe configuration fingerprint
-  in startup logs.
-- Offline configuration validation (`tyr validate --config <path>` /
-  `npm run validate:config`), an example configuration file, a JSON Schema,
-  a production Dockerfile, and a file-mounted Compose example.
+- A v3.8 pool policy runtime using exact reservation previews and detailed
+  advisory capacity snapshots.
+- Per-pool enforcement and shadow observation modes.
+- Adaptive per-model input estimates learned from provider-reported usage.
+- Fail-fast concurrent-request and token-budget admission with priority reserves.
+- Stable admission IDs, streaming usage correction, transport backpressure, and
+  response, idle, and client-stall timeouts.
+- Bounded graceful drain with outstanding-work reporting.
+- Strict startup validation, YAML configuration, offline validation, Docker and
+  Compose assets, and expanded local policy statistics.
 
 Known commercial limitations include single-process capacity, no authenticated
-tenant/application identity, no standard metrics exporter, no durable audit trail,
-limited protocol coverage, and no fully supported deployment package (the
-v0.8.0 Dockerfile and Compose example are a starting point; SBOM, provenance,
-multi-architecture builds, and a Helm chart remain planned for v1.0.0).
+tenant/application identity, no standard metrics exporter, no durable audit
+trail, limited protocol coverage, and no fully supported deployment package.
 
 ## Release sequence
 
@@ -86,7 +79,35 @@ Remaining limitations carried into the next milestone:
 - No standard metrics exporter, authenticated tenant/application identity,
   protected operational endpoints, or structured audit event stream.
 
-### v0.9.0 — Observable and identifiable
+### v0.9.0 — Adaptive and observable admission policy
+
+**Status:** Released 2026-07-21
+**Goal:** Adopt the full `async-bulkhead-llm` 3.8 admission lifecycle and make enforcement safe to evaluate before rollout.
+
+Delivered:
+
+- Exact reservation round-tripping with v3.8 consistency checks.
+- Detailed advisory capacity snapshots on admitted and rejected previews.
+- Per-pool `enforce` and `observe` modes.
+- Adaptive per-model input-estimation correction from provider usage.
+- Policy statistics and advisory response headers.
+- Bounded drain results and forced HTTP connection closure at the configured
+  shutdown deadline.
+
+Outcome:
+
+- Operators can deploy Tyr in shadow mode, quantify prospective rejection
+  behavior, inspect requested and available capacity, then enable enforcement
+  without changing the forwarding path.
+- Estimation can adapt to workload and tokenizer drift while remaining bounded.
+- Shutdown no longer needs to wait forever on a stalled stream.
+
+Remaining limitations carried into the next milestone:
+
+- No standard metrics exporter, authenticated tenant/application identity,
+  protected operational endpoints, or structured audit event stream.
+
+### v0.10.0 — Observable and identifiable
 
 **Target duration:** 2–3 weeks
 **Goal:** Make Tyr safe to pilot and capable of proving that admission control improves production outcomes.
@@ -117,7 +138,7 @@ Deferred from this release:
 - Durable audit storage or a search UI.
 - Per-tenant bulkhead instances.
 
-### v0.10.0 — Ecosystem and modern OpenAI support
+### v0.11.0 — Ecosystem and modern OpenAI support
 
 **Target duration:** 2–3 weeks
 **Goal:** Reduce adoption friction and support the most commercially important modern OpenAI workload.
@@ -146,7 +167,7 @@ Deferred from this release:
 - Generic MCP session accounting.
 - Native Kong or Envoy extensions.
 
-### v0.11.0 — Distributed token leases
+### v0.12.0 — Distributed token leases
 
 **Target duration:** 4–6 weeks
 **Goal:** Enforce one capacity budget across multiple Tyr replicas.
@@ -176,7 +197,7 @@ Non-goals:
 - Automatically discovering provider quotas.
 - Kubernetes-only budget partitioning as the primary correctness mechanism.
 
-### v0.12.0 — Tenant policy and fairness
+### v0.13.0 — Tenant policy and fairness
 
 **Target duration:** 2–4 weeks
 **Goal:** Support paid multi-tenant deployments without creating unbounded gateway state.
@@ -201,7 +222,7 @@ Exit criteria:
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.12.0
+**Target duration:** 3–5 weeks after v0.13.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:
@@ -289,4 +310,4 @@ A milestone may ship only when:
 - Upgrade and rollback behavior is documented.
 - The release notes distinguish admission-time guarantees from post-admission usage overruns.
 
-Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.10, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.
+Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.10.0, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.

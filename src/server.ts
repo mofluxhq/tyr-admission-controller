@@ -4,7 +4,13 @@ import {
   type LLMRejectReason,
   type LLMPriority,
 } from "async-bulkhead-llm";
-import { createPools, parsePriority, type PoolConfig, type Pools } from "./pools.js";
+import {
+  createPools,
+  parsePriority,
+  type PoolConfig,
+  type Pools,
+  type PoolsDrainResult,
+} from "./pools.js";
 import { anthropicAdapter, openaiAdapter, type Adapter } from "./adapters.js";
 
 export type GatewayOptions = {
@@ -67,6 +73,12 @@ export type GatewayOptions = {
    * are controlled by `PoolConfig.outputCap`. Defaults to 200,000.
    */
   maxOutputTokens?: number;
+  /**
+   * Maximum graceful-drain wait during shutdown. When the deadline expires,
+   * Tyr reports outstanding work and closes remaining HTTP connections.
+   * Omit for the previous unbounded drain behavior.
+   */
+  shutdownDrainTimeoutMs?: number;
   /**
    * Resolve admission priority from an authenticated/trusted request context.
    * This is the preferred way to grant high-priority capacity.
@@ -241,6 +253,11 @@ function validateGatewayOptions(opts: GatewayOptions): void {
   assertOptionalInteger(opts.clientStallTimeoutMs, "clientStallTimeoutMs", 0);
   assertOptionalInteger(opts.maxRequestBodyBytes, "maxRequestBodyBytes", 1);
   assertOptionalInteger(opts.maxOutputTokens, "maxOutputTokens", 0);
+  assertOptionalInteger(
+    opts.shutdownDrainTimeoutMs,
+    "shutdownDrainTimeoutMs",
+    0,
+  );
   if (
     opts.resolvePriority !== undefined &&
     typeof opts.resolvePriority !== "function"
@@ -274,6 +291,7 @@ export function createGateway(opts: GatewayOptions) {
   const maxRequestBodyBytes =
     opts.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
   const maxOutputTokens = opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  const shutdownDrainTimeoutMs = opts.shutdownDrainTimeoutMs;
   const resolvePriority = opts.resolvePriority;
   const trustPriorityHeader = opts.trustPriorityHeader ?? false;
 
@@ -332,17 +350,6 @@ export function createGateway(opts: GatewayOptions) {
 
       // Complete token-bearing admission projection of the validated request.
       const llmRequest = adapter.toAdmissionRequest(body);
-      // Freeze one authoritative reservation calculation before any async work.
-      // v3.7's per-call override makes admission use this exact preview rather
-      // than re-running the estimator later in the request lifecycle.
-      const reservationPreview = pool.bulkhead.estimate(llmRequest);
-      const reservation =
-        reservationPreview === null
-          ? undefined
-          : {
-              input: reservationPreview.input,
-              maxOutput: reservationPreview.maxOutput,
-            };
 
       let priority: LLMPriority = "normal";
       if (resolvePriority !== undefined) {
@@ -359,6 +366,25 @@ export function createGateway(opts: GatewayOptions) {
             : undefined,
         );
       }
+
+      // v3.8: calculate one immutable reservation and pass it verbatim to both
+      // the detailed advisory check and the authoritative admission operation.
+      const preparation = pool.prepare(llmRequest, priority);
+      res.setHeader("x-admission-mode", preparation.mode);
+      res.setHeader(
+        "x-admission-preview",
+        preparation.advisory.admit ? "admit" : "reject",
+      );
+      if (preparation.advisory.reason !== undefined) {
+        res.setHeader("x-admission-preview-reason", preparation.advisory.reason);
+      }
+      if (preparation.reservation !== null) {
+        res.setHeader(
+          "x-admission-reserved-tokens",
+          String(preparation.reservation.reserved),
+        );
+      }
+
       const wantsStream = adapter.isStreamRequested(body);
 
       // Abort upstream work if the client disconnects. Response-timeout and
@@ -382,12 +408,13 @@ export function createGateway(opts: GatewayOptions) {
       }
 
       try {
-        await pool.bulkhead.run(
+        await pool.run(
           llmRequest,
+          preparation,
           async (signal, ctx) => {
             if (ctx !== undefined) {
-              // Stable v3.7 admission identity for correlating the client
-              // response with gateway traces, usage updates, and release.
+              // Stable v3.8 admission identity. Observe-mode bypasses use a
+              // synthetic `shadow-...` identity so traces remain correlatable.
               res.setHeader("x-admission-id", ctx.admissionId);
             }
 
@@ -493,8 +520,7 @@ export function createGateway(opts: GatewayOptions) {
           {
             priority,
             signal: admissionSignal,
-            ...(reservation !== undefined ? { reservation } : {}),
-            getUsage: (r) => r.usage,
+            getUsage: (result) => result.usage,
           },
 
         );
@@ -608,47 +634,36 @@ export function createGateway(opts: GatewayOptions) {
     sendJson(res, 404, { error: { type: "not_found" } });
   });
 
-
-  let shuttingDown: Promise<void> | undefined;
+  let shuttingDown: Promise<PoolsDrainResult> | undefined;
 
   /**
-   * Gracefully shuts down the gateway: stops accepting new TCP
-   * connections and, concurrently, drains every pool's bulkhead (new
-   * requests are rejected with reason "shutdown" while in-flight
-   * requests are allowed to complete). The two run concurrently rather
-   * than sequentially because `server.close()`'s callback only fires
-   * once every connection — including idle keep-alive ones — has ended;
-   * waiting for that before draining would mean no client could ever
-   * observe the "shutdown" rejection. Starting the drain immediately
-   * ensures a request that arrives on a still-open keep-alive
-   * connection during the drain window is actually rejected with `503`
-   * / `x-admission-reason: shutdown`, rather than the drain being purely
-   * academic. Safe to call multiple times — subsequent calls resolve
-   * when the first shutdown finishes.
+   * Stops new admissions immediately, closes the HTTP listener, and drains
+   * pool work. With `shutdownDrainTimeoutMs`, v3.8 returns an outstanding-work
+   * snapshot at the deadline; Tyr then closes remaining connections so process
+   * termination is bounded instead of waiting forever on a dead stream.
    */
-  function shutdown(): Promise<void> {
+  function shutdown(): Promise<PoolsDrainResult> {
     if (shuttingDown) return shuttingDown;
-    shuttingDown = new Promise<void>((resolve, reject) => {
-      // Mark bulkheads closed right away so any request that reaches the
-      // handler from this point on — including on connections that were
-      // already established before server.close() — gets rejected with
-      // reason "shutdown" instead of being admitted.
-      const drainDone = pools.drain();
 
-      server.close((err?: Error) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        // All connections have ended; wait for any bulkhead work that
-        // was still in flight to finish releasing.
-        drainDone.then(resolve, reject);
+    pools.close();
+    const serverClosed = new Promise<void>((resolve, reject) => {
+      server.close((error?: Error) => {
+        if (error) reject(error);
+        else resolve();
       });
     });
 
+    shuttingDown = (async () => {
+      const drainResult = await pools.drain(shutdownDrainTimeoutMs);
+      if (!drainResult.drained) {
+        server.closeAllConnections();
+      }
+      await serverClosed;
+      return drainResult;
+    })();
+
     return shuttingDown;
   }
-
 
   return { server, pools, shutdown };
 }
