@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { createHash } from "crypto";
+import { readFileSync } from "fs";
+import { resolve } from "path";
 import { parseDocument } from "yaml";
 import type { PoolConfig } from "./pools.js";
 import type { GatewayOptions } from "./server.js";
@@ -71,7 +71,8 @@ function parseFiniteNumber(
   opts: { exclusiveMin?: number; min?: number; max?: number },
 ): number {
   const value = Number(raw);
-  if (!Number.isFinite(value)) throw new Error(`${name} must be a finite number`);
+  if (!Number.isFinite(value))
+    throw new Error(`${name} must be a finite number`);
   if (opts.exclusiveMin !== undefined && value <= opts.exclusiveMin) {
     throw new Error(`${name} must be > ${opts.exclusiveMin}`);
   }
@@ -93,9 +94,7 @@ function optionalNumberEnv(
   return raw === undefined ? undefined : parseFiniteNumber(raw, name, opts);
 }
 
-function admissionModeEnv(
-  env: NodeJS.ProcessEnv,
-): "enforce" | "observe" {
+function admissionModeEnv(env: NodeJS.ProcessEnv): "enforce" | "observe" {
   const value = envString(env, "ADMISSION_MODE")?.toLowerCase() ?? "enforce";
   if (value !== "enforce" && value !== "observe") {
     throw new Error('ADMISSION_MODE must be "enforce" or "observe"');
@@ -219,22 +218,16 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
     "OPAQUE_MEDIA_INPUT_TOKENS",
     { min: 0 },
   );
-  const trustPriorityHeader = booleanEnv(
-    env,
-    "TRUST_X_PRIORITY_HEADER",
-    false,
-  );
+  const trustPriorityHeader = booleanEnv(env, "TRUST_X_PRIORITY_HEADER", false);
   const admissionMode = admissionModeEnv(env);
   const shadowReasons = shadowReasonsEnv(env);
   const adaptiveSmoothing = optionalNumberEnv(env, "ADAPTIVE_SMOOTHING", {
     exclusiveMin: 0,
     max: 1,
   });
-  const adaptiveMinSamples = optionalIntegerEnv(
-    env,
-    "ADAPTIVE_MIN_SAMPLES",
-    { min: 1 },
-  );
+  const adaptiveMinSamples = optionalIntegerEnv(env, "ADAPTIVE_MIN_SAMPLES", {
+    min: 1,
+  });
   const adaptiveMinCorrection = optionalNumberEnv(
     env,
     "ADAPTIVE_MIN_CORRECTION",
@@ -341,7 +334,9 @@ function assertKnownKeys(
   const allowedSet = new Set(allowed);
   for (const key of Object.keys(value)) {
     if (!allowedSet.has(key)) {
-      throw new Error(`${field} contains unknown property ${JSON.stringify(key)}`);
+      throw new Error(
+        `${field} contains unknown property ${JSON.stringify(key)}`,
+      );
     }
   }
 }
@@ -636,9 +631,7 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     ...(budget !== undefined ? { budget } : {}),
     ...(reserve !== undefined ? { highPriorityReserve: reserve } : {}),
     ...(outputCap !== undefined ? { outputCap } : {}),
-    ...(opaqueMediaInputTokens !== undefined
-      ? { opaqueMediaInputTokens }
-      : {}),
+    ...(opaqueMediaInputTokens !== undefined ? { opaqueMediaInputTokens } : {}),
     ...(admissionMode !== undefined ? { admissionMode } : {}),
     ...(shadowReasons !== undefined ? { shadowReasons } : {}),
     ...(adaptiveEstimation !== undefined ? { adaptiveEstimation } : {}),
@@ -677,10 +670,11 @@ function normalizeFileConfiguration(
     ["port", "maxRequestBodyBytes", "maxOutputTokens"],
     "server",
   );
-  const port = optionalInteger(server, "port", "server.port", {
-    min: 1,
-    max: 65_535,
-  }) ?? 8787;
+  const port =
+    optionalInteger(server, "port", "server.port", {
+      min: 1,
+      max: 65_535,
+    }) ?? 8787;
   const maxRequestBodyBytes = optionalInteger(
     server,
     "maxRequestBodyBytes",
@@ -799,7 +793,11 @@ export function loadRuntimeConfigFile(filePath: string): RuntimeConfig {
     text = readFileSync(absolutePath, "utf8");
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`unable to read configuration file ${absolutePath}: ${detail}`);
+
+    throw new Error(
+      `unable to read configuration file ${absolutePath}: ${detail}`,
+      { cause: error },
+    );
   }
 
   const document = parseDocument(text, {
@@ -819,7 +817,10 @@ export function loadRuntimeConfigFile(filePath: string): RuntimeConfig {
     raw = document.toJS({ maxAliasCount: 100 });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`invalid YAML in ${absolutePath}: ${detail}`);
+
+    throw new Error(`invalid YAML in ${absolutePath}: ${detail}`, {
+      cause: error,
+    });
   }
 
   const fingerprint = createHash("sha256").update(text).digest("hex");

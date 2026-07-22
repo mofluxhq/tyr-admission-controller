@@ -3,7 +3,6 @@ import {
   createServer,
   request as httpRequest,
   type Server,
-  type ServerResponse,
 } from "node:http";
 import { connect as netConnect, type AddressInfo } from "node:net";
 import {

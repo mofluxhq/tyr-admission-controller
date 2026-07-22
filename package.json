@@ -18,15 +18,19 @@
     "validate:config": "node dist/cli.js validate",
     "prepack": "npm run build",
     "smoke": "node --input-type=module -e \"await import('./dist/server.js'); await import('./dist/adapters.js');\"",
-    "release:check": "npm run typecheck && npm test && npm run build && npm run smoke"
+    "release:check": "npm run typecheck && npm test && npm run build && npm run smoke",
+    "lint": "eslint ."
   },
   "dependencies": {
     "async-bulkhead-llm": "3.9.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.20.1",
+    "eslint": "^10.7.0",
     "typescript": "^5.6.0",
+    "typescript-eslint": "^8.65.0",
     "vitest": "^4.0.0"
   },
   "bin": {
