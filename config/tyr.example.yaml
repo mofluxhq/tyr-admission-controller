@@ -25,7 +25,7 @@ timeouts:
   clientStallMs: 30000
 
 shutdown:
-  # Uses async-bulkhead-llm v3.8 bounded drain. At the deadline Tyr reports
+  # Uses async-bulkhead-llm v3.9 bounded drain. At the deadline Tyr reports
   # outstanding work and closes remaining HTTP connections. Omit to wait
   # indefinitely, preserving the previous behavior.
   drainTimeoutMs: 30000
@@ -58,7 +58,7 @@ pools:
     # Fixed surcharge per opaque image/audio/document/file/video block.
     # Omit for the conservative default of 2048; set 0 to disable it.
     opaqueMediaInputTokenReservation: 2048
-    # v3.8 per-model EWMA calibration. Enabled by default for budgeted pools.
+    # v3.9 per-model EWMA calibration. Enabled by default for budgeted pools.
     # It learns only from provider-reported input usage and is local/in-memory.
     adaptiveEstimation:
       enabled: true
@@ -79,5 +79,8 @@ pools:
     maxConcurrent: 20
     # Observe first to measure prospective rejections before enforcement.
     admissionMode: observe
+    # Omit to bypass all supported capacity reasons. Use [] to observe context
+    # without bypassing any rejection.
+    shadowReasons: [budget_limit, concurrency_limit]
     inFlightTokenBudget: 250000
     defaultOutputReservation: 4096

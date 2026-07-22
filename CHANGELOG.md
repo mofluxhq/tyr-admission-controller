@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-22
+
+### Added
+
+- Added per-pool `shadowReasons` and legacy `SHADOW_REASONS` configuration to
+  restrict which capacity failures observe mode may bypass.
+- Added authoritative `x-admission-outcome` and
+  `x-admission-bypass-reason` response headers once execution begins.
+- Added reason-level observe statistics through the native
+  `bypassedByReason` counters.
+
+### Changed
+
+- Upgraded and pinned `async-bulkhead-llm` to exactly 3.9.0.
+- Delegated observe-mode execution, bypass identities, race classification,
+  usage accounting, and hard cancellation/shutdown checks to the library's
+  native v3.9 lifecycle.
+- Exposed the complete native run context, including `admission`,
+  `bypassReason`, `bypassDetail`, and the `UsageReport` returned by
+  `reportUsage()`.
+- Adaptive estimation now learns from both admitted `release` events and
+  observed `bypassRelease` events.
+- CI now runs Tyr's real release checks on `master`, verifies Tyr's flat package
+  layout, and builds the production Docker image.
+
+### Fixed
+
+- Already-aborted client requests can no longer execute through observe mode
+  when a capacity rejection would otherwise have been bypassed.
+
 ## [0.9.0] - 2026-07-21
 
 ### Added
@@ -312,7 +342,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.5.0...v0.6.0

@@ -367,8 +367,8 @@ export function createGateway(opts: GatewayOptions) {
         );
       }
 
-      // v3.8: calculate one immutable reservation and pass it verbatim to both
-      // the detailed advisory check and the authoritative admission operation.
+      // Calculate one immutable reservation and pass it verbatim to both the
+      // detailed advisory check and the authoritative admission operation.
       const preparation = pool.prepare(llmRequest, priority);
       res.setHeader("x-admission-mode", preparation.mode);
       res.setHeader(
@@ -413,9 +413,11 @@ export function createGateway(opts: GatewayOptions) {
           preparation,
           async (signal, ctx) => {
             if (ctx !== undefined) {
-              // Stable v3.8 admission identity. Observe-mode bypasses use a
-              // synthetic `shadow-...` identity so traces remain correlatable.
               res.setHeader("x-admission-id", ctx.admissionId);
+              res.setHeader("x-admission-outcome", ctx.admission);
+              if (ctx.bypassReason !== undefined) {
+                res.setHeader("x-admission-bypass-reason", ctx.bypassReason);
+              }
             }
 
             // Response timeout: bounds how long we wait for the upstream to
@@ -638,7 +640,7 @@ export function createGateway(opts: GatewayOptions) {
 
   /**
    * Stops new admissions immediately, closes the HTTP listener, and drains
-   * pool work. With `shutdownDrainTimeoutMs`, v3.8 returns an outstanding-work
+   * pool work. With `shutdownDrainTimeoutMs`, v3.9 returns an outstanding-work
    * snapshot at the deadline; Tyr then closes remaining connections so process
    * termination is bounded instead of waiting forever on a dead stream.
    */

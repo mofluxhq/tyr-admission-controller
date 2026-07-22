@@ -1,14 +1,15 @@
-import { randomUUID } from "node:crypto";
 import {
   createAdaptiveTokenEstimator,
   createLLMBulkhead,
-  LLMBulkheadRejectedError,
   type AdaptiveModelCorrection,
   type LLMDrainResult,
   type LLMPriority,
   type LLMRejectReason,
+  type LLMObserveStats,
   type LLMRequest,
   type LLMReservationEstimate,
+  type LLMRunContext,
+  type LLMShadowableRejectReason,
   type LLMStats,
   type LLMWouldAdmitResult,
   type TokenUsage,
@@ -56,6 +57,8 @@ export type PoolConfig = {
   opaqueMediaInputTokens?: number;
   /** Enforce rejections or only observe what would have been rejected. */
   admissionMode?: AdmissionMode;
+  /** Capacity reasons that observe mode may bypass. Defaults to all supported reasons. */
+  shadowReasons?: readonly LLMShadowableRejectReason[];
   /** Per-model adaptive input-estimation calibration. */
   adaptiveEstimation?: AdaptiveEstimationConfig;
 };
@@ -66,11 +69,7 @@ export type AdmissionPreparation = {
   advisory: LLMWouldAdmitResult;
 };
 
-export type AdmissionRunContext = {
-  readonly admissionId: string;
-  readonly reservation: LLMReservationEstimate | null;
-  reportUsage(usage: TokenUsage): void;
-};
+export type AdmissionRunContext = LLMRunContext;
 
 type AdvisoryStats = {
   checked: number;
@@ -79,13 +78,7 @@ type AdvisoryStats = {
   rejectedByReason: Partial<Record<LLMRejectReason, number>>;
 };
 
-type ObserveStats = {
-  bypassed: number;
-  raceBypassed: number;
-  usageReported: number;
-  totalInputTokens: number;
-  totalOutputTokens: number;
-};
+type ObserveStats = LLMObserveStats;
 
 export type TyrPoolStats = LLMStats & {
   tyr: {
@@ -219,6 +212,30 @@ function validatePoolConfigs(configs: PoolConfig[]): void {
       throw new Error(`${base}.admissionMode must be "enforce" or "observe"`);
     }
 
+    if (config.shadowReasons !== undefined) {
+      if (!Array.isArray(config.shadowReasons)) {
+        throw new Error(`${base}.shadowReasons must be an array`);
+      }
+      const supported = new Set<LLMShadowableRejectReason>([
+        "budget_limit",
+        "concurrency_limit",
+        "queue_limit",
+        "timeout",
+      ]);
+      const seen = new Set<LLMShadowableRejectReason>();
+      config.shadowReasons.forEach((reason, reasonIndex) => {
+        if (!supported.has(reason)) {
+          throw new Error(
+            `${base}.shadowReasons[${reasonIndex}] must be budget_limit, concurrency_limit, queue_limit, or timeout`,
+          );
+        }
+        if (seen.has(reason)) {
+          throw new Error(`${base}.shadowReasons must not contain duplicates`);
+        }
+        seen.add(reason);
+      });
+    }
+
     const adaptive = config.adaptiveEstimation;
     if (
       config.budget === undefined &&
@@ -273,14 +290,14 @@ function noteReason(
   target[reason] = (target[reason] ?? 0) + 1;
 }
 
-function isShadowable(reason: LLMRejectReason | undefined): boolean {
-  return (
-    reason === "budget_limit" ||
-    reason === "concurrency_limit" ||
-    reason === "queue_limit" ||
-    reason === "timeout"
-  );
-}
+const EMPTY_OBSERVE_STATS: ObserveStats = {
+  bypassed: 0,
+  raceBypassed: 0,
+  bypassedByReason: {},
+  usageReported: 0,
+  totalInputTokens: 0,
+  totalOutputTokens: 0,
+};
 
 function createPool(config: PoolConfig): Pool {
   const mode = config.admissionMode ?? "enforce";
@@ -336,9 +353,11 @@ function createPool(config: PoolConfig): Pool {
   });
 
   if (adaptive !== undefined) {
-    bulkhead.on("release", (event) => {
+    const observeUsage = (event: { request: LLMRequest; usage?: TokenUsage }): void => {
       if (event.usage !== undefined) adaptive.observe(event.request, event.usage);
-    });
+    };
+    bulkhead.on("release", observeUsage);
+    bulkhead.on("bypassRelease", observeUsage);
   }
 
   const advisory: AdvisoryStats = {
@@ -346,13 +365,6 @@ function createPool(config: PoolConfig): Pool {
     wouldAdmit: 0,
     wouldReject: 0,
     rejectedByReason: {},
-  };
-  const observe: ObserveStats = {
-    bypassed: 0,
-    raceBypassed: 0,
-    usageReported: 0,
-    totalInputTokens: 0,
-    totalOutputTokens: 0,
   };
 
   function prepare(request: LLMRequest, priority: LLMPriority): AdmissionPreparation {
@@ -373,44 +385,7 @@ function createPool(config: PoolConfig): Pool {
     return { mode, reservation, advisory: decision };
   }
 
-  function observeBypassUsage(request: LLMRequest, usage: TokenUsage): void {
-    observe.usageReported += 1;
-    observe.totalInputTokens += usage.input;
-    observe.totalOutputTokens += usage.output;
-    adaptive?.observe(request, usage);
-  }
-
-  async function runBypass<T>(
-    request: LLMRequest,
-    preparation: AdmissionPreparation,
-    fn: (signal?: AbortSignal, ctx?: AdmissionRunContext) => Promise<T>,
-    opts: {
-      signal?: AbortSignal;
-      getUsage?: (result: T) => TokenUsage | undefined;
-    },
-  ): Promise<T> {
-    observe.bypassed += 1;
-    let latestUsage: TokenUsage | undefined;
-    const context: AdmissionRunContext = {
-      admissionId: `shadow-${randomUUID()}`,
-      reservation: preparation.reservation,
-      reportUsage(usage) {
-        latestUsage = usage;
-      },
-    };
-
-    try {
-      const result = await fn(opts.signal, context);
-      const usage = opts.getUsage?.(result) ?? latestUsage;
-      if (usage !== undefined) observeBypassUsage(request, usage);
-      return result;
-    } catch (error) {
-      if (latestUsage !== undefined) observeBypassUsage(request, latestUsage);
-      throw error;
-    }
-  }
-
-  async function run<T>(
+  function run<T>(
     request: LLMRequest,
     preparation: AdmissionPreparation,
     fn: (signal?: AbortSignal, ctx?: AdmissionRunContext) => Promise<T>,
@@ -420,70 +395,35 @@ function createPool(config: PoolConfig): Pool {
       getUsage?: (result: T) => TokenUsage | undefined;
     },
   ): Promise<T> {
-    const runOptions = {
+    return bulkhead.run(request, fn, {
+      mode,
       priority: opts.priority,
+      ...(config.shadowReasons !== undefined
+        ? { shadowReasons: config.shadowReasons }
+        : {}),
       ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
       ...(preparation.reservation !== null
         ? { reservation: preparation.reservation }
         : {}),
       ...(opts.getUsage !== undefined ? { getUsage: opts.getUsage } : {}),
-    };
-
-    const runAdmitted = () =>
-      bulkhead.run(
-        request,
-        (signal, context) =>
-          fn(
-            signal,
-            context === undefined
-              ? undefined
-              : {
-                  admissionId: context.admissionId,
-                  reservation: context.reservation,
-                  reportUsage(usage) {
-                    context.reportUsage(usage);
-                  },
-                },
-          ),
-        runOptions,
-      );
-
-    if (mode === "enforce") return runAdmitted();
-
-    if (!preparation.advisory.admit) {
-      if (!isShadowable(preparation.advisory.reason)) {
-        throw new LLMBulkheadRejectedError(
-          preparation.advisory.reason ?? "shutdown",
-          preparation.advisory.detail,
-        );
-      }
-      return runBypass(request, preparation, fn, opts);
-    }
-
-    try {
-      return await runAdmitted();
-    } catch (error) {
-      if (
-        error instanceof LLMBulkheadRejectedError &&
-        isShadowable(error.reason)
-      ) {
-        observe.raceBypassed += 1;
-        return runBypass(request, preparation, fn, opts);
-      }
-      throw error;
-    }
+    });
   }
 
   function stats(): TyrPoolStats {
+    const native = bulkhead.stats();
+    const nativeObserve = native.observe ?? EMPTY_OBSERVE_STATS;
     return {
-      ...bulkhead.stats(),
+      ...native,
       tyr: {
         admissionMode: mode,
         advisory: {
           ...advisory,
           rejectedByReason: { ...advisory.rejectedByReason },
         },
-        observe: { ...observe },
+        observe: {
+          ...nativeObserve,
+          bypassedByReason: { ...nativeObserve.bypassedByReason },
+        },
         adaptiveEstimation: {
           enabled: adaptive !== undefined,
           corrections: adaptive?.corrections() ?? [],

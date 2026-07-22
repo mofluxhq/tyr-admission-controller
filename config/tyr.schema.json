@@ -162,6 +162,20 @@
           ],
           "default": "enforce"
         },
+        "shadowReasons": {
+          "type": "array",
+          "description": "Capacity rejection reasons that observe mode may bypass. Omit to allow all supported reasons; use an empty array to bypass none.",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "budget_limit",
+              "concurrency_limit",
+              "queue_limit",
+              "timeout"
+            ]
+          }
+        },
         "adaptiveEstimation": {
           "type": "object",
           "additionalProperties": false,

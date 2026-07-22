@@ -13,7 +13,7 @@ from those authors.
 
 RUNTIME JAVASCRIPT COMPONENTS
 
-1. async-bulkhead-llm, version 3.8.0
+1. async-bulkhead-llm, version 3.9.0
    Source: https://github.com/janbalangue/async-bulkhead-llm
    License: Apache License 2.0
    Copyright: © 2026 Jan Balangue

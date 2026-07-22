@@ -5,28 +5,25 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.9.0 is built on
-[`async-bulkhead-llm@3.8.0`](https://www.npmjs.com/package/async-bulkhead-llm).
+Tyr 0.9.1 is built on
+[`async-bulkhead-llm@3.9.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses immutable reservation previews, detailed `wouldAdmit()`
 snapshots, per-model adaptive estimation, stable admission identities, streaming
 usage reconciliation, priority reserves, and bounded drain results.
 
-> **Status:** v0.9.0, single-process, proprietary software. See
+> **Status:** v0.9.1, single-process, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr is suitable for controlled design-partner
 > pilots; distributed capacity coordination and standard telemetry exporters
 > remain roadmap work.
 
-## What shipped in v0.9.0
+## What shipped in v0.9.1
 
-- A pool runtime that separates HTTP forwarding from admission policy.
-- Exact v3.8 reservation objects passed verbatim to advisory and authoritative
-  admission paths.
-- Detailed capacity previews on every validated request.
-- Per-pool `enforce` and `observe` modes for safe shadow rollouts.
-- Adaptive per-model input estimation using provider-reported release usage.
-- Bounded shutdown drains with per-pool outstanding-work snapshots.
-- Admission-preview headers and expanded `/stats` policy telemetry.
-- Focused v3.8 regression tests in addition to the existing gateway suite.
+- Native v3.9 observe-mode execution and lifecycle events.
+- Per-pool `shadowReasons` controls for selective bypass policy.
+- Authoritative admitted/bypassed response headers and full run context.
+- Adaptive learning from both admitted and bypassed release usage.
+- Reason-level bypass statistics and cancellation regression coverage.
+- Correct CI branch, package-layout checks, and Docker-image validation.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the complete release history and
 [`ROADMAP.md`](ROADMAP.md) for planned work.
@@ -39,7 +36,7 @@ For each provider request, Tyr:
 2. Routes the model to the longest matching pool prefix.
 3. Projects provider prompt content into an admission request.
 4. Computes one immutable reservation preview.
-5. Calls v3.8 `wouldAdmit(..., { detail: true })` with that exact reservation.
+5. Calls v3.9 `wouldAdmit(..., { detail: true })` with that exact reservation.
 6. In `enforce` mode, performs authoritative admission with the same object. In
    `observe` mode, capacity rejections are recorded but proxied upstream.
 7. Reconciles live and final provider usage. Adaptive pools feed completed input
@@ -64,7 +61,7 @@ temporarily exceed the configured ceiling. Tyr blocks new admissions until
 capacity is released; it does not abort an already-running request. This is
 deliberate overrun accounting, not a strict post-admission kill switch.
 
-Admission estimation uses the v3.8 request surfaces instead of folding the
+Admission estimation uses the v3.9 request surfaces instead of folding the
 entire provider request into a synthetic user message:
 
 - Anthropic `system` and provider messages remain first-class request fields.
@@ -87,10 +84,12 @@ the process restarts.
 ## Admission modes
 
 `enforce` is the default and returns the normal `429`/`503` admission response.
-`observe` runs the same reservation and capacity decision but proxies requests
-that would have failed for budget, concurrency, queue, or admission timeout.
-Those bypasses receive a synthetic `shadow-...` admission ID and are counted in
-`/stats`. Shutdown and client-abort behavior are never shadowed.
+`observe` runs the same reservation and capacity decision but proxies configured
+capacity failures. By default, budget, concurrency, queue, and admission-timeout
+rejections may be bypassed; `shadowReasons` can restrict that set or disable
+bypassing with an empty array. Bypasses receive a synthetic `shadow-...`
+admission ID and are counted by reason in `/stats`. Shutdown and client-abort
+behavior are never shadowed.
 
 Observe mode models the system that would exist under enforcement: requests
 that would be rejected do not consume simulated pool capacity. It is therefore
@@ -131,6 +130,8 @@ Every validated, pool-routed request includes an advisory snapshot:
 | `x-admission-preview-reason` | Present when the advisory result rejects |
 | `x-admission-reserved-tokens` | Exact input-plus-output reservation when a token budget exists |
 | `x-admission-id` | Bulkhead UUID, or `shadow-...` for an observe-mode bypass |
+| `x-admission-outcome` | Authoritative `admitted` or `bypassed` result once execution begins |
+| `x-admission-bypass-reason` | Present for bypassed work; the authoritative capacity reason |
 
 Actual admission rejections also include `x-admission-reason`. Tyr does not
 fabricate a `Retry-After` header because a fail-fast capacity snapshot cannot
@@ -316,6 +317,7 @@ pools:
     estimatorModel: gpt-4o
     maxConcurrent: 20
     admissionMode: observe
+    shadowReasons: [budget_limit, concurrency_limit]
     inFlightTokenBudget: 250000
     defaultOutputReservation: 4096
 ```
@@ -340,6 +342,7 @@ pools:
 | `pools[].estimatorModel` | Yes | Model used for estimator ratios; requests are not rewritten |
 | `pools[].maxConcurrent` | Yes | Maximum active requests in the pool |
 | `pools[].admissionMode` | No | `enforce` (default) or shadow `observe` |
+| `pools[].shadowReasons` | No | Observe-mode reasons allowed to bypass; omit for all four, use `[]` for none |
 | `pools[].inFlightTokenBudget` | No | Admission-time in-flight token ceiling |
 | `pools[].highPriorityTokenReserve` | No | Token headroom reserved for high-priority requests |
 | `pools[].defaultOutputReservation` | No | Output reservation used when the request omits an output limit |
@@ -370,7 +373,7 @@ accounts for that cost.
 custom exact tokenizer is already supplying reservations or when deterministic
 estimates across process restarts are more important than local calibration.
 
-`shutdown.drainTimeoutMs` uses the v3.8 bounded drain result. When the deadline
+`shutdown.drainTimeoutMs` uses the v3.9 bounded drain result. When the deadline
 expires, Tyr records the outstanding count, closes remaining HTTP connections,
 and returns the snapshot from `shutdown()`.
 
@@ -428,7 +431,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.9.0 .
+docker build -t tyr-admission-controller:0.9.1 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -439,7 +442,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.9.0
+  tyr-admission-controller:0.9.1
 ```
 
 Or use the included Compose example:
@@ -465,6 +468,7 @@ UPSTREAM_URL=https://api.anthropic.com \
 OPENAI_UPSTREAM_URL=https://api.openai.com \
 TOKEN_BUDGET=500000 \
 ADMISSION_MODE=enforce \
+SHADOW_REASONS=budget_limit,concurrency_limit \
 ADAPTIVE_ESTIMATION=true \
 OPAQUE_MEDIA_INPUT_TOKENS=2048 \
 MAX_CONCURRENT=50 \
@@ -486,11 +490,11 @@ explicit `content-length`.
 in-flight bulkhead work. Requests reaching an existing keep-alive connection
 during shutdown receive `503` with `x-admission-reason: shutdown`. When
 `shutdown.drainTimeoutMs` is configured, Tyr closes remaining connections after
-the bounded v3.8 drain snapshot reports outstanding work.
+the bounded v3.9 drain snapshot reports outstanding work.
 
 `/stats` exposes the live bulkhead statistics plus a `tyr` object for each pool.
 That object contains admission mode, advisory admit/reject counts, observe-mode
-bypass counts, and adaptive correction snapshots. The endpoint is operational
+bypass counts grouped by reason, and adaptive correction snapshots. The endpoint is operational
 data and is currently unauthenticated; protect it at the network or
 reverse-proxy layer.
 
@@ -520,12 +524,12 @@ config/
   tyr.example.yaml  documented configuration template
   tyr.schema.json   JSON Schema for editor and CI integration
 src/
-  admission.ts      v3.8 request projection and estimator policy
+  admission.ts      v3.9 request projection and estimator policy
   adapters.ts       provider validation, projection, and usage parsing
   cli.ts            offline configuration validation command
   config.ts         YAML and legacy environment configuration loading
   index.ts          validated process entrypoint
-  pools.ts          v3.8 policy runtime, shadow mode, adaptation, and drain
+  pools.ts          v3.9 policy runtime, shadow mode, adaptation, and drain
   server.ts         HTTP proxy, admission, timeouts, and shutdown
   sse.ts            Anthropic streaming usage extraction
   sse-openai.ts     OpenAI streaming usage extraction
@@ -534,7 +538,7 @@ test/
   admission.test.ts request projection and estimator regression tests
   config.test.ts    file-schema and environment compatibility tests
   gateway.test.ts   gateway end-to-end tests
-  pools-v38.test.ts exact preview, observe, adaptive, and drain tests
+  pools-v39.test.ts native observe, context, adaptive, and drain tests
 Dockerfile          production multi-stage image
 compose.example.yaml local file-configured container example
 ```

@@ -35,6 +35,7 @@ const LEGACY_CONFIG_ENV_NAMES = [
   "OPAQUE_MEDIA_INPUT_TOKENS",
   "TRUST_X_PRIORITY_HEADER",
   "ADMISSION_MODE",
+  "SHADOW_REASONS",
   "SHUTDOWN_DRAIN_TIMEOUT_MS",
   "ADAPTIVE_ESTIMATION",
   "ADAPTIVE_SMOOTHING",
@@ -100,6 +101,46 @@ function admissionModeEnv(
     throw new Error('ADMISSION_MODE must be "enforce" or "observe"');
   }
   return value;
+}
+
+const SHADOW_REASONS = [
+  "budget_limit",
+  "concurrency_limit",
+  "queue_limit",
+  "timeout",
+] as const;
+
+function parseShadowReasons(
+  values: readonly unknown[],
+  field: string,
+): PoolConfig["shadowReasons"] {
+  const supported = new Set<string>(SHADOW_REASONS);
+  const seen = new Set<string>();
+  return values.map((value, index) => {
+    if (typeof value !== "string" || !supported.has(value)) {
+      throw new Error(
+        `${field}[${index}] must be budget_limit, concurrency_limit, queue_limit, or timeout`,
+      );
+    }
+    if (seen.has(value)) {
+      throw new Error(`${field} must not contain duplicates`);
+    }
+    seen.add(value);
+    return value as (typeof SHADOW_REASONS)[number];
+  });
+}
+
+function shadowReasonsEnv(
+  env: NodeJS.ProcessEnv,
+): PoolConfig["shadowReasons"] | undefined {
+  const value = env["SHADOW_REASONS"];
+  if (value === undefined) return undefined;
+  const raw = value.trim();
+  if (raw.length === 0) return [];
+  return parseShadowReasons(
+    raw.split(",").map((reason) => reason.trim()),
+    "SHADOW_REASONS",
+  );
 }
 
 function integerEnv(
@@ -184,6 +225,7 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
     false,
   );
   const admissionMode = admissionModeEnv(env);
+  const shadowReasons = shadowReasonsEnv(env);
   const adaptiveSmoothing = optionalNumberEnv(env, "ADAPTIVE_SMOOTHING", {
     exclusiveMin: 0,
     max: 1,
@@ -257,6 +299,7 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
           budget,
           highPriorityReserve,
           admissionMode,
+          ...(shadowReasons !== undefined ? { shadowReasons } : {}),
           adaptiveEstimation,
           ...(opaqueMediaInputTokens !== undefined
             ? { opaqueMediaInputTokens }
@@ -427,6 +470,7 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       "defaultOutputReservation",
       "opaqueMediaInputTokenReservation",
       "admissionMode",
+      "shadowReasons",
       "adaptiveEstimation",
     ],
     field,
@@ -486,6 +530,18 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       throw new Error(`${field}.admissionMode must be "enforce" or "observe"`);
     }
     admissionMode = admissionModeValue;
+  }
+
+  const shadowReasonsValue = pool["shadowReasons"];
+  let shadowReasons: PoolConfig["shadowReasons"];
+  if (shadowReasonsValue !== undefined) {
+    if (!Array.isArray(shadowReasonsValue)) {
+      throw new Error(`${field}.shadowReasons must be an array`);
+    }
+    shadowReasons = parseShadowReasons(
+      shadowReasonsValue,
+      `${field}.shadowReasons`,
+    );
   }
 
   const adaptiveValue = optionalObjectValue(
@@ -584,6 +640,7 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       ? { opaqueMediaInputTokens }
       : {}),
     ...(admissionMode !== undefined ? { admissionMode } : {}),
+    ...(shadowReasons !== undefined ? { shadowReasons } : {}),
     ...(adaptiveEstimation !== undefined ? { adaptiveEstimation } : {}),
   };
 }

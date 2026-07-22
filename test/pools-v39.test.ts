@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { LLMRequest } from "async-bulkhead-llm";
 import { createPools } from "../src/pools.js";
 
@@ -8,8 +8,8 @@ const request = (content = "hello"): LLMRequest => ({
   max_tokens: 0,
 });
 
-describe("async-bulkhead-llm v3.8 pool runtime", () => {
-  it("reuses the immutable estimate for detailed preview and admission", async () => {
+describe("async-bulkhead-llm v3.9 pool runtime", () => {
+  it("reuses the immutable estimate and exposes the native admitted context", async () => {
     const pools = createPools([
       {
         name: "exact",
@@ -21,7 +21,8 @@ describe("async-bulkhead-llm v3.8 pool runtime", () => {
       },
     ]);
     const pool = pools.select("gpt-4o")!;
-    const prepared = pool.prepare(request("a".repeat(400)), "normal");
+    const llmRequest = request("a".repeat(400));
+    const prepared = pool.prepare(llmRequest, "normal");
 
     expect(prepared.reservation).not.toBeNull();
     expect(prepared.reservation?.reserved).toBe(
@@ -32,21 +33,25 @@ describe("async-bulkhead-llm v3.8 pool runtime", () => {
       prepared.reservation?.reserved,
     );
 
-    let callbackReservation: number | undefined;
     await pool.run(
-      request("a".repeat(400)),
+      llmRequest,
       prepared,
       async (_signal, context) => {
-        callbackReservation = context?.reservation?.reserved;
-        return { usage: { input: 10, output: 0 } };
+        expect(context).toMatchObject({
+          admission: "admitted",
+          reservation: prepared.reservation,
+        });
+        expect(context?.bypassReason).toBeUndefined();
+        expect(context?.reportUsage({ input: 10, output: 0 })).toMatchObject({
+          admissionId: context?.admissionId,
+          sequence: 1,
+          consumed: 10,
+        });
+        return undefined;
       },
-      {
-        priority: "normal",
-        getUsage: (result) => result.usage,
-      },
+      { priority: "normal" },
     );
 
-    expect(callbackReservation).toBe(prepared.reservation?.reserved);
     expect(pool.stats().tyr.advisory).toMatchObject({
       checked: 1,
       wouldAdmit: 1,
@@ -54,7 +59,7 @@ describe("async-bulkhead-llm v3.8 pool runtime", () => {
     });
   });
 
-  it("executes shadow traffic while preserving the simulated rejection", async () => {
+  it("delegates observe bypasses and usage accounting to v3.9", async () => {
     const pools = createPools([
       {
         name: "shadow",
@@ -79,8 +84,21 @@ describe("async-bulkhead-llm v3.8 pool runtime", () => {
       llmRequest,
       prepared,
       async (_signal, context) => {
+        expect(context).toMatchObject({
+          admission: "bypassed",
+          bypassReason: "budget_limit",
+          reservation: prepared.reservation,
+        });
         expect(context?.admissionId).toMatch(/^shadow-/);
-        context?.reportUsage({ input: 3, output: 2 });
+        expect(context?.bypassDetail?.tokenBudget).toMatchObject({
+          budget: 0,
+          requested: prepared.reservation?.reserved,
+        });
+        expect(context?.reportUsage({ input: 3, output: 2 })).toMatchObject({
+          sequence: 1,
+          held: 0,
+          consumed: 5,
+        });
         return "proxied";
       },
       { priority: "normal" },
@@ -89,23 +107,26 @@ describe("async-bulkhead-llm v3.8 pool runtime", () => {
     expect(value).toBe("proxied");
     const stats = pool.stats();
     expect(stats.llm.admitted).toBe(0);
-    expect(stats.tyr.observe).toMatchObject({
+    expect(stats.observe).toMatchObject({
       bypassed: 1,
+      bypassedByReason: { budget_limit: 1 },
       usageReported: 1,
       totalInputTokens: 3,
       totalOutputTokens: 2,
     });
+    expect(stats.tyr.observe).toEqual(stats.observe);
     expect(stats.tyr.advisory.rejectedByReason.budget_limit).toBe(1);
   });
 
-  it("learns a per-model correction from release usage", async () => {
+  it("learns adaptive corrections from bypassRelease usage", async () => {
     const pools = createPools([
       {
-        name: "adaptive",
+        name: "adaptive-shadow",
         modelPrefixes: ["gpt"],
         model: "gpt-4o",
         maxConcurrent: 2,
-        budget: 100_000,
+        budget: 0,
+        admissionMode: "observe",
         adaptiveEstimation: {
           enabled: true,
           minSamples: 1,
@@ -140,6 +161,58 @@ describe("async-bulkhead-llm v3.8 pool runtime", () => {
         applied: 2,
       },
     ]);
+  });
+
+  it("honors a restricted shadowReasons list", async () => {
+    const pools = createPools([
+      {
+        name: "restricted",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 1,
+        budget: 0,
+        admissionMode: "observe",
+        shadowReasons: ["concurrency_limit"],
+      },
+    ]);
+    const pool = pools.select("gpt-4o")!;
+    const llmRequest = request();
+    const callback = vi.fn(async () => "must not run");
+
+    await expect(
+      pool.run(llmRequest, pool.prepare(llmRequest, "normal"), callback, {
+        priority: "normal",
+      }),
+    ).rejects.toMatchObject({ reason: "budget_limit" });
+    expect(callback).not.toHaveBeenCalled();
+    expect(pool.stats().tyr.observe.bypassed).toBe(0);
+  });
+
+  it("never bypasses an already-aborted client request", async () => {
+    const pools = createPools([
+      {
+        name: "aborted",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 1,
+        budget: 0,
+        admissionMode: "observe",
+      },
+    ]);
+    const pool = pools.select("gpt-4o")!;
+    const llmRequest = request();
+    const controller = new AbortController();
+    const callback = vi.fn(async () => "must not run");
+    controller.abort();
+
+    await expect(
+      pool.run(llmRequest, pool.prepare(llmRequest, "normal"), callback, {
+        priority: "normal",
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ reason: "aborted" });
+    expect(callback).not.toHaveBeenCalled();
+    expect(pool.stats().tyr.observe.bypassed).toBe(0);
   });
 
   it("returns outstanding work when bounded drain expires", async () => {
@@ -195,15 +268,29 @@ describe("async-bulkhead-llm v3.8 pool runtime", () => {
     const pool = pools.select("gpt-4o")!;
     pools.close();
     const llmRequest = request();
-    const prepared = pool.prepare(llmRequest, "normal");
+    const callback = vi.fn(async () => "must not run");
 
     await expect(
-      pool.run(llmRequest, prepared, async () => "must not run", {
+      pool.run(llmRequest, pool.prepare(llmRequest, "normal"), callback, {
         priority: "normal",
       }),
     ).rejects.toMatchObject({ reason: "shutdown" });
+    expect(callback).not.toHaveBeenCalled();
   });
-  it("rejects enabled adaptive estimation without a token budget", () => {
+
+  it("validates shadowReasons and adaptive-estimation requirements", () => {
+    expect(() =>
+      createPools([
+        {
+          name: "invalid-shadow",
+          modelPrefixes: ["gpt"],
+          model: "gpt-4o",
+          maxConcurrent: 1,
+          shadowReasons: ["budget_limit", "budget_limit"],
+        },
+      ]),
+    ).toThrow(/shadowReasons must not contain duplicates/);
+
     expect(() =>
       createPools([
         {
@@ -216,5 +303,4 @@ describe("async-bulkhead-llm v3.8 pool runtime", () => {
       ]),
     ).toThrow(/adaptiveEstimation requires.*budget/);
   });
-
 });

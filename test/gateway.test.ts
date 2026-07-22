@@ -15,6 +15,7 @@ import { loadRuntimeConfig } from "../src/config.js";
 import type {
   AdaptiveEstimationConfig,
   AdmissionMode,
+  PoolConfig,
   PoolsDrainResult,
 } from "../src/pools.js";
 
@@ -239,6 +240,7 @@ function startGateway(
     highPriorityReserve?: number;
     opaqueMediaInputTokens?: number;
     admissionMode?: AdmissionMode;
+    shadowReasons?: NonNullable<PoolConfig["shadowReasons"]>;
     adaptiveEstimation?: AdaptiveEstimationConfig;
   },
   opts: {
@@ -316,6 +318,8 @@ describe("admission-gateway", () => {
       expect(res.headers.get("x-admission-id")).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
       );
+      expect(res.headers.get("x-admission-outcome")).toBe("admitted");
+      expect(res.headers.get("x-admission-bypass-reason")).toBeNull();
       const body = (await res.json()) as { id: string };
       expect(body.id).toBe("msg_mock");
 
@@ -383,6 +387,10 @@ describe("admission-gateway", () => {
         "budget_limit",
       );
       expect(res.headers.get("x-admission-id")).toMatch(/^shadow-/);
+      expect(res.headers.get("x-admission-outcome")).toBe("bypassed");
+      expect(res.headers.get("x-admission-bypass-reason")).toBe(
+        "budget_limit",
+      );
 
       const stats = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
         string,
@@ -407,6 +415,28 @@ describe("admission-gateway", () => {
           observe: { bypassed: 1 },
         },
       });
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("does not bypass reasons excluded by shadowReasons", async () => {
+    const gw = await startGateway({
+      maxConcurrent: 10,
+      budget: 0,
+      admissionMode: "observe",
+      shadowReasons: ["concurrency_limit"],
+    });
+    try {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi")),
+      });
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("x-admission-reason")).toBe("budget_limit");
+      expect(res.headers.get("x-admission-outcome")).toBeNull();
     } finally {
       gw.server.close();
     }

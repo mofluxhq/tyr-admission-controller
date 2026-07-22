@@ -53,6 +53,7 @@ pools:
     defaultOutputReservation: 8192
     opaqueMediaInputTokenReservation: 3072
     admissionMode: observe
+    shadowReasons: [budget_limit, concurrency_limit]
     adaptiveEstimation:
       enabled: true
       smoothing: 0.3
@@ -89,6 +90,7 @@ describe("file configuration", () => {
         outputCap: 8192,
         opaqueMediaInputTokens: 3072,
         admissionMode: "observe",
+        shadowReasons: ["budget_limit", "concurrency_limit"],
         adaptiveEstimation: {
           enabled: true,
           smoothing: 0.3,
@@ -272,7 +274,7 @@ pools:
     expect(() => loadRuntimeConfigFile(tooLarge)).toThrow(/must not exceed/);
   });
 
-  it("validates v3.8 admission and adaptive-estimation settings", () => {
+  it("validates v3.9 admission and adaptive-estimation settings", () => {
     const badMode = tempConfig(`
 version: 1
 upstreams:
@@ -285,6 +287,34 @@ pools:
     admissionMode: audit
 `, "bad-mode.yaml");
     expect(() => loadRuntimeConfigFile(badMode)).toThrow(/admissionMode/);
+
+    const badShadowReason = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: https://api.openai.com }
+pools:
+  - name: pool
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 1
+    admissionMode: observe
+    shadowReasons: [shutdown]
+`, "bad-shadow-reason.yaml");
+    expect(() => loadRuntimeConfigFile(badShadowReason)).toThrow(/shadowReasons/);
+
+    const duplicateShadowReason = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: https://api.openai.com }
+pools:
+  - name: pool
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 1
+    admissionMode: observe
+    shadowReasons: [budget_limit, budget_limit]
+`, "duplicate-shadow-reason.yaml");
+    expect(() => loadRuntimeConfigFile(duplicateShadowReason)).toThrow(/duplicates/);
 
     const badAdaptive = tempConfig(`
 version: 1
@@ -308,6 +338,21 @@ pools:
         ADAPTIVE_MAX_CORRECTION: "1",
       }),
     ).toThrow(/ADAPTIVE_MAX_CORRECTION/);
+
+    expect(() =>
+      loadRuntimeConfig({
+        OPENAI_UPSTREAM_URL: "https://api.openai.com",
+        SHADOW_REASONS: "shutdown",
+      }),
+    ).toThrow(/SHADOW_REASONS/);
+
+    expect(
+      loadRuntimeConfig({
+        OPENAI_UPSTREAM_URL: "https://api.openai.com",
+        ADMISSION_MODE: "observe",
+        SHADOW_REASONS: "",
+      }).gateway.pools[0]?.shadowReasons,
+    ).toEqual([]);
   });
 
   it("reports malformed YAML and missing files", () => {
@@ -342,6 +387,7 @@ pools:
       TOKEN_BUDGET: "0",
       OPAQUE_MEDIA_INPUT_TOKENS: "4096",
       ADMISSION_MODE: "observe",
+      SHADOW_REASONS: "budget_limit,concurrency_limit",
       ADAPTIVE_ESTIMATION: "true",
       ADAPTIVE_SMOOTHING: "0.4",
       ADAPTIVE_MIN_SAMPLES: "2",
@@ -355,6 +401,7 @@ pools:
     expect(config.gateway.pools[0]).toMatchObject({
       budget: 0,
       admissionMode: "observe",
+      shadowReasons: ["budget_limit", "concurrency_limit"],
       adaptiveEstimation: {
         enabled: true,
         smoothing: 0.4,

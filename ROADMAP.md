@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.9.0` pilot release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.9.1` pilot release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,13 +21,13 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.9.0
+## Current baseline: v0.9.1
 
 The current release provides:
 
 - Anthropic Messages and OpenAI Chat Completions proxy routes.
 - Model-prefix routing to independently configured local pools.
-- A v3.8 pool policy runtime using exact reservation previews and detailed
+- A v3.9 pool policy runtime using exact reservation previews and detailed
   advisory capacity snapshots.
 - Per-pool enforcement and shadow observation modes.
 - Adaptive per-model input estimates learned from provider-reported usage.
