@@ -65,8 +65,7 @@ jobs:
           cat contents.txt
 
           grep -Fxq 'package/dist/index.d.ts' contents.txt || { echo "Missing package/dist/index.d.ts"; exit 1; }
-          grep -Fxq 'package/dist/esm/index.js' contents.txt || { echo "Missing package/dist/esm/index.js"; exit 1; }
-          grep -Fxq 'package/dist/cjs/index.cjs' contents.txt || { echo "Missing package/dist/cjs/index.cjs"; exit 1; }
+          grep -Fxq 'package/dist/index.js' contents.txt || { echo "Missing package/dist/index.js"; exit 1; }
 
   release:
     name: Create GitHub Release
