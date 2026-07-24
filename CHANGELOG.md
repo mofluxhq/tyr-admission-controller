@@ -8,13 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Added the missing ESLint flat configuration, `lint` / `lint:fix` scripts,
-  dependency lock entries, and a required CI lint step.
-- Preserved the original `cause` when configuration file reads or YAML
-  conversion fail, and removed an unused test import found by linting.
-
 ## [0.10.0] - 2026-07-23
 
 ### Added
@@ -47,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   switch, while startup configuration still requires a positive initial value.
 - Corrected CI to run the existing typecheck command and verify Tyr's actual
   flat ESM/declaration tarball layout.
+
+### Fixed
+
+- Added the missing ESLint flat configuration, `lint` / `lint:fix` scripts,
+  dependency lock entries, and a required CI lint step.
+- Added lint to `release:check` and documented the lint commands in the README.
+- Preserved the original `cause` when configuration file reads or YAML
+  conversion fail, and removed an unused test import found by linting.
+- Corrected the concurrency scale-up test to hold both admitted operations open
+  while asserting two in-flight requests and no pending waiter.
 
 ### Removed
 
