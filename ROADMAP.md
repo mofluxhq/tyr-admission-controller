@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.10.0` pilot release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.11.0` pilot release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,17 +21,21 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.10.0
+## Current baseline: v0.11.0
 
 The current release provides:
 
 - Anthropic Messages and OpenAI Chat Completions proxy routes.
 - Model-prefix routing to independently configured local pools.
-- A v3.10 pool policy runtime using exact reservation previews, native observe
+- A v3.11 pool policy runtime using exact reservation previews, native observe
   mode, and complete versioned admission-limit snapshots.
 - Tyr-local all-or-nothing runtime updates across named pools, with stale
   revision protection and shrink-by-attrition semantics.
 - A narrow control surface for an embedded fleet or grant agent.
+- Admission-linearized revisions and a bounded per-pool Zab provenance ledger
+  containing grant ID, controller epoch, and expiration.
+- Exact grant-attribution response headers for admissions, bypasses, and
+  rejections.
 - Adaptive per-model input estimates learned from provider-reported usage.
 - Fail-fast concurrent-request and token-budget admission with priority reserves.
 - Stable admission IDs, streaming usage correction, transport backpressure, and
@@ -135,7 +139,31 @@ Remaining limitations carried into the next milestone:
 
 - No central distributor, grant TTL, allocator epoch, identity layer, standard telemetry exporter, or durable audit stream.
 
-### v0.11.0 — Observable and identifiable
+### v0.11.0 — Provenance-correct distributed admission
+
+**Status:** Released 2026-07-24
+**Goal:** Make every local admission attributable to the exact external grant
+that authorized its capacity.
+
+Delivered:
+
+- Upgraded to `async-bulkhead-llm` 3.11.0 and consumed its immutable
+  admission-linearized `limitRevision`.
+- Added optional Zab provenance to transactional updates: grant ID, controller
+  epoch, exact revision, and expiration.
+- Retained a bounded revision-to-provenance ledger per pool.
+- Added exact grant and epoch response headers for admitted, bypassed, and
+  rejected requests.
+- Added deterministic library, pool, gateway, and agent race coverage.
+
+Outcome:
+
+- Applying grant B cannot relabel work that already acquired capacity under
+  grant A.
+- Operators can trace each decision to the exact versioned, expiring capacity
+  grant that governed it.
+
+### v0.12.0 — Observable and identifiable
 
 **Target duration:** 2–3 weeks
 **Goal:** Make Tyr safe to pilot and capable of proving that admission control improves production outcomes.
@@ -166,7 +194,7 @@ Deferred from this release:
 - Durable audit storage or a search UI.
 - Per-tenant bulkhead instances.
 
-### v0.12.0 — Ecosystem and modern OpenAI support
+### v0.13.0 — Ecosystem and modern OpenAI support
 
 **Target duration:** 2–3 weeks
 **Goal:** Reduce adoption friction and support the most commercially important modern OpenAI workload.
@@ -195,7 +223,7 @@ Deferred from this release:
 - Generic MCP session accounting.
 - Native Kong or Envoy extensions.
 
-### v0.13.0 — Distributed token leases
+### v0.14.0 — Distributed token leases
 
 **Target duration:** 4–6 weeks
 **Goal:** Enforce one capacity budget across multiple Tyr replicas.
@@ -225,7 +253,7 @@ Non-goals:
 - Automatically discovering provider quotas.
 - Kubernetes-only budget partitioning as the primary correctness mechanism.
 
-### v0.14.0 — Tenant policy and fairness
+### v0.15.0 — Tenant policy and fairness
 
 **Target duration:** 2–4 weeks
 **Goal:** Support paid multi-tenant deployments without creating unbounded gateway state.
@@ -338,4 +366,4 @@ A milestone may ship only when:
 - Upgrade and rollback behavior is documented.
 - The release notes distinguish admission-time guarantees from post-admission usage overruns.
 
-Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.10.0, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.
+Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.11.0, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.

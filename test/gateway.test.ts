@@ -395,6 +395,81 @@ describe("admission-gateway", () => {
     }
   });
 
+  it("keeps request headers bound to the exact Zab grant that admitted them", async () => {
+    const gw = await startGateway({
+      maxConcurrent: 1,
+      initialRevision: 0,
+    });
+    const grantA = {
+      source: "zab" as const,
+      grantId: "grant-a",
+      controllerEpoch: 31,
+      revision: 1,
+      expiresAt: "2026-07-24T20:00:00.000Z",
+    };
+    const grantB = {
+      source: "zab" as const,
+      grantId: "grant-b",
+      controllerEpoch: 31,
+      revision: 2,
+      expiresAt: "2026-07-24T20:01:00.000Z",
+    };
+
+    try {
+      expect(
+        gw.control.applyLimits([
+          {
+            pool: "test-pool",
+            limits: { revision: 1, maxConcurrent: 1, maxQueue: 0 },
+            provenance: grantA,
+          },
+        ]),
+      ).toMatchObject({ applied: true });
+
+      const admittedUnderA = fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("slow under grant a")),
+      });
+
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const stats = (await (
+          await fetch(`${gw.url}/stats`)
+        ).json()) as Record<string, { bulkhead: { inFlight: number } }>;
+        if (stats["test-pool"]?.bulkhead.inFlight === 1) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+
+      expect(
+        gw.control.applyLimits([
+          {
+            pool: "test-pool",
+            limits: { revision: 2, maxConcurrent: 2, maxQueue: 0 },
+            provenance: grantB,
+          },
+        ]),
+      ).toMatchObject({ applied: true });
+
+      const first = await admittedUnderA;
+      expect(first.status).toBe(200);
+      expect(first.headers.get("x-admission-revision")).toBe("1");
+      expect(first.headers.get("x-zab-grant-id")).toBe("grant-a");
+      expect(first.headers.get("x-zab-controller-epoch")).toBe("31");
+
+      const second = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("under grant b")),
+      });
+      expect(second.status).toBe(200);
+      expect(second.headers.get("x-admission-revision")).toBe("2");
+      expect(second.headers.get("x-zab-grant-id")).toBe("grant-b");
+      expect(second.headers.get("x-zab-controller-epoch")).toBe("31");
+    } finally {
+      gw.server.close();
+    }
+  });
+
   it("rejects with 429 + detail when the token budget is exhausted", async () => {
     // Budget fits one ~1000-token reservation, not two.
     const gw = await startGateway({ maxConcurrent: 10, budget: 1200 });

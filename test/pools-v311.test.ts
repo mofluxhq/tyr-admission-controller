@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { LLMRequest } from "async-bulkhead-llm";
-import { createPools } from "../src/pools.js";
+import {
+  createPools,
+  type AdmissionProvenance,
+} from "../src/pools.js";
 
 const request = (content = "hello"): LLMRequest => ({
   model: "gpt-4o",
@@ -8,7 +11,7 @@ const request = (content = "hello"): LLMRequest => ({
   max_tokens: 0,
 });
 
-describe("async-bulkhead-llm v3.10 pool runtime", () => {
+describe("async-bulkhead-llm v3.11 pool runtime", () => {
   it("reuses the immutable estimate for detailed preview and admission", async () => {
     const pools = createPools([
       {
@@ -219,7 +222,7 @@ describe("async-bulkhead-llm v3.10 pool runtime", () => {
 
 });
 
-describe("v3.10 versioned pool limits", () => {
+describe("v3.11 versioned pool limits", () => {
   it("seeds and exposes complete versioned snapshots", () => {
     const pools = createPools([
       {
@@ -435,6 +438,143 @@ describe("v3.10 versioned pool limits", () => {
     releaseSecond();
     releaseFirst();
     await Promise.all([first, second]);
+  });
+
+  it("rejects mismatched provenance before mutating any pool", () => {
+    const pools = createPools([
+      {
+        name: "provenance-validation",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 1,
+        initialRevision: 0,
+      },
+    ]);
+
+    expect(() =>
+      pools.applyLimits([
+        {
+          pool: "provenance-validation",
+          limits: { revision: 1, maxConcurrent: 2, maxQueue: 0 },
+          provenance: {
+            source: "zab",
+            grantId: "grant-wrong-revision",
+            controllerEpoch: 1,
+            revision: 2,
+            expiresAt: "2026-07-24T18:00:00.000Z",
+          },
+        },
+      ]),
+    ).toThrow(/provenance\.revision must equal limits\.revision/);
+
+    expect(pools.limits()["provenance-validation"]).toEqual({
+      revision: 0,
+      maxConcurrent: 1,
+      maxQueue: 0,
+    });
+  });
+
+  it("binds each admitted request to the exact Zab grant revision", async () => {
+    const pools = createPools([
+      {
+        name: "provenance",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 1,
+        initialRevision: 0,
+        adaptiveEstimation: { enabled: false },
+      },
+    ]);
+    const pool = pools.get("provenance")!;
+    const grantA: AdmissionProvenance = {
+      source: "zab",
+      grantId: "grant-a",
+      controllerEpoch: 12,
+      revision: 1,
+      expiresAt: "2026-07-24T18:00:00.000Z",
+    };
+    const grantB: AdmissionProvenance = {
+      source: "zab",
+      grantId: "grant-b",
+      controllerEpoch: 12,
+      revision: 2,
+      expiresAt: "2026-07-24T18:01:00.000Z",
+    };
+
+    expect(
+      pools.applyLimits([
+        {
+          pool: "provenance",
+          limits: { revision: 1, maxConcurrent: 1, maxQueue: 0 },
+          provenance: grantA,
+        },
+      ]),
+    ).toMatchObject({ applied: true });
+
+    let releaseA!: () => void;
+    const holdA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    let startedA!: () => void;
+    const didStartA = new Promise<void>((resolve) => {
+      startedA = resolve;
+    });
+    let contextA:
+      | { limitRevision: number; provenance?: AdmissionProvenance }
+      | undefined;
+    const requestA = request("grant-a");
+    const runA = pool.run(
+      requestA,
+      pool.prepare(requestA, "normal"),
+      async (_signal, context) => {
+        contextA = context;
+        startedA();
+        await holdA;
+        return "a";
+      },
+      { priority: "normal" },
+    );
+    await didStartA;
+
+    expect(
+      pools.applyLimits([
+        {
+          pool: "provenance",
+          limits: { revision: 2, maxConcurrent: 2, maxQueue: 0 },
+          provenance: grantB,
+        },
+      ]),
+    ).toMatchObject({ applied: true });
+
+    expect(contextA).toMatchObject({
+      limitRevision: 1,
+      provenance: grantA,
+    });
+    releaseA();
+    await runA;
+
+    let contextB:
+      | { limitRevision: number; provenance?: AdmissionProvenance }
+      | undefined;
+    const requestB = request("grant-b");
+    await pool.run(
+      requestB,
+      pool.prepare(requestB, "normal"),
+      async (_signal, context) => {
+        contextB = context;
+        return "b";
+      },
+      { priority: "normal" },
+    );
+
+    expect(contextB).toMatchObject({
+      limitRevision: 2,
+      provenance: grantB,
+    });
+    expect(pool.stats().tyr.provenance).toEqual({
+      retainedRevisions: 2,
+      current: grantB,
+    });
   });
 
   it("uses native observe context and reports the applied limit revision", async () => {

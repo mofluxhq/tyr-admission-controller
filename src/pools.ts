@@ -26,6 +26,16 @@ import {
 
 export type AdmissionMode = LLMAdmissionMode;
 
+/** Immutable control-plane metadata attached to one applied limit revision. */
+export type AdmissionProvenance = {
+  readonly source: "zab";
+  readonly grantId: string;
+  readonly controllerEpoch: number;
+  /** Must equal the associated admission-limit revision. */
+  readonly revision: number;
+  readonly expiresAt: string;
+};
+
 export type AdaptiveEstimationConfig = {
   /** Enabled by default for token-budgeted pools. */
   enabled?: boolean;
@@ -77,6 +87,8 @@ export type AdmissionPreparation = {
   mode: AdmissionMode;
   /** Limit snapshot used for the advisory preview. */
   limits: LLMAdmissionLimits;
+  /** Exact revision captured by the advisory capacity decision. */
+  limitRevision: number;
   reservation: LLMReservationEstimate | null;
   advisory: LLMWouldAdmitResult;
 };
@@ -84,10 +96,12 @@ export type AdmissionPreparation = {
 export type AdmissionRunContext = {
   readonly admissionId: string;
   readonly reservation: LLMReservationEstimate | null;
-  /** Whether this callback holds capacity or is a native v3.10 observe bypass. */
+  /** Whether this callback holds capacity or is a native v3.11 observe bypass. */
   readonly admission: LLMRunAdmission;
   /** Limit revision in effect when the callback began. */
   readonly limitRevision: number;
+  /** Exact external grant associated with `limitRevision`, when managed by Zab. */
+  readonly provenance?: AdmissionProvenance;
   readonly bypassReason?: LLMShadowableRejectReason;
   readonly bypassDetail?: LLMRejectDetail;
   reportUsage(usage: TokenUsage): UsageReport;
@@ -104,11 +118,15 @@ export type TyrPoolStats = LLMStats & {
   tyr: {
     admissionMode: AdmissionMode;
     advisory: AdvisoryStats;
-    /** Native async-bulkhead-llm v3.10 observe-mode statistics. */
+    /** Native async-bulkhead-llm v3.11 observe-mode statistics. */
     observe: LLMObserveStats;
     adaptiveEstimation: {
       enabled: boolean;
       corrections: AdaptiveModelCorrection[];
+    };
+    provenance: {
+      retainedRevisions: number;
+      current?: AdmissionProvenance;
     };
   };
 };
@@ -116,7 +134,11 @@ export type TyrPoolStats = LLMStats & {
 /** Narrow control-plane surface; the underlying bulkhead is intentionally hidden. */
 export type PoolController = {
   limits(): LLMAdmissionLimits;
-  applyLimits(next: LLMAdmissionLimits): LLMApplyLimitsResult;
+  provenance(revision: number): AdmissionProvenance | undefined;
+  applyLimits(
+    next: LLMAdmissionLimits,
+    provenance?: AdmissionProvenance,
+  ): LLMApplyLimitsResult;
 };
 
 export type Pool = {
@@ -146,6 +168,7 @@ export type PoolsDrainResult = LLMDrainResult & {
 export type PoolLimitsUpdate = {
   pool: string;
   limits: LLMAdmissionLimits;
+  provenance?: AdmissionProvenance;
 };
 
 export type PoolsApplyLimitsResult =
@@ -153,7 +176,11 @@ export type PoolsApplyLimitsResult =
       applied: true;
       pools: Record<
         string,
-        { previous: LLMAdmissionLimits; current: LLMAdmissionLimits }
+        {
+          previous: LLMAdmissionLimits;
+          current: LLMAdmissionLimits;
+          provenance?: AdmissionProvenance;
+        }
       >;
     }
   | {
@@ -340,6 +367,51 @@ function zeroObserveStats(): LLMObserveStats {
   };
 }
 
+const MAX_RETAINED_PROVENANCE_REVISIONS = 64;
+
+function validateAdmissionProvenance(
+  poolName: string,
+  limitRevision: number,
+  value: AdmissionProvenance | undefined,
+): AdmissionProvenance | undefined {
+  if (value === undefined) return undefined;
+
+  // Snapshot each externally supplied field once for the same reason limit
+  // snapshots are copied before application: accessor-backed objects must not
+  // be able to change between preflight and commit.
+  const source = value.source;
+  const grantId = value.grantId;
+  const controllerEpoch = value.controllerEpoch;
+  const revision = value.revision;
+  const expiresAt = value.expiresAt;
+
+  if (source !== "zab") {
+    throw new Error(`${poolName}.provenance.source must be "zab"`);
+  }
+  assertNonEmptyString(grantId, `${poolName}.provenance.grantId`);
+  assertInteger(controllerEpoch, `${poolName}.provenance.controllerEpoch`, {
+    min: 1,
+  });
+  assertInteger(revision, `${poolName}.provenance.revision`, { min: 0 });
+  if (revision !== limitRevision) {
+    throw new Error(
+      `${poolName}.provenance.revision must equal limits.revision`,
+    );
+  }
+  assertNonEmptyString(expiresAt, `${poolName}.provenance.expiresAt`);
+  if (!Number.isFinite(Date.parse(expiresAt))) {
+    throw new Error(`${poolName}.provenance.expiresAt must be a valid timestamp`);
+  }
+
+  return Object.freeze({
+    source,
+    grantId: grantId.trim(),
+    controllerEpoch,
+    revision,
+    expiresAt,
+  });
+}
+
 function createPool(config: PoolConfig): Pool {
   const mode = config.admissionMode ?? "enforce";
   const adaptiveEnabled =
@@ -399,12 +471,24 @@ function createPool(config: PoolConfig): Pool {
         }
       : {}),
   });
+  const provenanceByRevision = new Map<number, AdmissionProvenance>();
+
+  function retainProvenance(provenance: AdmissionProvenance): void {
+    provenanceByRevision.set(provenance.revision, provenance);
+    while (provenanceByRevision.size > MAX_RETAINED_PROVENANCE_REVISIONS) {
+      const oldest = provenanceByRevision.keys().next().value as
+        | number
+        | undefined;
+      if (oldest === undefined) break;
+      provenanceByRevision.delete(oldest);
+    }
+  }
 
   if (adaptive !== undefined) {
     bulkhead.on("release", (event) => {
       if (event.usage !== undefined) adaptive.observe(event.request, event.usage);
     });
-    // Native v3.10 observe mode has a separate release event because bypassed
+    // Native v3.11 observe mode has a separate release event because bypassed
     // calls never held local capacity. They still provide valuable calibration.
     bulkhead.on("bypassRelease", (event) => {
       if (event.usage !== undefined) adaptive.observe(event.request, event.usage);
@@ -419,13 +503,14 @@ function createPool(config: PoolConfig): Pool {
   };
 
   function prepare(request: LLMRequest, priority: LLMPriority): AdmissionPreparation {
-    const limits = bulkhead.limits();
     const reservation = bulkhead.estimate(request);
     const decision = bulkhead.wouldAdmit(request, {
       priority,
       ...(reservation !== null ? { reservation } : {}),
       detail: true,
     });
+    const limits = bulkhead.limits();
+    const limitRevision = decision.detail?.limitRevision ?? limits.revision;
 
     advisory.checked += 1;
     if (decision.admit) advisory.wouldAdmit += 1;
@@ -434,7 +519,7 @@ function createPool(config: PoolConfig): Pool {
       if (decision.reason !== undefined) noteReason(advisory.rejectedByReason, decision.reason);
     }
 
-    return { mode, limits, reservation, advisory: decision };
+    return { mode, limits, limitRevision, reservation, advisory: decision };
   }
 
   async function run<T>(
@@ -451,12 +536,13 @@ function createPool(config: PoolConfig): Pool {
       request,
       (signal, context) => {
         if (context === undefined) return fn(signal);
-        const currentLimits = bulkhead.limits();
+        const provenance = provenanceByRevision.get(context.limitRevision);
         return fn(signal, {
           admissionId: context.admissionId,
           reservation: context.reservation,
           admission: context.admission,
-          limitRevision: currentLimits.revision,
+          limitRevision: context.limitRevision,
+          ...(provenance !== undefined ? { provenance } : {}),
           ...(context.bypassReason !== undefined
             ? { bypassReason: context.bypassReason }
             : {}),
@@ -482,6 +568,9 @@ function createPool(config: PoolConfig): Pool {
 
   function stats(): TyrPoolStats {
     const snapshot = bulkhead.stats();
+    const currentProvenance = provenanceByRevision.get(
+      snapshot.limits.revision,
+    );
     return {
       ...snapshot,
       tyr: {
@@ -499,6 +588,12 @@ function createPool(config: PoolConfig): Pool {
         adaptiveEstimation: {
           enabled: adaptive !== undefined,
           corrections: adaptive?.corrections() ?? [],
+        },
+        provenance: {
+          retainedRevisions: provenanceByRevision.size,
+          ...(currentProvenance !== undefined
+            ? { current: currentProvenance }
+            : {}),
         },
       },
     };
@@ -518,7 +613,19 @@ function createPool(config: PoolConfig): Pool {
 
   const controller: PoolController = {
     limits: () => bulkhead.limits(),
-    applyLimits: (next) => bulkhead.applyLimits(next),
+    provenance: (revision) => provenanceByRevision.get(revision),
+    applyLimits: (next, provenance) => {
+      const normalized = validateAdmissionProvenance(
+        config.name,
+        next.revision,
+        provenance,
+      );
+      const result = bulkhead.applyLimits(next);
+      if (result.applied && normalized !== undefined) {
+        retainProvenance(normalized);
+      }
+      return result;
+    },
   };
 
   return {
@@ -629,6 +736,7 @@ export function createPools(configs: PoolConfig[]): Pools {
       pool: Pool;
       current: LLMAdmissionLimits;
       next: LLMAdmissionLimits;
+      provenance?: AdmissionProvenance;
     }> = [];
 
     for (const update of updates) {
@@ -643,6 +751,11 @@ export function createPools(configs: PoolConfig[]): Pools {
       }
       const current = pool.controller.limits();
       const next = validateLimitSnapshot(update.pool, current, update.limits);
+      const provenance = validateAdmissionProvenance(
+        update.pool,
+        next.revision,
+        update.provenance,
+      );
       if (next.revision <= current.revision) {
         return {
           applied: false,
@@ -651,15 +764,27 @@ export function createPools(configs: PoolConfig[]): Pools {
           current,
         };
       }
-      resolved.push({ pool, current, next });
+      resolved.push({
+        pool,
+        current,
+        next,
+        ...(provenance !== undefined ? { provenance } : {}),
+      });
     }
 
     const applied: Record<
       string,
-      { previous: LLMAdmissionLimits; current: LLMAdmissionLimits }
+      {
+        previous: LLMAdmissionLimits;
+        current: LLMAdmissionLimits;
+        provenance?: AdmissionProvenance;
+      }
     > = {};
     for (const item of resolved) {
-      const result = item.pool.controller.applyLimits(item.next);
+      const result = item.pool.controller.applyLimits(
+        item.next,
+        item.provenance,
+      );
       if (!result.applied) {
         // The preflight and application execute synchronously on the same event
         // loop turn, so this would indicate an internal invariant violation.
@@ -670,6 +795,9 @@ export function createPools(configs: PoolConfig[]): Pools {
       applied[item.pool.name] = {
         previous: result.previous,
         current: result.current,
+        ...(item.provenance !== undefined
+          ? { provenance: item.provenance }
+          : {}),
       };
     }
     return { applied: true, pools: applied };

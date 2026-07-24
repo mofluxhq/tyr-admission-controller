@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-24
+
+### Added
+
+- Added optional immutable Zab provenance to each transactional pool update:
+  grant ID, controller epoch, exact revision, and expiration timestamp.
+- Added a bounded per-pool revision-to-provenance ledger and exposed the
+  current record through `/stats`.
+- Added `x-zab-grant-id` and `x-zab-controller-epoch` to admitted, bypassed,
+  and rejected responses whenever the decision revision has Zab provenance.
+- Added race coverage proving that a request admitted under grant A continues
+  to report grant A after grant B is applied, while the next request reports B.
+
+### Changed
+
+- Upgraded and pinned `async-bulkhead-llm` to 3.11.0.
+- Tyr now uses the library's admission-linearized `limitRevision` directly
+  instead of reading `bulkhead.limits()` after admission.
+
+### Fixed
+
+- Prevented an in-flight request from being attributed to a newer control-plane
+  revision that was applied after its capacity had already been acquired.
+
 ## [0.10.0] - 2026-07-23
 
 ### Added

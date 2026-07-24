@@ -7,6 +7,7 @@ import {
 import {
   createPools,
   parsePriority,
+  type AdmissionProvenance,
   type PoolConfig,
   type PoolLimitsUpdate,
   type PoolsApplyLimitsResult,
@@ -140,6 +141,18 @@ function rejectStatus(reason: LLMRejectReason): number {
     default:
       return 429; // budget_limit, concurrency_limit, queue_limit, aborted
   }
+}
+
+function setZabProvenanceHeaders(
+  res: ServerResponse,
+  provenance: AdmissionProvenance | undefined,
+): void {
+  if (provenance === undefined) return;
+  res.setHeader("x-zab-grant-id", provenance.grantId);
+  res.setHeader(
+    "x-zab-controller-epoch",
+    String(provenance.controllerEpoch),
+  );
 }
 
 // Reads the request body up to `maxBytes`. On overflow we stop buffering and
@@ -392,18 +405,18 @@ export function createGateway(opts: GatewayOptions) {
       }
 
       // Calculate one immutable reservation and pass it verbatim to both the
-      // detailed advisory check and the authoritative v3.10 admission path.
+      // detailed advisory check and the authoritative v3.11 admission path.
       const preparation = pool.prepare(llmRequest, priority);
       res.setHeader("x-admission-mode", preparation.mode);
       res.setHeader(
         "x-admission-preview-revision",
-        String(preparation.limits.revision),
+        String(preparation.limitRevision),
       );
       // Immediate rejections never enter the run callback, so seed the
       // authoritative header with the preview revision. Queued requests may
       // overwrite it in the callback if a newer snapshot is active when they
       // actually begin execution.
-      res.setHeader("x-admission-revision", String(preparation.limits.revision));
+      res.setHeader("x-admission-revision", String(preparation.limitRevision));
       res.setHeader(
         "x-admission-preview",
         preparation.advisory.admit ? "admit" : "reject",
@@ -446,10 +459,11 @@ export function createGateway(opts: GatewayOptions) {
           preparation,
           async (signal, ctx) => {
             if (ctx !== undefined) {
-              // Stable v3.10 identity and native observe-mode outcome.
+              // Stable v3.11 identity and native observe-mode outcome.
               res.setHeader("x-admission-id", ctx.admissionId);
               res.setHeader("x-admission-outcome", ctx.admission);
               res.setHeader("x-admission-revision", String(ctx.limitRevision));
+              setZabProvenanceHeaders(res, ctx.provenance);
               if (ctx.bypassReason !== undefined) {
                 res.setHeader("x-admission-bypass-reason", ctx.bypassReason);
               }
@@ -569,9 +583,15 @@ export function createGateway(opts: GatewayOptions) {
         }
         if (err instanceof LLMBulkheadRejectedError) {
           const status = rejectStatus(err.reason);
+          const rejectionRevision =
+            err.detail?.limitRevision ?? pool.controller.limits().revision;
           res.setHeader(
             "x-admission-revision",
-            String(pool.controller.limits().revision),
+            String(rejectionRevision),
+          );
+          setZabProvenanceHeaders(
+            res,
+            pool.controller.provenance(rejectionRevision),
           );
           res.setHeader("x-admission-reason", err.reason);
           if (err.reason === "shutdown") {

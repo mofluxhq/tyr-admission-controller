@@ -6,7 +6,7 @@ import {
   OPAQUE_MEDIA_INPUT_TOKENS,
 } from "../src/admission.js";
 
-describe("v3.10 admission projection", () => {
+describe("v3.11 admission projection", () => {
   it("uses first-class system/messages and strips inline media payloads", () => {
     const request = anthropicAdapter.toAdmissionRequest({
       model: "claude-sonnet-4-5",
@@ -84,7 +84,7 @@ describe("v3.10 admission projection", () => {
     );
   });
 
-  it("uses v3.10 opaqueBlockTokens and permits an operator override", () => {
+  it("uses v3.11 opaqueBlockTokens and permits an operator override", () => {
     const baseRequest: LLMRequest = {
       model: "claude-sonnet-4-5",
       messages: [{ role: "user", content: "describe this" }],

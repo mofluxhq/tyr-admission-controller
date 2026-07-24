@@ -5,30 +5,32 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.10.0 is built on
-[`async-bulkhead-llm@3.10.0`](https://www.npmjs.com/package/async-bulkhead-llm).
+Tyr 0.11.0 is built on
+[`async-bulkhead-llm@3.11.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.10.0, single-process, proprietary software. See
+> **Status:** v0.11.0, single-process, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr is now ready to act as a remotely managed
 > data-plane agent, but the central allocator, identity layer, and standard
 > telemetry exporters remain separate roadmap work.
 
-## What shipped in v0.10.0
+## What shipped in v0.11.0
 
-- Upgraded and pinned `async-bulkhead-llm` to exactly 3.10.0.
+- Upgraded and pinned `async-bulkhead-llm` to exactly 3.11.0.
 - Added complete per-pool snapshots covering concurrency, queue capacity, token
   budget, and high-priority reserve.
 - Added strictly increasing revisions and stale-update rejection.
 - Added Tyr-local all-or-nothing batch application across named pools.
 - Added a narrow `control` interface from `createGateway()` for an embedded
   control-plane agent.
-- Delegated observe-mode execution and accounting to the library's native v3.10
+- Delegated observe-mode execution and accounting to the library's native v3.11
   implementation, including bypass identities and bypass release usage.
 - Added request headers for preview and authoritative limit revisions.
+- Added immutable Zab grant provenance keyed by the exact admission revision,
+  with grant and controller-epoch response headers.
 - Added queue and initial-revision startup configuration.
 - Corrected CI to validate Tyr's actual flat ESM/declaration package layout.
 
@@ -45,7 +47,7 @@ For each provider request, Tyr:
 4. Computes one immutable reservation preview.
 5. Captures the pool's complete versioned limit snapshot and calls
    `wouldAdmit(..., { detail: true })` with the exact reservation.
-6. Calls the native v3.10 `run()` path with the same reservation and the pool's
+6. Calls the native v3.11 `run()` path with the same reservation and the pool's
    configured `enforce` or `observe` mode.
 7. Reconciles live and final provider usage. Native observe bypass releases also
    feed adaptive estimation when provider usage is available.
@@ -137,9 +139,11 @@ Every validated, pool-routed request includes an advisory snapshot:
 | `x-admission-preview-reason` | Present when the advisory result rejects |
 | `x-admission-reserved-tokens` | Exact input-plus-output reservation when a token budget exists |
 | `x-admission-id` | Bulkhead UUID, or `shadow-...` for an observe-mode bypass |
-| `x-admission-outcome` | `admitted` or native v3.10 `bypassed` outcome |
+| `x-admission-outcome` | `admitted` or native v3.11 `bypassed` outcome |
 | `x-admission-revision` | Revision active when execution began; immediate rejections use the preview revision |
 | `x-admission-bypass-reason` | Capacity reason simulated by an observe-mode bypass |
+| `x-zab-grant-id` | Exact Zab capacity grant associated with `x-admission-revision`, when present |
+| `x-zab-controller-epoch` | Zab fencing epoch that issued the associated grant |
 
 Actual admission rejections also include `x-admission-reason`. Tyr does not
 fabricate a `Retry-After` header because a fail-fast capacity snapshot cannot
@@ -388,7 +392,7 @@ accounts for that cost.
 custom exact tokenizer is already supplying reservations or when deterministic
 estimates across process restarts are more important than local calibration.
 
-`shutdown.drainTimeoutMs` uses the v3.10 bounded drain result. When the deadline
+`shutdown.drainTimeoutMs` uses the v3.11 bounded drain result. When the deadline
 expires, Tyr records the outstanding count, closes remaining HTTP connections,
 and returns the snapshot from `shutdown()`.
 
@@ -412,6 +416,13 @@ const result = control.applyLimits([
         budget: 240_000,
         highPriorityReserve: 48_000,
       },
+    },
+    provenance: {
+      source: "zab",
+      grantId: "f6bc97d0-14ba-4ca7-b9bb-9a275a8b1533",
+      controllerEpoch: 12,
+      revision: 101,
+      expiresAt: "2026-07-24T18:30:00.000Z",
     },
   },
   {
@@ -438,6 +449,10 @@ token-budgeted pool requires `tokenBudget`; a pool created without token-budget
 admission must omit it. Revisions must be strictly greater than the currently
 applied revision.
 
+When `provenance` is supplied, its revision must equal the limit revision.
+Tyr retains a bounded per-pool revision ledger so an in-flight request keeps
+the grant identity captured at admission even after a newer grant is applied.
+
 Tyr preflights the complete batch before mutating any pool. Unknown names,
 duplicate pool entries, invalid fields, or a stale revision therefore cannot
 partially update the local process. After preflight, all snapshots are applied
@@ -452,7 +467,7 @@ revision alongside operational counters.
 
 Queue timeout, model routing, estimator policy, admission mode, and provider
 upstreams remain construction-time settings. They are deliberately outside the
-v3.10 limit snapshot and still require process replacement or a future pool
+v3.11 limit snapshot and still require process replacement or a future pool
 lifecycle API.
 
 ## Priority safety
@@ -567,7 +582,7 @@ explicit `content-length`.
 in-flight bulkhead work. Requests reaching an existing keep-alive connection
 during shutdown receive `503` with `x-admission-reason: shutdown`. When
 `shutdown.drainTimeoutMs` is configured, Tyr closes remaining connections after
-the bounded v3.10 drain snapshot reports outstanding work.
+the bounded v3.11 drain snapshot reports outstanding work.
 
 `/stats` exposes the live bulkhead statistics plus a `tyr` object for each pool.
 That object contains admission mode, advisory admit/reject counts, observe-mode
@@ -584,7 +599,7 @@ reverse-proxy layer.
   application surface, but no central distributor, lease allocator, grant TTL,
   or fencing epoch is included yet.
 - Routing, upstream, estimator, timeout, and admission-mode configuration is
-  loaded only at startup. Only the v3.10 admission-limit snapshot is remotely
+  loaded only at startup. Only the v3.11 admission-limit snapshot is remotely
   replaceable at runtime.
 - Adaptive calibration is local, learned only from live observations, and is not
   persisted across restarts.
@@ -612,7 +627,7 @@ src/
   cli.ts            offline configuration validation command
   config.ts         YAML and legacy environment configuration loading
   index.ts          validated process entrypoint
-  pools.ts          v3.10 policy runtime, versioned limits, observe mode, and drain
+  pools.ts          v3.11 policy runtime, versioned limits, observe mode, and drain
   server.ts         HTTP proxy, admission, timeouts, and shutdown
   sse.ts            Anthropic streaming usage extraction
   sse-openai.ts     OpenAI streaming usage extraction
@@ -621,7 +636,7 @@ test/
   admission.test.ts request projection and estimator regression tests
   config.test.ts    file-schema and environment compatibility tests
   gateway.test.ts   gateway end-to-end tests
-  pools-v310.test.ts v3.10 preview, observe, reconfiguration, and drain tests
+  pools-v311.test.ts v3.11 preview, provenance, observe, reconfiguration, and drain tests
 Dockerfile          production multi-stage image
 compose.example.yaml local file-configured container example
 ```
