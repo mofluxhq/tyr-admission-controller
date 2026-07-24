@@ -394,6 +394,10 @@ describe("v3.10 versioned pool limits", () => {
     const secondDidStart = new Promise<void>((resolve) => {
       secondStarted = resolve;
     });
+    let releaseSecond!: () => void;
+    const secondBlocked = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
 
     const first = pool.run(
       firstRequest,
@@ -410,6 +414,7 @@ describe("v3.10 versioned pool limits", () => {
       pool.prepare(secondRequest, "normal"),
       async () => {
         secondStarted();
+        await secondBlocked;
       },
       { priority: "normal" },
     );
@@ -426,7 +431,8 @@ describe("v3.10 versioned pool limits", () => {
     ).toMatchObject({ applied: true });
 
     await secondDidStart;
-    expect(pool.stats().bulkhead.inFlight).toBe(2);
+    expect(pool.stats().bulkhead).toMatchObject({ inFlight: 2, pending: 0 });
+    releaseSecond();
     releaseFirst();
     await Promise.all([first, second]);
   });

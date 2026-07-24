@@ -18,7 +18,9 @@
     "validate:config": "node dist/cli.js validate",
     "prepack": "npm run build",
     "smoke": "node --input-type=module -e \"await import('./dist/server.js'); await import('./dist/adapters.js');\"",
-    "release:check": "npm run typecheck && npm test && npm run build && npm run smoke && npm pack --dry-run"
+    "release:check": "npm run lint && npm run typecheck && npm test && npm run build && npm run smoke && npm pack --dry-run",
+    "lint": "eslint . --max-warnings=0",
+    "lint:fix": "eslint . --fix"
   },
   "dependencies": {
     "async-bulkhead-llm": "3.10.0",
@@ -27,7 +29,11 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
-    "vitest": "^4.0.0"
+    "vitest": "^4.0.0",
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.2",
+    "eslint-config-prettier": "^10.1.8",
+    "typescript-eslint": "^8.56.1"
   },
   "bin": {
     "tyr": "./dist/cli.js"

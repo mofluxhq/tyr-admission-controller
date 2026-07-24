@@ -629,6 +629,8 @@ compose.example.yaml local file-configured container example
 ## Development commands
 
 ```bash
+npm run lint
+npm run lint:fix
 npm run typecheck
 npm test
 npm run build

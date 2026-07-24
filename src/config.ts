@@ -775,7 +775,9 @@ export function loadRuntimeConfigFile(filePath: string): RuntimeConfig {
     text = readFileSync(absolutePath, "utf8");
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`unable to read configuration file ${absolutePath}: ${detail}`);
+    throw new Error(`unable to read configuration file ${absolutePath}: ${detail}`, {
+      cause: error,
+    });
   }
 
   const document = parseDocument(text, {
@@ -795,7 +797,9 @@ export function loadRuntimeConfigFile(filePath: string): RuntimeConfig {
     raw = document.toJS({ maxAliasCount: 100 });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`invalid YAML in ${absolutePath}: ${detail}`);
+    throw new Error(`invalid YAML in ${absolutePath}: ${detail}`, {
+      cause: error,
+    });
   }
 
   const fingerprint = createHash("sha256").update(text).digest("hex");

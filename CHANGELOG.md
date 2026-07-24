@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Added the missing ESLint flat configuration, `lint` / `lint:fix` scripts,
+  dependency lock entries, and a required CI lint step.
+- Preserved the original `cause` when configuration file reads or YAML
+  conversion fail, and removed an unused test import found by linting.
+
 ## [0.10.0] - 2026-07-23
 
 ### Added
