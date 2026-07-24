@@ -3,18 +3,19 @@ import {
   createServer,
   request as httpRequest,
   type Server,
+  type ServerResponse,
 } from "node:http";
 import { connect as netConnect, type AddressInfo } from "node:net";
 import {
   createGateway,
   waitForDrain,
   type GatewayOptions,
+  type TyrControlPlane,
 } from "../src/server.js";
 import { loadRuntimeConfig } from "../src/config.js";
 import type {
   AdaptiveEstimationConfig,
   AdmissionMode,
-  PoolConfig,
   PoolsDrainResult,
 } from "../src/pools.js";
 
@@ -235,11 +236,12 @@ afterAll(() => {
 function startGateway(
   pool: {
     maxConcurrent: number;
+    maxQueue?: number;
+    initialRevision?: number;
     budget?: number;
     highPriorityReserve?: number;
     opaqueMediaInputTokens?: number;
     admissionMode?: AdmissionMode;
-    shadowReasons?: NonNullable<PoolConfig["shadowReasons"]>;
     adaptiveEstimation?: AdaptiveEstimationConfig;
   },
   opts: {
@@ -253,9 +255,10 @@ function startGateway(
 ): Promise<{
   server: Server;
   url: string;
+  control: TyrControlPlane;
   shutdown: () => Promise<PoolsDrainResult>;
 }> {
-  const { server, shutdown } = createGateway({
+  const { server, control, shutdown } = createGateway({
     upstreamUrl: upstream.url,
     openaiUpstreamUrl: openaiUpstream.url,
     ...(opts.responseTimeoutMs !== undefined
@@ -290,7 +293,7 @@ function startGateway(
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const { port } = server.address() as AddressInfo;
-      resolve({ server, url: `http://127.0.0.1:${port}`, shutdown });
+      resolve({ server, url: `http://127.0.0.1:${port}`, control, shutdown });
     });
   });
 }
@@ -314,11 +317,12 @@ describe("admission-gateway", () => {
         body: JSON.stringify(msg("hi")),
       });
       expect(res.status).toBe(200);
+      expect(res.headers.get("x-admission-preview-revision")).toBe("0");
+      expect(res.headers.get("x-admission-revision")).toBe("0");
+      expect(res.headers.get("x-admission-outcome")).toBe("admitted");
       expect(res.headers.get("x-admission-id")).toMatch(
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
       );
-      expect(res.headers.get("x-admission-outcome")).toBe("admitted");
-      expect(res.headers.get("x-admission-bypass-reason")).toBeNull();
       const body = (await res.json()) as { id: string };
       expect(body.id).toBe("msg_mock");
 
@@ -330,6 +334,63 @@ describe("admission-gateway", () => {
       expect(tb.totalConsumed).toBe(50); // 20 in + 30 out from mock
       expect(tb.totalRefunded).toBeGreaterThan(0); // reserved ~1000+ vs 50 actual
       expect(tb.inFlightTokens).toBe(0);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("applies a higher-revision control-plane snapshot without restart", async () => {
+    const gw = await startGateway({
+      maxConcurrent: 2,
+      initialRevision: 10,
+      budget: 5_000,
+    });
+    try {
+      const applied = gw.control.applyLimits([
+        {
+          pool: "test-pool",
+          limits: {
+            revision: 11,
+            maxConcurrent: 0,
+            maxQueue: 0,
+            tokenBudget: { budget: 0, highPriorityReserve: 0 },
+          },
+        },
+      ]);
+      expect(applied).toMatchObject({ applied: true });
+      expect(gw.control.limits()["test-pool"]).toEqual({
+        revision: 11,
+        maxConcurrent: 0,
+        maxQueue: 0,
+        tokenBudget: { budget: 0, highPriorityReserve: 0 },
+      });
+
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi")),
+      });
+      expect(res.status).toBe(429);
+      expect(res.headers.get("x-admission-preview-revision")).toBe("11");
+      expect(res.headers.get("x-admission-revision")).toBe("11");
+
+      const stale = gw.control.applyLimits([
+        {
+          pool: "test-pool",
+          limits: {
+            revision: 11,
+            maxConcurrent: 20,
+            maxQueue: 0,
+            tokenBudget: { budget: 50_000, highPriorityReserve: 0 },
+          },
+        },
+      ]);
+      expect(stale).toMatchObject({
+        applied: false,
+        reason: "stale_revision",
+        pool: "test-pool",
+      });
+      expect(gw.control.limits()["test-pool"]?.revision).toBe(11);
     } finally {
       gw.server.close();
     }
@@ -385,11 +446,9 @@ describe("admission-gateway", () => {
       expect(res.headers.get("x-admission-preview-reason")).toBe(
         "budget_limit",
       );
-      expect(res.headers.get("x-admission-id")).toMatch(/^shadow-/);
       expect(res.headers.get("x-admission-outcome")).toBe("bypassed");
-      expect(res.headers.get("x-admission-bypass-reason")).toBe(
-        "budget_limit",
-      );
+      expect(res.headers.get("x-admission-bypass-reason")).toBe("budget_limit");
+      expect(res.headers.get("x-admission-id")).toMatch(/^shadow-/);
 
       const stats = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
         string,
@@ -414,28 +473,6 @@ describe("admission-gateway", () => {
           observe: { bypassed: 1 },
         },
       });
-    } finally {
-      gw.server.close();
-    }
-  });
-
-  it("does not bypass reasons excluded by shadowReasons", async () => {
-    const gw = await startGateway({
-      maxConcurrent: 10,
-      budget: 0,
-      admissionMode: "observe",
-      shadowReasons: ["concurrency_limit"],
-    });
-    try {
-      const res = await fetch(`${gw.url}/v1/messages`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(msg("hi")),
-      });
-
-      expect(res.status).toBe(429);
-      expect(res.headers.get("x-admission-reason")).toBe("budget_limit");
-      expect(res.headers.get("x-admission-outcome")).toBeNull();
     } finally {
       gw.server.close();
     }

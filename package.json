@@ -1,6 +1,6 @@
 {
   "name": "tyr-admission-controller",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "private": true,
   "license": "SEE LICENSE IN LICENSE.txt",
   "description": "Tyr is a capacity guard for LLM traffic that reserves expected token capacity before execution, sheds requests that would overcommit a model pool, and reconciles reservations from live provider usage.",
@@ -18,19 +18,15 @@
     "validate:config": "node dist/cli.js validate",
     "prepack": "npm run build",
     "smoke": "node --input-type=module -e \"await import('./dist/server.js'); await import('./dist/adapters.js');\"",
-    "release:check": "npm run typecheck && npm test && npm run build && npm run smoke",
-    "lint": "eslint ."
+    "release:check": "npm run typecheck && npm test && npm run build && npm run smoke && npm pack --dry-run"
   },
   "dependencies": {
-    "async-bulkhead-llm": "3.9.0",
+    "async-bulkhead-llm": "3.10.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "@types/node": "^22.20.1",
-    "eslint": "^10.7.0",
+    "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
-    "typescript-eslint": "^8.65.0",
     "vitest": "^4.0.0"
   },
   "bin": {

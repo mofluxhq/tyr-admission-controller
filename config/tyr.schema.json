@@ -137,6 +137,20 @@
           "type": "integer",
           "minimum": 1
         },
+        "maxQueue": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "queueTimeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limitsRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
         "inFlightTokenBudget": {
           "type": "integer",
           "minimum": 0
@@ -161,20 +175,6 @@
             "observe"
           ],
           "default": "enforce"
-        },
-        "shadowReasons": {
-          "type": "array",
-          "description": "Capacity rejection reasons that observe mode may bypass. Omit to allow all supported reasons; use an empty array to bypass none.",
-          "uniqueItems": true,
-          "items": {
-            "type": "string",
-            "enum": [
-              "budget_limit",
-              "concurrency_limit",
-              "queue_limit",
-              "timeout"
-            ]
-          }
         },
         "adaptiveEstimation": {
           "type": "object",

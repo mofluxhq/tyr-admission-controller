@@ -1,6 +1,6 @@
-import { createHash } from "crypto";
-import { readFileSync } from "fs";
-import { resolve } from "path";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { parseDocument } from "yaml";
 import type { PoolConfig } from "./pools.js";
 import type { GatewayOptions } from "./server.js";
@@ -30,12 +30,14 @@ const LEGACY_CONFIG_ENV_NAMES = [
   "MAX_OUTPUT_TOKENS",
   "PORT",
   "MAX_CONCURRENT",
+  "MAX_QUEUE",
+  "QUEUE_TIMEOUT_MS",
+  "ADMISSION_LIMITS_REVISION",
   "TOKEN_BUDGET",
   "HIGH_PRIORITY_RESERVE",
   "OPAQUE_MEDIA_INPUT_TOKENS",
   "TRUST_X_PRIORITY_HEADER",
   "ADMISSION_MODE",
-  "SHADOW_REASONS",
   "SHUTDOWN_DRAIN_TIMEOUT_MS",
   "ADAPTIVE_ESTIMATION",
   "ADAPTIVE_SMOOTHING",
@@ -71,8 +73,7 @@ function parseFiniteNumber(
   opts: { exclusiveMin?: number; min?: number; max?: number },
 ): number {
   const value = Number(raw);
-  if (!Number.isFinite(value))
-    throw new Error(`${name} must be a finite number`);
+  if (!Number.isFinite(value)) throw new Error(`${name} must be a finite number`);
   if (opts.exclusiveMin !== undefined && value <= opts.exclusiveMin) {
     throw new Error(`${name} must be > ${opts.exclusiveMin}`);
   }
@@ -94,52 +95,14 @@ function optionalNumberEnv(
   return raw === undefined ? undefined : parseFiniteNumber(raw, name, opts);
 }
 
-function admissionModeEnv(env: NodeJS.ProcessEnv): "enforce" | "observe" {
+function admissionModeEnv(
+  env: NodeJS.ProcessEnv,
+): "enforce" | "observe" {
   const value = envString(env, "ADMISSION_MODE")?.toLowerCase() ?? "enforce";
   if (value !== "enforce" && value !== "observe") {
     throw new Error('ADMISSION_MODE must be "enforce" or "observe"');
   }
   return value;
-}
-
-const SHADOW_REASONS = [
-  "budget_limit",
-  "concurrency_limit",
-  "queue_limit",
-  "timeout",
-] as const;
-
-function parseShadowReasons(
-  values: readonly unknown[],
-  field: string,
-): PoolConfig["shadowReasons"] {
-  const supported = new Set<string>(SHADOW_REASONS);
-  const seen = new Set<string>();
-  return values.map((value, index) => {
-    if (typeof value !== "string" || !supported.has(value)) {
-      throw new Error(
-        `${field}[${index}] must be budget_limit, concurrency_limit, queue_limit, or timeout`,
-      );
-    }
-    if (seen.has(value)) {
-      throw new Error(`${field} must not contain duplicates`);
-    }
-    seen.add(value);
-    return value as (typeof SHADOW_REASONS)[number];
-  });
-}
-
-function shadowReasonsEnv(
-  env: NodeJS.ProcessEnv,
-): PoolConfig["shadowReasons"] | undefined {
-  const value = env["SHADOW_REASONS"];
-  if (value === undefined) return undefined;
-  const raw = value.trim();
-  if (raw.length === 0) return [];
-  return parseShadowReasons(
-    raw.split(",").map((reason) => reason.trim()),
-    "SHADOW_REASONS",
-  );
 }
 
 function integerEnv(
@@ -206,6 +169,9 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
     { min: 0 },
   );
   const maxConcurrent = integerEnv(env, "MAX_CONCURRENT", 50, { min: 1 });
+  const maxQueue = integerEnv(env, "MAX_QUEUE", 0, { min: 0 });
+  const queueTimeoutMs = optionalIntegerEnv(env, "QUEUE_TIMEOUT_MS", { min: 0 });
+  const initialRevision = integerEnv(env, "ADMISSION_LIMITS_REVISION", 0, { min: 0 });
   const budget = integerEnv(env, "TOKEN_BUDGET", 500_000, { min: 0 });
   const highPriorityReserve = integerEnv(env, "HIGH_PRIORITY_RESERVE", 0, {
     min: 0,
@@ -218,16 +184,21 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
     "OPAQUE_MEDIA_INPUT_TOKENS",
     { min: 0 },
   );
-  const trustPriorityHeader = booleanEnv(env, "TRUST_X_PRIORITY_HEADER", false);
+  const trustPriorityHeader = booleanEnv(
+    env,
+    "TRUST_X_PRIORITY_HEADER",
+    false,
+  );
   const admissionMode = admissionModeEnv(env);
-  const shadowReasons = shadowReasonsEnv(env);
   const adaptiveSmoothing = optionalNumberEnv(env, "ADAPTIVE_SMOOTHING", {
     exclusiveMin: 0,
     max: 1,
   });
-  const adaptiveMinSamples = optionalIntegerEnv(env, "ADAPTIVE_MIN_SAMPLES", {
-    min: 1,
-  });
+  const adaptiveMinSamples = optionalIntegerEnv(
+    env,
+    "ADAPTIVE_MIN_SAMPLES",
+    { min: 1 },
+  );
   const adaptiveMinCorrection = optionalNumberEnv(
     env,
     "ADAPTIVE_MIN_CORRECTION",
@@ -289,10 +260,12 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
           modelPrefixes: ["claude", "gpt", "o1", "o3", "o4"],
           model: "claude-sonnet-4",
           maxConcurrent,
+          maxQueue,
+          initialRevision,
+          ...(queueTimeoutMs !== undefined ? { queueTimeoutMs } : {}),
           budget,
           highPriorityReserve,
           admissionMode,
-          ...(shadowReasons !== undefined ? { shadowReasons } : {}),
           adaptiveEstimation,
           ...(opaqueMediaInputTokens !== undefined
             ? { opaqueMediaInputTokens }
@@ -334,9 +307,7 @@ function assertKnownKeys(
   const allowedSet = new Set(allowed);
   for (const key of Object.keys(value)) {
     if (!allowedSet.has(key)) {
-      throw new Error(
-        `${field} contains unknown property ${JSON.stringify(key)}`,
-      );
+      throw new Error(`${field} contains unknown property ${JSON.stringify(key)}`);
     }
   }
 }
@@ -460,12 +431,14 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       "modelPrefixes",
       "estimatorModel",
       "maxConcurrent",
+      "maxQueue",
+      "queueTimeoutMs",
+      "limitsRevision",
       "inFlightTokenBudget",
       "highPriorityTokenReserve",
       "defaultOutputReservation",
       "opaqueMediaInputTokenReservation",
       "admissionMode",
-      "shadowReasons",
       "adaptiveEstimation",
     ],
     field,
@@ -480,6 +453,24 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     pool["maxConcurrent"],
     `${field}.maxConcurrent`,
     { min: 1 },
+  );
+  const maxQueue = optionalInteger(
+    pool,
+    "maxQueue",
+    `${field}.maxQueue`,
+    { min: 0 },
+  );
+  const queueTimeoutMs = optionalInteger(
+    pool,
+    "queueTimeoutMs",
+    `${field}.queueTimeoutMs`,
+    { min: 0 },
+  );
+  const initialRevision = optionalInteger(
+    pool,
+    "limitsRevision",
+    `${field}.limitsRevision`,
+    { min: 0 },
   );
 
   const prefixesValue = pool["modelPrefixes"];
@@ -525,18 +516,6 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       throw new Error(`${field}.admissionMode must be "enforce" or "observe"`);
     }
     admissionMode = admissionModeValue;
-  }
-
-  const shadowReasonsValue = pool["shadowReasons"];
-  let shadowReasons: PoolConfig["shadowReasons"];
-  if (shadowReasonsValue !== undefined) {
-    if (!Array.isArray(shadowReasonsValue)) {
-      throw new Error(`${field}.shadowReasons must be an array`);
-    }
-    shadowReasons = parseShadowReasons(
-      shadowReasonsValue,
-      `${field}.shadowReasons`,
-    );
   }
 
   const adaptiveValue = optionalObjectValue(
@@ -628,12 +607,16 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     modelPrefixes,
     model: estimatorModel,
     maxConcurrent,
+    ...(maxQueue !== undefined ? { maxQueue } : {}),
+    ...(queueTimeoutMs !== undefined ? { queueTimeoutMs } : {}),
+    ...(initialRevision !== undefined ? { initialRevision } : {}),
     ...(budget !== undefined ? { budget } : {}),
     ...(reserve !== undefined ? { highPriorityReserve: reserve } : {}),
     ...(outputCap !== undefined ? { outputCap } : {}),
-    ...(opaqueMediaInputTokens !== undefined ? { opaqueMediaInputTokens } : {}),
+    ...(opaqueMediaInputTokens !== undefined
+      ? { opaqueMediaInputTokens }
+      : {}),
     ...(admissionMode !== undefined ? { admissionMode } : {}),
-    ...(shadowReasons !== undefined ? { shadowReasons } : {}),
     ...(adaptiveEstimation !== undefined ? { adaptiveEstimation } : {}),
   };
 }
@@ -670,11 +653,10 @@ function normalizeFileConfiguration(
     ["port", "maxRequestBodyBytes", "maxOutputTokens"],
     "server",
   );
-  const port =
-    optionalInteger(server, "port", "server.port", {
-      min: 1,
-      max: 65_535,
-    }) ?? 8787;
+  const port = optionalInteger(server, "port", "server.port", {
+    min: 1,
+    max: 65_535,
+  }) ?? 8787;
   const maxRequestBodyBytes = optionalInteger(
     server,
     "maxRequestBodyBytes",
@@ -793,11 +775,7 @@ export function loadRuntimeConfigFile(filePath: string): RuntimeConfig {
     text = readFileSync(absolutePath, "utf8");
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-
-    throw new Error(
-      `unable to read configuration file ${absolutePath}: ${detail}`,
-      { cause: error },
-    );
+    throw new Error(`unable to read configuration file ${absolutePath}: ${detail}`);
   }
 
   const document = parseDocument(text, {
@@ -817,10 +795,7 @@ export function loadRuntimeConfigFile(filePath: string): RuntimeConfig {
     raw = document.toJS({ maxAliasCount: 100 });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-
-    throw new Error(`invalid YAML in ${absolutePath}: ${detail}`, {
-      cause: error,
-    });
+    throw new Error(`invalid YAML in ${absolutePath}: ${detail}`);
   }
 
   const fingerprint = createHash("sha256").update(text).digest("hex");

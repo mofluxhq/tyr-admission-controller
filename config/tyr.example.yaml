@@ -1,5 +1,6 @@
 # Tyr file configuration, schema version 1.
-# Changes are loaded only when the process starts; restart Tyr to apply them.
+# Startup configuration seeds each pool. A control-plane integration can later
+# apply complete higher-revision limit snapshots without restarting Tyr.
 version: 1
 
 server:
@@ -25,7 +26,7 @@ timeouts:
   clientStallMs: 30000
 
 shutdown:
-  # Uses async-bulkhead-llm v3.9 bounded drain. At the deadline Tyr reports
+  # Uses async-bulkhead-llm v3.10 bounded drain. At the deadline Tyr reports
   # outstanding work and closes remaining HTTP connections. Omit to wait
   # indefinitely, preserving the previous behavior.
   drainTimeoutMs: 30000
@@ -44,6 +45,10 @@ pools:
     # Used by the admission estimator; it does not rewrite the requested model.
     estimatorModel: claude-sonnet-4-5
     maxConcurrent: 40
+    # v3.10 complete admission-limit snapshot. maxQueue defaults to 0.
+    # limitsRevision must increase for every runtime control-plane update.
+    maxQueue: 0
+    limitsRevision: 100
     # enforce: reject overload. observe: record the same decision but proxy
     # capacity rejections upstream, allowing a safe shadow-mode rollout.
     admissionMode: enforce
@@ -58,7 +63,7 @@ pools:
     # Fixed surcharge per opaque image/audio/document/file/video block.
     # Omit for the conservative default of 2048; set 0 to disable it.
     opaqueMediaInputTokenReservation: 2048
-    # v3.9 per-model EWMA calibration. Enabled by default for budgeted pools.
+    # Per-model EWMA calibration. Native v3.10 observe bypasses also feed it. Enabled by default for budgeted pools.
     # It learns only from provider-reported input usage and is local/in-memory.
     adaptiveEstimation:
       enabled: true
@@ -77,10 +82,9 @@ pools:
       - o4
     estimatorModel: gpt-4o
     maxConcurrent: 20
+    maxQueue: 0
+    limitsRevision: 100
     # Observe first to measure prospective rejections before enforcement.
     admissionMode: observe
-    # Omit to bypass all supported capacity reasons. Use [] to observe context
-    # without bypassing any rejection.
-    shadowReasons: [budget_limit, concurrency_limit]
     inFlightTokenBudget: 250000
     defaultOutputReservation: 4096

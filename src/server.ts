@@ -8,9 +8,12 @@ import {
   createPools,
   parsePriority,
   type PoolConfig,
-  type Pools,
+  type PoolLimitsUpdate,
+  type PoolsApplyLimitsResult,
   type PoolsDrainResult,
+  type TyrPoolStats,
 } from "./pools.js";
+import type { LLMAdmissionLimits } from "async-bulkhead-llm";
 import { anthropicAdapter, openaiAdapter, type Adapter } from "./adapters.js";
 
 export type GatewayOptions = {
@@ -94,6 +97,22 @@ export type GatewayOptions = {
    */
   trustPriorityHeader?: boolean;
   pools: PoolConfig[];
+};
+
+/**
+ * Narrow runtime surface intended for an embedded or remote control-plane
+ * agent. Request forwarding remains encapsulated inside the gateway.
+ */
+export type TyrControlPlane = {
+  /** Current per-pool admission snapshots. */
+  limits(): Record<string, LLMAdmissionLimits>;
+  /** Current operational statistics, including the applied limits revision. */
+  stats(): Record<string, TyrPoolStats>;
+  /**
+   * Apply complete higher-revision snapshots as one Tyr-local transaction.
+   * Preflight failure leaves every pool unchanged.
+   */
+  applyLimits(updates: readonly PoolLimitsUpdate[]): PoolsApplyLimitsResult;
 };
 
 
@@ -274,7 +293,12 @@ function validateGatewayOptions(opts: GatewayOptions): void {
 
 export function createGateway(opts: GatewayOptions) {
   validateGatewayOptions(opts);
-  const pools: Pools = createPools(opts.pools);
+  const pools = createPools(opts.pools);
+  const control: TyrControlPlane = Object.freeze({
+    limits: () => pools.limits(),
+    stats: () => pools.stats(),
+    applyLimits: (updates) => pools.applyLimits(updates),
+  });
   const anthropicUpstream = normalizeUpstreamUrl(opts.upstreamUrl, "upstreamUrl");
   const openaiUpstream = normalizeUpstreamUrl(
     opts.openaiUpstreamUrl,
@@ -368,9 +392,18 @@ export function createGateway(opts: GatewayOptions) {
       }
 
       // Calculate one immutable reservation and pass it verbatim to both the
-      // detailed advisory check and the authoritative admission operation.
+      // detailed advisory check and the authoritative v3.10 admission path.
       const preparation = pool.prepare(llmRequest, priority);
       res.setHeader("x-admission-mode", preparation.mode);
+      res.setHeader(
+        "x-admission-preview-revision",
+        String(preparation.limits.revision),
+      );
+      // Immediate rejections never enter the run callback, so seed the
+      // authoritative header with the preview revision. Queued requests may
+      // overwrite it in the callback if a newer snapshot is active when they
+      // actually begin execution.
+      res.setHeader("x-admission-revision", String(preparation.limits.revision));
       res.setHeader(
         "x-admission-preview",
         preparation.advisory.admit ? "admit" : "reject",
@@ -413,8 +446,10 @@ export function createGateway(opts: GatewayOptions) {
           preparation,
           async (signal, ctx) => {
             if (ctx !== undefined) {
+              // Stable v3.10 identity and native observe-mode outcome.
               res.setHeader("x-admission-id", ctx.admissionId);
               res.setHeader("x-admission-outcome", ctx.admission);
+              res.setHeader("x-admission-revision", String(ctx.limitRevision));
               if (ctx.bypassReason !== undefined) {
                 res.setHeader("x-admission-bypass-reason", ctx.bypassReason);
               }
@@ -534,6 +569,10 @@ export function createGateway(opts: GatewayOptions) {
         }
         if (err instanceof LLMBulkheadRejectedError) {
           const status = rejectStatus(err.reason);
+          res.setHeader(
+            "x-admission-revision",
+            String(pool.controller.limits().revision),
+          );
           res.setHeader("x-admission-reason", err.reason);
           if (err.reason === "shutdown") {
             // Tell the client (and Node's keep-alive machinery) to close
@@ -640,7 +679,7 @@ export function createGateway(opts: GatewayOptions) {
 
   /**
    * Stops new admissions immediately, closes the HTTP listener, and drains
-   * pool work. With `shutdownDrainTimeoutMs`, v3.9 returns an outstanding-work
+   * pool work. With `shutdownDrainTimeoutMs`, the library returns an outstanding-work
    * snapshot at the deadline; Tyr then closes remaining connections so process
    * termination is bounded instead of waiting forever on a dead stream.
    */
@@ -667,6 +706,6 @@ export function createGateway(opts: GatewayOptions) {
     return shuttingDown;
   }
 
-  return { server, pools, shutdown };
+  return { server, control, shutdown };
 }
 

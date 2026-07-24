@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.9.1` pilot release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.10.0` pilot release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,15 +21,17 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.9.1
+## Current baseline: v0.10.0
 
 The current release provides:
 
 - Anthropic Messages and OpenAI Chat Completions proxy routes.
 - Model-prefix routing to independently configured local pools.
-- A v3.9 pool policy runtime using exact reservation previews and detailed
-  advisory capacity snapshots.
-- Per-pool enforcement and shadow observation modes.
+- A v3.10 pool policy runtime using exact reservation previews, native observe
+  mode, and complete versioned admission-limit snapshots.
+- Tyr-local all-or-nothing runtime updates across named pools, with stale
+  revision protection and shrink-by-attrition semantics.
+- A narrow control surface for an embedded fleet or grant agent.
 - Adaptive per-model input estimates learned from provider-reported usage.
 - Fail-fast concurrent-request and token-budget admission with priority reserves.
 - Stable admission IDs, streaming usage correction, transport backpressure, and
@@ -38,7 +40,7 @@ The current release provides:
 - Strict startup validation, YAML configuration, offline validation, Docker and
   Compose assets, and expanded local policy statistics.
 
-Known commercial limitations include single-process capacity, no authenticated
+Known commercial limitations include no central grant distributor or lease allocator, no authenticated
 tenant/application identity, no standard metrics exporter, no durable audit
 trail, limited protocol coverage, and no fully supported deployment package.
 
@@ -107,7 +109,33 @@ Remaining limitations carried into the next milestone:
 - No standard metrics exporter, authenticated tenant/application identity,
   protected operational endpoints, or structured audit event stream.
 
-### v0.10.0 — Observable and identifiable
+### v0.10.0 — Versioned data-plane control
+
+**Status:** Released 2026-07-23
+**Goal:** Make Tyr a safe, remotely reconfigurable data-plane agent built directly on `async-bulkhead-llm` 3.10.0.
+
+Delivered:
+
+- Complete per-pool snapshots for concurrency, queue capacity, token budget, and high-priority reserve.
+- Strictly increasing revisions with stale-update rejection.
+- Tyr-local multi-pool preflight so invalid or stale batches cannot partially apply.
+- Shrink-by-attrition, immediate scale-up of accepted waiters, and a zero-concurrency kill switch.
+- Native v3.10 observe execution and bypass accounting, replacing Tyr's duplicated shadow path.
+- A narrow `createGateway().control` interface for limit snapshots, statistics, and runtime updates.
+- Revision and admission-outcome response headers.
+- Startup queue and revision configuration, updated CI, documentation, and focused regression coverage.
+
+Outcome:
+
+- A future central allocator can issue bounded, versioned grants without joining every request path.
+- Tyr can safely reduce or restore local capacity without restarting or cancelling active work.
+- Delayed or duplicated control messages cannot overwrite a newer local revision.
+
+Remaining limitations carried into the next milestone:
+
+- No central distributor, grant TTL, allocator epoch, identity layer, standard telemetry exporter, or durable audit stream.
+
+### v0.11.0 — Observable and identifiable
 
 **Target duration:** 2–3 weeks
 **Goal:** Make Tyr safe to pilot and capable of proving that admission control improves production outcomes.
@@ -138,7 +166,7 @@ Deferred from this release:
 - Durable audit storage or a search UI.
 - Per-tenant bulkhead instances.
 
-### v0.11.0 — Ecosystem and modern OpenAI support
+### v0.12.0 — Ecosystem and modern OpenAI support
 
 **Target duration:** 2–3 weeks
 **Goal:** Reduce adoption friction and support the most commercially important modern OpenAI workload.
@@ -167,7 +195,7 @@ Deferred from this release:
 - Generic MCP session accounting.
 - Native Kong or Envoy extensions.
 
-### v0.12.0 — Distributed token leases
+### v0.13.0 — Distributed token leases
 
 **Target duration:** 4–6 weeks
 **Goal:** Enforce one capacity budget across multiple Tyr replicas.
@@ -197,7 +225,7 @@ Non-goals:
 - Automatically discovering provider quotas.
 - Kubernetes-only budget partitioning as the primary correctness mechanism.
 
-### v0.13.0 — Tenant policy and fairness
+### v0.14.0 — Tenant policy and fairness
 
 **Target duration:** 2–4 weeks
 **Goal:** Support paid multi-tenant deployments without creating unbounded gateway state.
@@ -222,7 +250,7 @@ Exit criteria:
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.13.0
+**Target duration:** 3–5 weeks after v0.14.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:

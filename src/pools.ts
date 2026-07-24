@@ -2,24 +2,29 @@ import {
   createAdaptiveTokenEstimator,
   createLLMBulkhead,
   type AdaptiveModelCorrection,
+  type LLMAdmissionLimits,
+  type LLMAdmissionMode,
+  type LLMApplyLimitsResult,
   type LLMDrainResult,
-  type LLMPriority,
-  type LLMRejectReason,
   type LLMObserveStats,
+  type LLMPriority,
+  type LLMRejectDetail,
+  type LLMRejectReason,
   type LLMRequest,
   type LLMReservationEstimate,
-  type LLMRunContext,
+  type LLMRunAdmission,
   type LLMShadowableRejectReason,
   type LLMStats,
   type LLMWouldAdmitResult,
   type TokenUsage,
+  type UsageReport,
 } from "async-bulkhead-llm";
 import {
   admissionEstimatorOptions,
   createAdmissionTokenEstimator,
 } from "./admission.js";
 
-export type AdmissionMode = "enforce" | "observe";
+export type AdmissionMode = LLMAdmissionMode;
 
 export type AdaptiveEstimationConfig = {
   /** Enabled by default for token-budgeted pools. */
@@ -37,13 +42,20 @@ export type AdaptiveEstimationConfig = {
 };
 
 export type PoolConfig = {
-  /** Pool name for stats and logs. */
+  /** Pool name for stats, control-plane updates, and logs. */
   name: string;
   /** Model-string prefixes routed to this pool; longest match wins. */
   modelPrefixes: string[];
   /** Default model for estimator ratio lookup. */
   model: string;
+  /** Initial concurrency ceiling. Runtime updates may set this to 0. */
   maxConcurrent: number;
+  /** Initial queue ceiling. Default: 0 (fail fast). */
+  maxQueue?: number;
+  /** Queue wait timeout in milliseconds. Construction-time behavior. */
+  queueTimeoutMs?: number;
+  /** Initial version for the complete admission-limit snapshot. Default: 0. */
+  initialRevision?: number;
   /**
    * Admission-time in-flight token ceiling. Omit to disable token-aware
    * admission, use 0 to admit no budget-gated work, or set a positive ceiling.
@@ -57,19 +69,29 @@ export type PoolConfig = {
   opaqueMediaInputTokens?: number;
   /** Enforce rejections or only observe what would have been rejected. */
   admissionMode?: AdmissionMode;
-  /** Capacity reasons that observe mode may bypass. Defaults to all supported reasons. */
-  shadowReasons?: readonly LLMShadowableRejectReason[];
   /** Per-model adaptive input-estimation calibration. */
   adaptiveEstimation?: AdaptiveEstimationConfig;
 };
 
 export type AdmissionPreparation = {
   mode: AdmissionMode;
+  /** Limit snapshot used for the advisory preview. */
+  limits: LLMAdmissionLimits;
   reservation: LLMReservationEstimate | null;
   advisory: LLMWouldAdmitResult;
 };
 
-export type AdmissionRunContext = LLMRunContext;
+export type AdmissionRunContext = {
+  readonly admissionId: string;
+  readonly reservation: LLMReservationEstimate | null;
+  /** Whether this callback holds capacity or is a native v3.10 observe bypass. */
+  readonly admission: LLMRunAdmission;
+  /** Limit revision in effect when the callback began. */
+  readonly limitRevision: number;
+  readonly bypassReason?: LLMShadowableRejectReason;
+  readonly bypassDetail?: LLMRejectDetail;
+  reportUsage(usage: TokenUsage): UsageReport;
+};
 
 type AdvisoryStats = {
   checked: number;
@@ -78,13 +100,12 @@ type AdvisoryStats = {
   rejectedByReason: Partial<Record<LLMRejectReason, number>>;
 };
 
-type ObserveStats = LLMObserveStats;
-
 export type TyrPoolStats = LLMStats & {
   tyr: {
     admissionMode: AdmissionMode;
     advisory: AdvisoryStats;
-    observe: ObserveStats;
+    /** Native async-bulkhead-llm v3.10 observe-mode statistics. */
+    observe: LLMObserveStats;
     adaptiveEstimation: {
       enabled: boolean;
       corrections: AdaptiveModelCorrection[];
@@ -92,11 +113,16 @@ export type TyrPoolStats = LLMStats & {
   };
 };
 
+/** Narrow control-plane surface; the underlying bulkhead is intentionally hidden. */
+export type PoolController = {
+  limits(): LLMAdmissionLimits;
+  applyLimits(next: LLMAdmissionLimits): LLMApplyLimitsResult;
+};
+
 export type Pool = {
   name: string;
   mode: AdmissionMode;
-  /** Exposed for coordinator integrations and compatibility. */
-  bulkhead: ReturnType<typeof createLLMBulkhead>;
+  controller: PoolController;
   prepare(request: LLMRequest, priority: LLMPriority): AdmissionPreparation;
   run<T>(
     request: LLMRequest,
@@ -117,10 +143,38 @@ export type PoolsDrainResult = LLMDrainResult & {
   pools: Record<string, LLMDrainResult>;
 };
 
+export type PoolLimitsUpdate = {
+  pool: string;
+  limits: LLMAdmissionLimits;
+};
+
+export type PoolsApplyLimitsResult =
+  | {
+      applied: true;
+      pools: Record<
+        string,
+        { previous: LLMAdmissionLimits; current: LLMAdmissionLimits }
+      >;
+    }
+  | {
+      applied: false;
+      reason: "unknown_pool" | "duplicate_pool" | "stale_revision";
+      pool: string;
+      current?: LLMAdmissionLimits;
+    };
+
 export type Pools = {
   /** Longest-prefix match across all pools; undefined if no pool matches. */
   select(model: string): Pool | undefined;
+  /** Exact pool-name lookup for local control-plane integrations. */
+  get(name: string): Pool | undefined;
   stats(): Record<string, TyrPoolStats>;
+  limits(): Record<string, LLMAdmissionLimits>;
+  /**
+   * Applies one or more complete snapshots as one Tyr-local transaction.
+   * Every update is validated and checked for staleness before any pool mutates.
+   */
+  applyLimits(updates: readonly PoolLimitsUpdate[]): PoolsApplyLimitsResult;
   close(): void;
   /** Stops admission and waits for in-flight work, optionally with a bound. */
   drain(timeoutMs?: number): Promise<PoolsDrainResult>;
@@ -174,7 +228,18 @@ function validatePoolConfigs(configs: PoolConfig[]): void {
     names.add(config.name);
 
     assertNonEmptyString(config.model, `${base}.model`);
+    // async-bulkhead-llm requires a positive construction-time value. A later
+    // versioned snapshot may set maxConcurrent to 0 as a kill switch.
     assertInteger(config.maxConcurrent, `${base}.maxConcurrent`, { min: 1 });
+    if (config.maxQueue !== undefined) {
+      assertInteger(config.maxQueue, `${base}.maxQueue`, { min: 0 });
+    }
+    if (config.queueTimeoutMs !== undefined) {
+      assertInteger(config.queueTimeoutMs, `${base}.queueTimeoutMs`, { min: 0 });
+    }
+    if (config.initialRevision !== undefined) {
+      assertInteger(config.initialRevision, `${base}.initialRevision`, { min: 0 });
+    }
 
     if (!Array.isArray(config.modelPrefixes) || config.modelPrefixes.length === 0) {
       throw new Error(`${base}.modelPrefixes must be a non-empty array`);
@@ -212,39 +277,13 @@ function validatePoolConfigs(configs: PoolConfig[]): void {
       throw new Error(`${base}.admissionMode must be "enforce" or "observe"`);
     }
 
-    if (config.shadowReasons !== undefined) {
-      if (!Array.isArray(config.shadowReasons)) {
-        throw new Error(`${base}.shadowReasons must be an array`);
-      }
-      const supported = new Set<LLMShadowableRejectReason>([
-        "budget_limit",
-        "concurrency_limit",
-        "queue_limit",
-        "timeout",
-      ]);
-      const seen = new Set<LLMShadowableRejectReason>();
-      config.shadowReasons.forEach((reason, reasonIndex) => {
-        if (!supported.has(reason)) {
-          throw new Error(
-            `${base}.shadowReasons[${reasonIndex}] must be budget_limit, concurrency_limit, queue_limit, or timeout`,
-          );
-        }
-        if (seen.has(reason)) {
-          throw new Error(`${base}.shadowReasons must not contain duplicates`);
-        }
-        seen.add(reason);
-      });
-    }
-
     const adaptive = config.adaptiveEstimation;
     if (
       config.budget === undefined &&
       adaptive !== undefined &&
       (adaptive.enabled ?? true)
     ) {
-      throw new Error(
-        `${base}.adaptiveEstimation requires ${base}.budget`,
-      );
+      throw new Error(`${base}.adaptiveEstimation requires ${base}.budget`);
     }
     if (adaptive !== undefined) {
       if (adaptive.enabled !== undefined && typeof adaptive.enabled !== "boolean") {
@@ -290,14 +329,16 @@ function noteReason(
   target[reason] = (target[reason] ?? 0) + 1;
 }
 
-const EMPTY_OBSERVE_STATS: ObserveStats = {
-  bypassed: 0,
-  raceBypassed: 0,
-  bypassedByReason: {},
-  usageReported: 0,
-  totalInputTokens: 0,
-  totalOutputTokens: 0,
-};
+function zeroObserveStats(): LLMObserveStats {
+  return {
+    bypassed: 0,
+    raceBypassed: 0,
+    bypassedByReason: {},
+    usageReported: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+  };
+}
 
 function createPool(config: PoolConfig): Pool {
   const mode = config.admissionMode ?? "enforce";
@@ -332,6 +373,13 @@ function createPool(config: PoolConfig): Pool {
   const bulkhead = createLLMBulkhead({
     model: config.model,
     maxConcurrent: config.maxConcurrent,
+    ...(config.maxQueue !== undefined ? { maxQueue: config.maxQueue } : {}),
+    ...(config.queueTimeoutMs !== undefined
+      ? { timeoutMs: config.queueTimeoutMs }
+      : {}),
+    ...(config.initialRevision !== undefined
+      ? { initialRevision: config.initialRevision }
+      : {}),
     ...(config.budget !== undefined
       ? {
           tokenBudget: {
@@ -353,11 +401,14 @@ function createPool(config: PoolConfig): Pool {
   });
 
   if (adaptive !== undefined) {
-    const observeUsage = (event: { request: LLMRequest; usage?: TokenUsage }): void => {
+    bulkhead.on("release", (event) => {
       if (event.usage !== undefined) adaptive.observe(event.request, event.usage);
-    };
-    bulkhead.on("release", observeUsage);
-    bulkhead.on("bypassRelease", observeUsage);
+    });
+    // Native v3.10 observe mode has a separate release event because bypassed
+    // calls never held local capacity. They still provide valuable calibration.
+    bulkhead.on("bypassRelease", (event) => {
+      if (event.usage !== undefined) adaptive.observe(event.request, event.usage);
+    });
   }
 
   const advisory: AdvisoryStats = {
@@ -368,6 +419,7 @@ function createPool(config: PoolConfig): Pool {
   };
 
   function prepare(request: LLMRequest, priority: LLMPriority): AdmissionPreparation {
+    const limits = bulkhead.limits();
     const reservation = bulkhead.estimate(request);
     const decision = bulkhead.wouldAdmit(request, {
       priority,
@@ -382,10 +434,10 @@ function createPool(config: PoolConfig): Pool {
       if (decision.reason !== undefined) noteReason(advisory.rejectedByReason, decision.reason);
     }
 
-    return { mode, reservation, advisory: decision };
+    return { mode, limits, reservation, advisory: decision };
   }
 
-  function run<T>(
+  async function run<T>(
     request: LLMRequest,
     preparation: AdmissionPreparation,
     fn: (signal?: AbortSignal, ctx?: AdmissionRunContext) => Promise<T>,
@@ -395,35 +447,55 @@ function createPool(config: PoolConfig): Pool {
       getUsage?: (result: T) => TokenUsage | undefined;
     },
   ): Promise<T> {
-    return bulkhead.run(request, fn, {
-      mode,
-      priority: opts.priority,
-      ...(config.shadowReasons !== undefined
-        ? { shadowReasons: config.shadowReasons }
-        : {}),
-      ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
-      ...(preparation.reservation !== null
-        ? { reservation: preparation.reservation }
-        : {}),
-      ...(opts.getUsage !== undefined ? { getUsage: opts.getUsage } : {}),
-    });
+    return bulkhead.run(
+      request,
+      (signal, context) => {
+        if (context === undefined) return fn(signal);
+        const currentLimits = bulkhead.limits();
+        return fn(signal, {
+          admissionId: context.admissionId,
+          reservation: context.reservation,
+          admission: context.admission,
+          limitRevision: currentLimits.revision,
+          ...(context.bypassReason !== undefined
+            ? { bypassReason: context.bypassReason }
+            : {}),
+          ...(context.bypassDetail !== undefined
+            ? { bypassDetail: context.bypassDetail }
+            : {}),
+          reportUsage(usage) {
+            return context.reportUsage(usage);
+          },
+        });
+      },
+      {
+        mode,
+        priority: opts.priority,
+        ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+        ...(preparation.reservation !== null
+          ? { reservation: preparation.reservation }
+          : {}),
+        ...(opts.getUsage !== undefined ? { getUsage: opts.getUsage } : {}),
+      },
+    );
   }
 
   function stats(): TyrPoolStats {
-    const native = bulkhead.stats();
-    const nativeObserve = native.observe ?? EMPTY_OBSERVE_STATS;
+    const snapshot = bulkhead.stats();
     return {
-      ...native,
+      ...snapshot,
       tyr: {
         admissionMode: mode,
         advisory: {
           ...advisory,
           rejectedByReason: { ...advisory.rejectedByReason },
         },
-        observe: {
-          ...nativeObserve,
-          bypassedByReason: { ...nativeObserve.bypassedByReason },
-        },
+        observe: snapshot.observe
+          ? {
+              ...snapshot.observe,
+              bypassedByReason: { ...snapshot.observe.bypassedByReason },
+            }
+          : zeroObserveStats(),
         adaptiveEstimation: {
           enabled: adaptive !== undefined,
           corrections: adaptive?.corrections() ?? [],
@@ -444,16 +516,70 @@ function createPool(config: PoolConfig): Pool {
     return bulkhead.drain({ timeoutMs });
   }
 
+  const controller: PoolController = {
+    limits: () => bulkhead.limits(),
+    applyLimits: (next) => bulkhead.applyLimits(next),
+  };
+
   return {
     name: config.name,
     mode,
-    bulkhead,
+    controller,
     prepare,
     run,
     stats,
     close,
     drain,
   };
+}
+
+function validateLimitSnapshot(
+  poolName: string,
+  current: LLMAdmissionLimits,
+  next: LLMAdmissionLimits,
+): LLMAdmissionLimits {
+  // Snapshot each externally supplied property exactly once. Besides producing
+  // a plain immutable payload for the underlying bulkhead, this prevents
+  // accessor objects from returning different values during Tyr's preflight
+  // and the later synchronous application phase.
+  const revision = next.revision;
+  const maxConcurrent = next.maxConcurrent;
+  const maxQueue = next.maxQueue;
+  const suppliedTokenBudget = next.tokenBudget;
+
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error(`${poolName}.limits.revision must be a non-negative safe integer`);
+  }
+  assertInteger(maxConcurrent, `${poolName}.limits.maxConcurrent`, { min: 0 });
+  assertInteger(maxQueue, `${poolName}.limits.maxQueue`, { min: 0 });
+
+  if (current.tokenBudget !== undefined) {
+    if (suppliedTokenBudget === undefined) {
+      throw new Error(`${poolName}.limits.tokenBudget is required`);
+    }
+    const budget = suppliedTokenBudget.budget;
+    const highPriorityReserve = suppliedTokenBudget.highPriorityReserve;
+    assertInteger(budget, `${poolName}.limits.tokenBudget.budget`, {
+      min: 0,
+    });
+    assertInteger(
+      highPriorityReserve,
+      `${poolName}.limits.tokenBudget.highPriorityReserve`,
+      { min: 0 },
+    );
+    return Object.freeze({
+      revision,
+      maxConcurrent,
+      maxQueue,
+      tokenBudget: Object.freeze({ budget, highPriorityReserve }),
+    });
+  }
+
+  if (suppliedTokenBudget !== undefined) {
+    throw new Error(`${poolName}.limits.tokenBudget must be omitted`);
+  }
+
+  return Object.freeze({ revision, maxConcurrent, maxQueue });
 }
 
 export function createPools(configs: PoolConfig[]): Pools {
@@ -463,6 +589,7 @@ export function createPools(configs: PoolConfig[]): Pools {
     prefixes: [...config.modelPrefixes],
     pool: createPool(config),
   }));
+  const poolsByName = new Map(pools.map(({ pool }) => [pool.name, pool]));
 
   function select(model: string): Pool | undefined {
     let best: Pool | undefined;
@@ -478,10 +605,74 @@ export function createPools(configs: PoolConfig[]): Pools {
     return best;
   }
 
+  function get(name: string): Pool | undefined {
+    return poolsByName.get(name);
+  }
+
   function stats(): Record<string, TyrPoolStats> {
     const out: Record<string, TyrPoolStats> = {};
     for (const { pool } of pools) out[pool.name] = pool.stats();
     return out;
+  }
+
+  function limits(): Record<string, LLMAdmissionLimits> {
+    const out: Record<string, LLMAdmissionLimits> = {};
+    for (const { pool } of pools) out[pool.name] = pool.controller.limits();
+    return out;
+  }
+
+  function applyLimits(
+    updates: readonly PoolLimitsUpdate[],
+  ): PoolsApplyLimitsResult {
+    const seen = new Set<string>();
+    const resolved: Array<{
+      pool: Pool;
+      current: LLMAdmissionLimits;
+      next: LLMAdmissionLimits;
+    }> = [];
+
+    for (const update of updates) {
+      if (seen.has(update.pool)) {
+        return { applied: false, reason: "duplicate_pool", pool: update.pool };
+      }
+      seen.add(update.pool);
+
+      const pool = poolsByName.get(update.pool);
+      if (pool === undefined) {
+        return { applied: false, reason: "unknown_pool", pool: update.pool };
+      }
+      const current = pool.controller.limits();
+      const next = validateLimitSnapshot(update.pool, current, update.limits);
+      if (next.revision <= current.revision) {
+        return {
+          applied: false,
+          reason: "stale_revision",
+          pool: update.pool,
+          current,
+        };
+      }
+      resolved.push({ pool, current, next });
+    }
+
+    const applied: Record<
+      string,
+      { previous: LLMAdmissionLimits; current: LLMAdmissionLimits }
+    > = {};
+    for (const item of resolved) {
+      const result = item.pool.controller.applyLimits(item.next);
+      if (!result.applied) {
+        // The preflight and application execute synchronously on the same event
+        // loop turn, so this would indicate an internal invariant violation.
+        throw new Error(
+          `pool ${item.pool.name} became stale during atomic limit application`,
+        );
+      }
+      applied[item.pool.name] = {
+        previous: result.previous,
+        current: result.current,
+      };
+    }
+    return { applied: true, pools: applied };
   }
 
   function close(): void {
@@ -502,7 +693,7 @@ export function createPools(configs: PoolConfig[]): Pools {
     };
   }
 
-  return { select, stats, close, drain };
+  return { select, get, stats, limits, applyLimits, close, drain };
 }
 
 export function parsePriority(header: string | undefined): LLMPriority {

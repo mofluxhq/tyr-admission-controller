@@ -169,7 +169,7 @@ function estimateExtraInputTokens(
 }
 
 /**
- * Builds an async-bulkhead-llm v3.9 request using its first-class `system`,
+ * Builds an async-bulkhead-llm v3.10 request using its first-class `system`,
  * `extraInputTokens`, and opaque-block estimation surfaces. Provider prompt
  * material that is not represented by message text is projected into a stable
  * metadata estimate rather than hidden on a symbol or folded into a synthetic
@@ -210,7 +210,7 @@ export function createAdmissionRequest(opts: {
 
 /**
  * Builds the model-aware estimator options shared by the static and adaptive
- * v3.9 estimators. Keeping this projection in one place guarantees that
+ * v3.10 estimators. Keeping this projection in one place guarantees that
  * previews, actual reservations, and adaptive observations use the same
  * opaque-content and output-reservation policy.
  */

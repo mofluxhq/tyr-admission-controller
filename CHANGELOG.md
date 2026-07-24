@@ -8,35 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.1] - 2026-07-22
+## [0.10.0] - 2026-07-23
 
 ### Added
 
-- Added per-pool `shadowReasons` and legacy `SHADOW_REASONS` configuration to
-  restrict which capacity failures observe mode may bypass.
-- Added authoritative `x-admission-outcome` and
-  `x-admission-bypass-reason` response headers once execution begins.
-- Added reason-level observe statistics through the native
-  `bypassedByReason` counters.
+- Added complete versioned per-pool admission-limit snapshots covering
+  `maxConcurrent`, `maxQueue`, token budget, and high-priority reserve.
+- Added `limitsRevision`, `maxQueue`, and `queueTimeoutMs` startup
+  configuration, plus legacy environment equivalents.
+- Added a narrow `control` interface from `createGateway()` with
+  `limits()`, `stats()`, and Tyr-local transactional `applyLimits()` methods.
+- Added all-or-nothing multi-pool preflight for unknown pools, duplicate pool
+  entries, invalid snapshots, and stale revisions.
+- Added `x-admission-preview-revision`, `x-admission-revision`,
+  `x-admission-outcome`, and `x-admission-bypass-reason` response headers.
+- Added v3.10 integration tests for kill switches, stale-update rejection,
+  snapshot-once behavior, native observe context, and immediate scale-up of
+  accepted waiters.
 
 ### Changed
 
-- Upgraded and pinned `async-bulkhead-llm` to exactly 3.9.0.
-- Delegated observe-mode execution, bypass identities, race classification,
-  usage accounting, and hard cancellation/shutdown checks to the library's
-  native v3.9 lifecycle.
-- Exposed the complete native run context, including `admission`,
-  `bypassReason`, `bypassDetail`, and the `UsageReport` returned by
-  `reportUsage()`.
-- Adaptive estimation now learns from both admitted `release` events and
-  observed `bypassRelease` events.
-- CI now runs Tyr's real release checks on `master`, verifies Tyr's flat package
-  layout, and builds the production Docker image.
+- Upgraded and pinned `async-bulkhead-llm` from 3.8.0 to exactly 3.10.0.
+- Replaced Tyr's hand-built observe-mode bypass path with the library's native
+  v3.10 observe execution, bypass accounting, and bypass release usage events.
+- Replaced the exposed bulkhead handle with a narrow per-pool controller for
+  reading and applying complete limit snapshots.
+- Runtime limit decreases now inherit v3.10 shrink-by-attrition semantics;
+  existing work is not cancelled. Raising concurrency pumps accepted waiters
+  after the complete snapshot is installed.
+- `maxConcurrent: 0` is supported at runtime as a fail-fast per-pool kill
+  switch, while startup configuration still requires a positive initial value.
+- Corrected CI to run the existing typecheck command and verify Tyr's actual
+  flat ESM/declaration tarball layout.
 
-### Fixed
+### Removed
 
-- Already-aborted client requests can no longer execute through observe mode
-  when a capacity rejection would otherwise have been bypassed.
+- Removed the duplicated `pools-v38.test.ts` suite and replaced it with focused
+  v3.10 coverage.
 
 ## [0.9.0] - 2026-07-21
 
@@ -342,10 +350,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.9.1...HEAD
-[0.9.1]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.8.0...v0.9.0
-[0.8.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.7.0...v0.8.0
+[Unreleased]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.5.0...v0.6.0

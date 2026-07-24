@@ -48,12 +48,14 @@ pools:
     modelPrefixes: [claude-sonnet-4, claude-haiku-4]
     estimatorModel: claude-sonnet-4-5
     maxConcurrent: 40
+    maxQueue: 3
+    queueTimeoutMs: 250
+    limitsRevision: 17
     inFlightTokenBudget: 400000
     highPriorityTokenReserve: 80000
     defaultOutputReservation: 8192
     opaqueMediaInputTokenReservation: 3072
     admissionMode: observe
-    shadowReasons: [budget_limit, concurrency_limit]
     adaptiveEstimation:
       enabled: true
       smoothing: 0.3
@@ -85,12 +87,14 @@ describe("file configuration", () => {
         modelPrefixes: ["claude-sonnet-4", "claude-haiku-4"],
         model: "claude-sonnet-4-5",
         maxConcurrent: 40,
+        maxQueue: 3,
+        queueTimeoutMs: 250,
+        initialRevision: 17,
         budget: 400_000,
         highPriorityReserve: 80_000,
         outputCap: 8192,
         opaqueMediaInputTokens: 3072,
         admissionMode: "observe",
-        shadowReasons: ["budget_limit", "concurrency_limit"],
         adaptiveEstimation: {
           enabled: true,
           smoothing: 0.3,
@@ -274,7 +278,7 @@ pools:
     expect(() => loadRuntimeConfigFile(tooLarge)).toThrow(/must not exceed/);
   });
 
-  it("validates v3.9 admission and adaptive-estimation settings", () => {
+  it("validates admission, versioned limits, and adaptive-estimation settings", () => {
     const badMode = tempConfig(`
 version: 1
 upstreams:
@@ -287,34 +291,6 @@ pools:
     admissionMode: audit
 `, "bad-mode.yaml");
     expect(() => loadRuntimeConfigFile(badMode)).toThrow(/admissionMode/);
-
-    const badShadowReason = tempConfig(`
-version: 1
-upstreams:
-  openai: { baseUrl: https://api.openai.com }
-pools:
-  - name: pool
-    modelPrefixes: [gpt]
-    estimatorModel: gpt-4o
-    maxConcurrent: 1
-    admissionMode: observe
-    shadowReasons: [shutdown]
-`, "bad-shadow-reason.yaml");
-    expect(() => loadRuntimeConfigFile(badShadowReason)).toThrow(/shadowReasons/);
-
-    const duplicateShadowReason = tempConfig(`
-version: 1
-upstreams:
-  openai: { baseUrl: https://api.openai.com }
-pools:
-  - name: pool
-    modelPrefixes: [gpt]
-    estimatorModel: gpt-4o
-    maxConcurrent: 1
-    admissionMode: observe
-    shadowReasons: [budget_limit, budget_limit]
-`, "duplicate-shadow-reason.yaml");
-    expect(() => loadRuntimeConfigFile(duplicateShadowReason)).toThrow(/duplicates/);
 
     const badAdaptive = tempConfig(`
 version: 1
@@ -338,21 +314,6 @@ pools:
         ADAPTIVE_MAX_CORRECTION: "1",
       }),
     ).toThrow(/ADAPTIVE_MAX_CORRECTION/);
-
-    expect(() =>
-      loadRuntimeConfig({
-        OPENAI_UPSTREAM_URL: "https://api.openai.com",
-        SHADOW_REASONS: "shutdown",
-      }),
-    ).toThrow(/SHADOW_REASONS/);
-
-    expect(
-      loadRuntimeConfig({
-        OPENAI_UPSTREAM_URL: "https://api.openai.com",
-        ADMISSION_MODE: "observe",
-        SHADOW_REASONS: "",
-      }).gateway.pools[0]?.shadowReasons,
-    ).toEqual([]);
   });
 
   it("reports malformed YAML and missing files", () => {
@@ -387,7 +348,6 @@ pools:
       TOKEN_BUDGET: "0",
       OPAQUE_MEDIA_INPUT_TOKENS: "4096",
       ADMISSION_MODE: "observe",
-      SHADOW_REASONS: "budget_limit,concurrency_limit",
       ADAPTIVE_ESTIMATION: "true",
       ADAPTIVE_SMOOTHING: "0.4",
       ADAPTIVE_MIN_SAMPLES: "2",
@@ -401,7 +361,6 @@ pools:
     expect(config.gateway.pools[0]).toMatchObject({
       budget: 0,
       admissionMode: "observe",
-      shadowReasons: ["budget_limit", "concurrency_limit"],
       adaptiveEstimation: {
         enabled: true,
         smoothing: 0.4,
@@ -413,20 +372,21 @@ pools:
     });
   });
 
-  it("loads the opaque-media reservation override", () => {
-    const path = tempConfig(`
-version: 1
-upstreams:
-  openai: { baseUrl: http://localhost:8000 }
-pools:
-  - name: local
-    modelPrefixes: [local-]
-    estimatorModel: gpt-4o
-    maxConcurrent: 2
-    inFlightTokenBudget: 10000
-    opaqueMediaInputTokenReservation: 0
-`);
-    const config = loadRuntimeConfigFile(path);
-    expect(config.gateway.pools[0]?.opaqueMediaInputTokens).toBe(0);
+  it("loads legacy environment limit revisions and queue settings", () => {
+    const config = loadRuntimeConfig({
+      OPENAI_UPSTREAM_URL: "https://api.openai.com",
+      MAX_CONCURRENT: "4",
+      MAX_QUEUE: "8",
+      QUEUE_TIMEOUT_MS: "500",
+      ADMISSION_LIMITS_REVISION: "42",
+    });
+
+    expect(config.gateway.pools[0]).toMatchObject({
+      maxConcurrent: 4,
+      maxQueue: 8,
+      queueTimeoutMs: 500,
+      initialRevision: 42,
+    });
   });
+
 });
