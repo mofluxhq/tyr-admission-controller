@@ -454,7 +454,9 @@ describe("admission-gateway", () => {
       expect(first.status).toBe(200);
       expect(first.headers.get("x-admission-revision")).toBe("1");
       expect(first.headers.get("x-korrx-grant-id")).toBe("grant-a");
+      expect(first.headers.get("x-latchflo-grant-id")).toBe("grant-a");
       expect(first.headers.get("x-korrx-controller-epoch")).toBe("31");
+      expect(first.headers.get("x-latchflo-controller-epoch")).toBe("31");
       expect(first.headers.get("x-zab-grant-id")).toBeNull();
       expect(first.headers.get("x-zab-controller-epoch")).toBeNull();
 
@@ -466,7 +468,9 @@ describe("admission-gateway", () => {
       expect(second.status).toBe(200);
       expect(second.headers.get("x-admission-revision")).toBe("2");
       expect(second.headers.get("x-korrx-grant-id")).toBe("grant-b");
+      expect(second.headers.get("x-latchflo-grant-id")).toBe("grant-b");
       expect(second.headers.get("x-korrx-controller-epoch")).toBe("31");
+      expect(second.headers.get("x-latchflo-controller-epoch")).toBe("31");
       expect(second.headers.get("x-zab-grant-id")).toBeNull();
       expect(second.headers.get("x-zab-controller-epoch")).toBeNull();
     } finally {
@@ -516,7 +520,9 @@ describe("admission-gateway", () => {
       expect(res.headers.get("x-admission-outcome")).toBe("bypassed");
       expect(res.headers.get("x-admission-revision")).toBe("1");
       expect(res.headers.get("x-korrx-grant-id")).toBe("grant-observe");
+      expect(res.headers.get("x-latchflo-grant-id")).toBe("grant-observe");
       expect(res.headers.get("x-korrx-controller-epoch")).toBe("32");
+      expect(res.headers.get("x-latchflo-controller-epoch")).toBe("32");
       expect(res.headers.get("x-zab-grant-id")).toBeNull();
       expect(res.headers.get("x-zab-controller-epoch")).toBeNull();
     } finally {
@@ -558,7 +564,9 @@ describe("admission-gateway", () => {
       expect(res.headers.get("x-admission-reason")).toBe("concurrency_limit");
       expect(res.headers.get("x-admission-revision")).toBe("1");
       expect(res.headers.get("x-korrx-grant-id")).toBe("grant-kill-switch");
+      expect(res.headers.get("x-latchflo-grant-id")).toBe("grant-kill-switch");
       expect(res.headers.get("x-korrx-controller-epoch")).toBe("33");
+      expect(res.headers.get("x-latchflo-controller-epoch")).toBe("33");
       expect(res.headers.get("x-zab-grant-id")).toBeNull();
       expect(res.headers.get("x-zab-controller-epoch")).toBeNull();
     } finally {

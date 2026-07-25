@@ -143,16 +143,25 @@ function rejectStatus(reason: LLMRejectReason): number {
   }
 }
 
-function setKorrxProvenanceHeaders(
+/**
+ * Emits grant-attribution headers under both the legacy `x-korrx-*` names and
+ * the current `x-latchflo-*` names.
+ *
+ * Both pairs carry identical values. Emitting both lets downstream consumers
+ * migrate on their own schedule instead of being cut over in lockstep with a
+ * Tyr deploy. Drop the `x-korrx-*` pair only once no consumer reads it.
+ */
+function setGrantProvenanceHeaders(
   res: ServerResponse,
   provenance: AdmissionProvenance | undefined,
 ): void {
   if (provenance === undefined) return;
+  const epoch = String(provenance.controllerEpoch);
+  res.setHeader("x-latchflo-grant-id", provenance.grantId);
+  res.setHeader("x-latchflo-controller-epoch", epoch);
+  // Deprecated aliases, retained for the Latchflo rebrand transition.
   res.setHeader("x-korrx-grant-id", provenance.grantId);
-  res.setHeader(
-    "x-korrx-controller-epoch",
-    String(provenance.controllerEpoch),
-  );
+  res.setHeader("x-korrx-controller-epoch", epoch);
 }
 
 // Reads the request body up to `maxBytes`. On overflow we stop buffering and
@@ -463,7 +472,7 @@ export function createGateway(opts: GatewayOptions) {
               res.setHeader("x-admission-id", ctx.admissionId);
               res.setHeader("x-admission-outcome", ctx.admission);
               res.setHeader("x-admission-revision", String(ctx.limitRevision));
-              setKorrxProvenanceHeaders(res, ctx.provenance);
+              setGrantProvenanceHeaders(res, ctx.provenance);
               if (ctx.bypassReason !== undefined) {
                 res.setHeader("x-admission-bypass-reason", ctx.bypassReason);
               }
@@ -589,7 +598,7 @@ export function createGateway(opts: GatewayOptions) {
             "x-admission-revision",
             String(rejectionRevision),
           );
-          setKorrxProvenanceHeaders(
+          setGrantProvenanceHeaders(
             res,
             pool.controller.provenance(rejectionRevision),
           );

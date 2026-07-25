@@ -50,6 +50,17 @@ trail, limited protocol coverage, and no fully supported deployment package.
 
 ## Release sequence
 
+### v0.12.0 — Latchflo rebrand compatibility
+
+**Goal:** Let Tyr and the control plane migrate to the Latchflo name
+independently, without a synchronized deploy.
+
+- Accepted `source: "latchflo"` alongside the legacy `source: "korrx"`.
+- Added `x-latchflo-grant-id` and `x-latchflo-controller-epoch` headers,
+  emitted alongside the deprecated `x-korrx-*` pair.
+- Deferred removal of the legacy value and headers to a later release, gated on
+  fleet-wide migration.
+
 ### v0.11.1 — Korrx contract compatibility
 
 **Status:** Released 2026-07-25

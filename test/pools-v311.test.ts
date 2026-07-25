@@ -500,13 +500,48 @@ describe("v3.11 versioned pool limits", () => {
           provenance: obsoleteProvenance,
         },
       ]),
-    ).toThrow(/provenance\.source must be "korrx"/);
+    ).toThrow(/provenance\.source must be "korrx" or "latchflo"/);
 
     expect(pools.limits()["korrx-source-validation"]).toEqual({
       revision: 0,
       maxConcurrent: 1,
       maxQueue: 0,
     });
+  });
+
+  it("accepts both the legacy korrx and current latchflo provenance sources", () => {
+    for (const source of ["korrx", "latchflo"] as const) {
+      const pools = createPools([
+        {
+          name: `${source}-source-accepted`,
+          modelPrefixes: ["gpt"],
+          model: "gpt-4o",
+          maxConcurrent: 1,
+          initialRevision: 0,
+        },
+      ]);
+
+      const result = pools.applyLimits([
+        {
+          pool: `${source}-source-accepted`,
+          limits: { revision: 1, maxConcurrent: 4, maxQueue: 0 },
+          provenance: {
+            source,
+            grantId: `grant-${source}`,
+            controllerEpoch: 7,
+            revision: 1,
+            expiresAt: "2026-07-26T18:00:00.000Z",
+          },
+        },
+      ]);
+
+      expect(result.applied).toBe(true);
+      expect(pools.limits()[`${source}-source-accepted`]).toEqual({
+        revision: 1,
+        maxConcurrent: 4,
+        maxQueue: 0,
+      });
+    }
   });
 
   it("binds each admitted request to the exact Korrx grant revision", async () => {

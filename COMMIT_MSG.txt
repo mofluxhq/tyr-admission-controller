@@ -1,0 +1,23 @@
+Accept Latchflo provenance alongside Korrx (v0.12.0)
+
+Adds `source: "latchflo"` as a valid admission-provenance source next to the
+existing `source: "korrx"`, and emits `x-latchflo-grant-id` /
+`x-latchflo-controller-epoch` alongside the existing `x-korrx-*` pair with
+identical values.
+
+This is deliberately additive rather than a rename. Tyr and the control plane
+deploy independently, and a provenance mismatch throws out of applyLimits
+instead of returning a rejection, so the agent never acks, readiness goes
+stale, and the expiration kill switch drives pool capacity to zero. A hard
+cutover sheds live traffic in either deploy order -- the same failure recorded
+under 0.11.1, when Korrx emitted `source: "korrx"` while Tyr still required
+`source: "zab"`. Accepting both values removes the ordering constraint.
+
+Legacy value and headers are marked deprecated for removal once the fleet has
+migrated.
+
+Verified: npm run release:check passes (lint, typecheck, 82/82 tests, build,
+smoke, pack). Mutation-checked the new coverage. End-to-end against the real
+latchflo-control-plane agent in both directions: control plane emitting
+"latchflo" passes 12/12, and an unmodified control plane still emitting
+"korrx" also passes 12/12 against this build.

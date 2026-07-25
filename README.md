@@ -12,10 +12,19 @@ previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.11.1, single-process, proprietary software. See
+> **Status:** v0.12.0, single-process, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr is now ready to act as a remotely managed
 > data-plane agent, but the central allocator, identity layer, and standard
 > telemetry exporters remain separate roadmap work.
+
+## What shipped in v0.12.0
+
+- Accepted `source: "latchflo"` on admission provenance alongside the legacy
+  `source: "korrx"`, so Tyr and the control plane can be rolled out in either
+  order during the Latchflo rebrand.
+- Added `x-latchflo-grant-id` and `x-latchflo-controller-epoch` response
+  headers, emitted alongside the existing `x-korrx-*` pair with identical
+  values.
 
 ## What shipped in v0.11.1
 
@@ -151,8 +160,10 @@ Every validated, pool-routed request includes an advisory snapshot:
 | `x-admission-outcome` | `admitted` or native v3.11 `bypassed` outcome |
 | `x-admission-revision` | Revision active when execution began; immediate rejections use the preview revision |
 | `x-admission-bypass-reason` | Capacity reason simulated by an observe-mode bypass |
-| `x-korrx-grant-id` | Exact Korrx capacity grant associated with `x-admission-revision`, when present |
-| `x-korrx-controller-epoch` | Korrx fencing epoch that issued the associated grant |
+| `x-latchflo-grant-id` | Exact Latchflo capacity grant associated with `x-admission-revision`, when present |
+| `x-latchflo-controller-epoch` | Latchflo fencing epoch that issued the associated grant |
+| `x-korrx-grant-id` | Deprecated alias of `x-latchflo-grant-id`, identical value |
+| `x-korrx-controller-epoch` | Deprecated alias of `x-latchflo-controller-epoch`, identical value |
 
 Actual admission rejections also include `x-admission-reason`. Tyr does not
 fabricate a `Retry-After` header because a fail-fast capacity snapshot cannot
@@ -427,7 +438,7 @@ const result = control.applyLimits([
       },
     },
     provenance: {
-      source: "korrx",
+      source: "latchflo",
       grantId: "f6bc97d0-14ba-4ca7-b9bb-9a275a8b1533",
       controllerEpoch: 12,
       revision: 101,

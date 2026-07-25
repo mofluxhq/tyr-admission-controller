@@ -26,9 +26,25 @@ import {
 
 export type AdmissionMode = LLMAdmissionMode;
 
+/**
+ * Control-plane brand names Tyr accepts on admission provenance.
+ *
+ * `"korrx"` is the legacy value, retained for the Latchflo rebrand transition.
+ * Tyr and the control plane are deployed independently, and a provenance
+ * mismatch throws out of `applyLimits` rather than returning a rejection, so
+ * the agent never acks, readiness goes stale, and the expiration kill switch
+ * drives capacity to zero. Accepting both values means there is no ordering
+ * constraint between the two rollouts. Drop `"korrx"` only once every
+ * control plane in the fleet emits `"latchflo"`.
+ */
+export const ADMISSION_PROVENANCE_SOURCES = ["korrx", "latchflo"] as const;
+
+export type AdmissionProvenanceSource =
+  (typeof ADMISSION_PROVENANCE_SOURCES)[number];
+
 /** Immutable control-plane metadata attached to one applied limit revision. */
 export type AdmissionProvenance = {
-  readonly source: "korrx";
+  readonly source: AdmissionProvenanceSource;
   readonly grantId: string;
   readonly controllerEpoch: number;
   /** Must equal the associated admission-limit revision. */
@@ -385,8 +401,13 @@ function validateAdmissionProvenance(
   const revision = value.revision;
   const expiresAt = value.expiresAt;
 
-  if (source !== "korrx") {
-    throw new Error(`${poolName}.provenance.source must be "korrx"`);
+  if (
+    !ADMISSION_PROVENANCE_SOURCES.includes(source as AdmissionProvenanceSource)
+  ) {
+    const accepted = ADMISSION_PROVENANCE_SOURCES.map((s) => `"${s}"`).join(
+      " or ",
+    );
+    throw new Error(`${poolName}.provenance.source must be ${accepted}`);
   }
   assertNonEmptyString(grantId, `${poolName}.provenance.grantId`);
   assertInteger(controllerEpoch, `${poolName}.provenance.controllerEpoch`, {

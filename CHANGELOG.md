@@ -8,6 +8,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-25
+
+### Added
+
+- Accepted `source: "latchflo"` on immutable admission provenance alongside the
+  existing `source: "korrx"`. Both are valid; `"korrx"` is retained for the
+  Latchflo rebrand transition.
+- Added `x-latchflo-grant-id` and `x-latchflo-controller-epoch` response
+  headers, emitted alongside the existing `x-korrx-*` pair with identical
+  values.
+- Added coverage that both provenance sources are accepted and that both header
+  pairs are emitted on admitted, observe-bypassed, and rejected responses.
+
+### Changed
+
+- `AdmissionProvenance.source` is now the exported `AdmissionProvenanceSource`
+  union rather than the `"korrx"` literal. Consumers annotating provenance
+  objects with the literal type continue to compile.
+- The provenance rejection message now reads
+  `provenance.source must be "korrx" or "latchflo"`. Callers matching the old
+  message as a substring are unaffected; exact-string matchers must update.
+
+### Deprecated
+
+- `x-korrx-grant-id` and `x-korrx-controller-epoch` are deprecated aliases.
+  They will be removed in a future release once no consumer reads them.
+- `source: "korrx"` is deprecated. It will be rejected in a future release once
+  every control plane in the fleet emits `"latchflo"`.
+
+### Notes
+
+This release is intentionally backward compatible rather than a rename. Tyr and
+the control plane are deployed independently, and a provenance mismatch throws
+out of `applyLimits` instead of returning a rejection, so the agent never acks,
+readiness goes stale, and the expiration kill switch drives pool capacity to
+zero. A hard cutover therefore sheds live traffic in either deploy order --
+the same failure mode recorded under 0.11.1, when Korrx emitted
+`source: "korrx"` while Tyr still required `source: "zab"`. Accepting both
+values removes the ordering constraint entirely.
+
+Recommended rollout:
+
+1. Deploy Tyr 0.12.0 everywhere. No control-plane change required.
+2. Migrate control planes to emit `source: "latchflo"`, at whatever pace.
+3. Migrate any consumer reading `x-korrx-*` to the `x-latchflo-*` pair.
+4. Only once 2 and 3 are complete fleet-wide, drop the legacy value and headers
+   in a follow-up release.
+
+
 ## [0.11.1] - 2026-07-25
 
 ### Changed
