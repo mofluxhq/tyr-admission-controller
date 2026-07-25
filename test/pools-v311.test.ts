@@ -457,7 +457,7 @@ describe("v3.11 versioned pool limits", () => {
           pool: "provenance-validation",
           limits: { revision: 1, maxConcurrent: 2, maxQueue: 0 },
           provenance: {
-            source: "zab",
+            source: "korrx",
             grantId: "grant-wrong-revision",
             controllerEpoch: 1,
             revision: 2,
@@ -474,7 +474,42 @@ describe("v3.11 versioned pool limits", () => {
     });
   });
 
-  it("binds each admitted request to the exact Zab grant revision", async () => {
+  it("rejects the obsolete Zab provenance source before mutating any pool", () => {
+    const pools = createPools([
+      {
+        name: "korrx-source-validation",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 1,
+        initialRevision: 0,
+      },
+    ]);
+    const obsoleteProvenance = {
+      source: "zab",
+      grantId: "legacy-zab-grant",
+      controllerEpoch: 1,
+      revision: 1,
+      expiresAt: "2026-07-25T18:00:00.000Z",
+    } as unknown as AdmissionProvenance;
+
+    expect(() =>
+      pools.applyLimits([
+        {
+          pool: "korrx-source-validation",
+          limits: { revision: 1, maxConcurrent: 2, maxQueue: 0 },
+          provenance: obsoleteProvenance,
+        },
+      ]),
+    ).toThrow(/provenance\.source must be "korrx"/);
+
+    expect(pools.limits()["korrx-source-validation"]).toEqual({
+      revision: 0,
+      maxConcurrent: 1,
+      maxQueue: 0,
+    });
+  });
+
+  it("binds each admitted request to the exact Korrx grant revision", async () => {
     const pools = createPools([
       {
         name: "provenance",
@@ -487,14 +522,14 @@ describe("v3.11 versioned pool limits", () => {
     ]);
     const pool = pools.get("provenance")!;
     const grantA: AdmissionProvenance = {
-      source: "zab",
+      source: "korrx",
       grantId: "grant-a",
       controllerEpoch: 12,
       revision: 1,
       expiresAt: "2026-07-24T18:00:00.000Z",
     };
     const grantB: AdmissionProvenance = {
-      source: "zab",
+      source: "korrx",
       grantId: "grant-b",
       controllerEpoch: 12,
       revision: 2,

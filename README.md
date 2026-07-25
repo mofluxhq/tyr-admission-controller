@@ -5,17 +5,26 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.11.0 is built on
+Tyr 0.11.1 is built on
 [`async-bulkhead-llm@3.11.1`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.11.0, single-process, proprietary software. See
+> **Status:** v0.11.1, single-process, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr is now ready to act as a remotely managed
 > data-plane agent, but the central allocator, identity layer, and standard
 > telemetry exporters remain separate roadmap work.
+
+## What shipped in v0.11.1
+
+- Corrected the embedded-agent contract to accept Korrx provenance with
+  `source: "korrx"`.
+- Renamed grant-attribution headers to `x-korrx-grant-id` and
+  `x-korrx-controller-epoch`.
+- Added regression tests across the real pool-validation and gateway-response
+  paths for admitted, bypassed, and rejected decisions.
 
 ## What shipped in v0.11.0
 
@@ -29,7 +38,7 @@ drain results.
 - Delegated observe-mode execution and accounting to the library's native v3.11
   implementation, including bypass identities and bypass release usage.
 - Added request headers for preview and authoritative limit revisions.
-- Added immutable Zab grant provenance keyed by the exact admission revision,
+- Added immutable Korrx grant provenance keyed by the exact admission revision,
   with grant and controller-epoch response headers.
 - Added queue and initial-revision startup configuration.
 - Corrected CI to validate Tyr's actual flat ESM/declaration package layout.
@@ -142,8 +151,8 @@ Every validated, pool-routed request includes an advisory snapshot:
 | `x-admission-outcome` | `admitted` or native v3.11 `bypassed` outcome |
 | `x-admission-revision` | Revision active when execution began; immediate rejections use the preview revision |
 | `x-admission-bypass-reason` | Capacity reason simulated by an observe-mode bypass |
-| `x-zab-grant-id` | Exact Zab capacity grant associated with `x-admission-revision`, when present |
-| `x-zab-controller-epoch` | Zab fencing epoch that issued the associated grant |
+| `x-korrx-grant-id` | Exact Korrx capacity grant associated with `x-admission-revision`, when present |
+| `x-korrx-controller-epoch` | Korrx fencing epoch that issued the associated grant |
 
 Actual admission rejections also include `x-admission-reason`. Tyr does not
 fabricate a `Retry-After` header because a fail-fast capacity snapshot cannot
@@ -418,7 +427,7 @@ const result = control.applyLimits([
       },
     },
     provenance: {
-      source: "zab",
+      source: "korrx",
       grantId: "f6bc97d0-14ba-4ca7-b9bb-9a275a8b1533",
       controllerEpoch: 12,
       revision: 101,

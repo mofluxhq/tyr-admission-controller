@@ -395,20 +395,20 @@ describe("admission-gateway", () => {
     }
   });
 
-  it("keeps request headers bound to the exact Zab grant that admitted them", async () => {
+  it("keeps request headers bound to the exact Korrx grant that admitted them", async () => {
     const gw = await startGateway({
       maxConcurrent: 1,
       initialRevision: 0,
     });
     const grantA = {
-      source: "zab" as const,
+      source: "korrx" as const,
       grantId: "grant-a",
       controllerEpoch: 31,
       revision: 1,
       expiresAt: "2026-07-24T20:00:00.000Z",
     };
     const grantB = {
-      source: "zab" as const,
+      source: "korrx" as const,
       grantId: "grant-b",
       controllerEpoch: 31,
       revision: 2,
@@ -453,8 +453,10 @@ describe("admission-gateway", () => {
       const first = await admittedUnderA;
       expect(first.status).toBe(200);
       expect(first.headers.get("x-admission-revision")).toBe("1");
-      expect(first.headers.get("x-zab-grant-id")).toBe("grant-a");
-      expect(first.headers.get("x-zab-controller-epoch")).toBe("31");
+      expect(first.headers.get("x-korrx-grant-id")).toBe("grant-a");
+      expect(first.headers.get("x-korrx-controller-epoch")).toBe("31");
+      expect(first.headers.get("x-zab-grant-id")).toBeNull();
+      expect(first.headers.get("x-zab-controller-epoch")).toBeNull();
 
       const second = await fetch(`${gw.url}/v1/messages`, {
         method: "POST",
@@ -463,8 +465,102 @@ describe("admission-gateway", () => {
       });
       expect(second.status).toBe(200);
       expect(second.headers.get("x-admission-revision")).toBe("2");
-      expect(second.headers.get("x-zab-grant-id")).toBe("grant-b");
-      expect(second.headers.get("x-zab-controller-epoch")).toBe("31");
+      expect(second.headers.get("x-korrx-grant-id")).toBe("grant-b");
+      expect(second.headers.get("x-korrx-controller-epoch")).toBe("31");
+      expect(second.headers.get("x-zab-grant-id")).toBeNull();
+      expect(second.headers.get("x-zab-controller-epoch")).toBeNull();
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("attaches the exact Korrx grant to an observe-mode bypass", async () => {
+    const gw = await startGateway({
+      maxConcurrent: 10,
+      initialRevision: 0,
+      budget: 0,
+      admissionMode: "observe",
+      adaptiveEstimation: { enabled: false },
+    });
+    const grant = {
+      source: "korrx" as const,
+      grantId: "grant-observe",
+      controllerEpoch: 32,
+      revision: 1,
+      expiresAt: "2026-07-25T18:00:00.000Z",
+    };
+
+    try {
+      expect(
+        gw.control.applyLimits([
+          {
+            pool: "test-pool",
+            limits: {
+              revision: 1,
+              maxConcurrent: 10,
+              maxQueue: 0,
+              tokenBudget: { budget: 0, highPriorityReserve: 0 },
+            },
+            provenance: grant,
+          },
+        ]),
+      ).toMatchObject({ applied: true });
+
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("observe under Korrx grant")),
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-admission-outcome")).toBe("bypassed");
+      expect(res.headers.get("x-admission-revision")).toBe("1");
+      expect(res.headers.get("x-korrx-grant-id")).toBe("grant-observe");
+      expect(res.headers.get("x-korrx-controller-epoch")).toBe("32");
+      expect(res.headers.get("x-zab-grant-id")).toBeNull();
+      expect(res.headers.get("x-zab-controller-epoch")).toBeNull();
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("attaches the exact Korrx grant to a rejected request", async () => {
+    const gw = await startGateway({
+      maxConcurrent: 1,
+      initialRevision: 0,
+    });
+    const grant = {
+      source: "korrx" as const,
+      grantId: "grant-kill-switch",
+      controllerEpoch: 33,
+      revision: 1,
+      expiresAt: "2026-07-25T18:01:00.000Z",
+    };
+
+    try {
+      expect(
+        gw.control.applyLimits([
+          {
+            pool: "test-pool",
+            limits: { revision: 1, maxConcurrent: 0, maxQueue: 0 },
+            provenance: grant,
+          },
+        ]),
+      ).toMatchObject({ applied: true });
+
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("rejected under Korrx grant")),
+      });
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("x-admission-reason")).toBe("concurrency_limit");
+      expect(res.headers.get("x-admission-revision")).toBe("1");
+      expect(res.headers.get("x-korrx-grant-id")).toBe("grant-kill-switch");
+      expect(res.headers.get("x-korrx-controller-epoch")).toBe("33");
+      expect(res.headers.get("x-zab-grant-id")).toBeNull();
+      expect(res.headers.get("x-zab-controller-epoch")).toBeNull();
     } finally {
       gw.server.close();
     }

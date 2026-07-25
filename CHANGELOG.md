@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-07-25
+
+### Changed
+
+- Renamed the external admission-provenance namespace from Zab to Korrx so
+  Tyr accepts the provenance objects emitted by `korrx-control-plane` 0.2.0.
+- Renamed grant-attribution response headers to `x-korrx-grant-id` and
+  `x-korrx-controller-epoch`.
+- Updated the runtime-control example and operator documentation to use the
+  Korrx integration contract consistently.
+
+### Fixed
+
+- Fixed the Tyr/Korrx integration blocker where Korrx emitted
+  `source: "korrx"` but Tyr required `source: "zab"`.
+- Added regression coverage for admitted, observe-bypassed, and rejected
+  responses, plus validation that the obsolete Zab source is rejected before
+  any pool is mutated.
+
 ## [0.11.0] - 2026-07-24
 
 ### Added

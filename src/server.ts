@@ -143,14 +143,14 @@ function rejectStatus(reason: LLMRejectReason): number {
   }
 }
 
-function setZabProvenanceHeaders(
+function setKorrxProvenanceHeaders(
   res: ServerResponse,
   provenance: AdmissionProvenance | undefined,
 ): void {
   if (provenance === undefined) return;
-  res.setHeader("x-zab-grant-id", provenance.grantId);
+  res.setHeader("x-korrx-grant-id", provenance.grantId);
   res.setHeader(
-    "x-zab-controller-epoch",
+    "x-korrx-controller-epoch",
     String(provenance.controllerEpoch),
   );
 }
@@ -463,7 +463,7 @@ export function createGateway(opts: GatewayOptions) {
               res.setHeader("x-admission-id", ctx.admissionId);
               res.setHeader("x-admission-outcome", ctx.admission);
               res.setHeader("x-admission-revision", String(ctx.limitRevision));
-              setZabProvenanceHeaders(res, ctx.provenance);
+              setKorrxProvenanceHeaders(res, ctx.provenance);
               if (ctx.bypassReason !== undefined) {
                 res.setHeader("x-admission-bypass-reason", ctx.bypassReason);
               }
@@ -589,7 +589,7 @@ export function createGateway(opts: GatewayOptions) {
             "x-admission-revision",
             String(rejectionRevision),
           );
-          setZabProvenanceHeaders(
+          setKorrxProvenanceHeaders(
             res,
             pool.controller.provenance(rejectionRevision),
           );

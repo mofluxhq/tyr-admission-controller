@@ -28,7 +28,7 @@ export type AdmissionMode = LLMAdmissionMode;
 
 /** Immutable control-plane metadata attached to one applied limit revision. */
 export type AdmissionProvenance = {
-  readonly source: "zab";
+  readonly source: "korrx";
   readonly grantId: string;
   readonly controllerEpoch: number;
   /** Must equal the associated admission-limit revision. */
@@ -100,7 +100,7 @@ export type AdmissionRunContext = {
   readonly admission: LLMRunAdmission;
   /** Limit revision in effect when the callback began. */
   readonly limitRevision: number;
-  /** Exact external grant associated with `limitRevision`, when managed by Zab. */
+  /** Exact external grant associated with `limitRevision`, when managed by Korrx. */
   readonly provenance?: AdmissionProvenance;
   readonly bypassReason?: LLMShadowableRejectReason;
   readonly bypassDetail?: LLMRejectDetail;
@@ -385,8 +385,8 @@ function validateAdmissionProvenance(
   const revision = value.revision;
   const expiresAt = value.expiresAt;
 
-  if (source !== "zab") {
-    throw new Error(`${poolName}.provenance.source must be "zab"`);
+  if (source !== "korrx") {
+    throw new Error(`${poolName}.provenance.source must be "korrx"`);
   }
   assertNonEmptyString(grantId, `${poolName}.provenance.grantId`);
   assertInteger(controllerEpoch, `${poolName}.provenance.controllerEpoch`, {
