@@ -6,7 +6,7 @@ token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
 Tyr 0.11.0 is built on
-[`async-bulkhead-llm@3.11.0`](https://www.npmjs.com/package/async-bulkhead-llm).
+[`async-bulkhead-llm@3.11.1`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
@@ -19,7 +19,7 @@ drain results.
 
 ## What shipped in v0.11.0
 
-- Upgraded and pinned `async-bulkhead-llm` to exactly 3.11.0.
+- Upgraded and pinned `async-bulkhead-llm` to exactly 3.11.1.
 - Added complete per-pool snapshots covering concurrency, queue capacity, token
   budget, and high-priority reserve.
 - Added strictly increasing revisions and stale-update rejection.
