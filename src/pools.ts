@@ -271,9 +271,8 @@ function validatePoolConfigs(configs: PoolConfig[]): void {
     names.add(config.name);
 
     assertNonEmptyString(config.model, `${base}.model`);
-    // async-bulkhead-llm requires a positive construction-time value. A later
-    // versioned snapshot may set maxConcurrent to 0 as a kill switch.
-    assertInteger(config.maxConcurrent, `${base}.maxConcurrent`, { min: 1 });
+    // async-bulkhead-llm 3.12 allows a fail-closed zero-capacity start.
+    assertInteger(config.maxConcurrent, `${base}.maxConcurrent`, { min: 0 });
     if (config.maxQueue !== undefined) {
       assertInteger(config.maxQueue, `${base}.maxQueue`, { min: 0 });
     }

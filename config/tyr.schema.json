@@ -89,6 +89,94 @@
           "minimum": 0
         }
       }
+    },
+    "controlPlane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "url",
+        "instanceId"
+      ],
+      "properties": {
+        "type": {
+          "const": "latchflo"
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https?://"
+        },
+        "instanceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "pools": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "bootstrapTokenEnv": {
+          "type": "string",
+          "minLength": 1,
+          "default": "LATCHFLO_AGENT_BOOTSTRAP_TOKEN"
+        },
+        "agentTokenFile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryIntervalMs": {
+          "type": "integer",
+          "minimum": 100,
+          "default": 1000,
+          "description": "Base retry delay for startup and transient control-plane calls. Tyr applies bounded exponential backoff with jitter."
+        },
+        "retryMaxIntervalMs": {
+          "type": "integer",
+          "minimum": 100,
+          "default": 30000,
+          "description": "Maximum client-generated retry delay for transient control-plane failures."
+        },
+        "requestTimeoutMs": {
+          "type": "integer",
+          "minimum": 100,
+          "default": 5000,
+          "description": "Deadline for each Latchflo control-plane request."
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "region": {
+              "type": "string",
+              "minLength": 1
+            },
+            "zone": {
+              "type": "string",
+              "minLength": 1
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "endpoint": {
+              "type": "string",
+              "minLength": 1
+            },
+            "labels": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
     }
   },
   "$defs": {
@@ -135,7 +223,7 @@
         },
         "maxConcurrent": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 0
         },
         "maxQueue": {
           "type": "integer",

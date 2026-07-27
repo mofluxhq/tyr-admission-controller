@@ -250,6 +250,7 @@ function startGateway(
     shutdownDrainTimeoutMs?: number;
     trustPriorityHeader?: boolean;
     resolvePriority?: GatewayOptions["resolvePriority"];
+    isReady?: GatewayOptions["isReady"];
   } = {},
 ): Promise<{
   server: Server;
@@ -278,6 +279,7 @@ function startGateway(
     ...(opts.resolvePriority !== undefined
       ? { resolvePriority: opts.resolvePriority }
       : {}),
+    ...(opts.isReady !== undefined ? { isReady: opts.isReady } : {}),
     pools: [
       {
         name: "test-pool",
@@ -996,6 +998,33 @@ describe("admission-gateway", () => {
       >;
       expect(done["test-pool"]!.tokenBudget.inFlightTokens).toBe(0);
       expect(done["test-pool"]!.tokenBudget.totalConsumed).toBe(60);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("keeps health separate from managed readiness", async () => {
+    let ready = false;
+    const gw = await startGateway(
+      { maxConcurrent: 1 },
+      { isReady: () => ready },
+    );
+    try {
+      const health = await fetch(`${gw.url}/healthz`);
+      expect(health.status).toBe(200);
+      expect(await health.json()).toEqual({ ok: true });
+
+      const unavailable = await fetch(`${gw.url}/readyz`);
+      expect(unavailable.status).toBe(503);
+      expect(await unavailable.json()).toEqual({
+        ok: false,
+        reason: "control_plane_not_ready",
+      });
+
+      ready = true;
+      const available = await fetch(`${gw.url}/readyz`);
+      expect(available.status).toBe(200);
+      expect(await available.json()).toEqual({ ok: true });
     } finally {
       gw.server.close();
     }

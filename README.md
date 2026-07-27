@@ -5,17 +5,36 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.11.1 is built on
-[`async-bulkhead-llm@3.11.1`](https://www.npmjs.com/package/async-bulkhead-llm).
+Tyr 0.13.0 is built on
+[`async-bulkhead-llm@3.12.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.12.0, single-process, proprietary software. See
-> [`LICENSE.txt`](LICENSE.txt). Tyr is now ready to act as a remotely managed
-> data-plane agent, but the central allocator, identity layer, and standard
-> telemetry exporters remain separate roadmap work.
+> **Status:** v0.13.0, single-process data plane, proprietary software. See
+> [`LICENSE.txt`](LICENSE.txt). Tyr now includes first-class Latchflo managed
+> mode with configuration-driven registration, expiring grants, readiness,
+> persisted agent credentials, and fail-closed expiration behavior.
+
+## What shipped in v0.13.0
+
+- Added first-class `controlPlane.type: latchflo` file configuration. Tyr now
+  registers itself, polls desired state, applies complete higher-revision grant
+  snapshots, acknowledges results, and retries startup without source edits.
+- Added `/readyz`, which returns `503` until every managed pool has a valid,
+  unexpired Latchflo grant. `/healthz` remains a process-liveness probe.
+- Added atomic persistence of rotated per-instance agent tokens with `0600`
+  permissions and graceful agent shutdown before gateway drain.
+- Managed pools now start with `maxConcurrent: 0`, `maxQueue: 0`, revision
+  `0`, and enforcement enabled. This requires `async-bulkhead-llm` 3.12.0 and
+  ensures Tyr is fail closed before its first valid grant arrives.
+- Added runtime validation for desired-state identities, epochs, revisions,
+  timestamps, duplicate pools, and token-budget relationships. A stale persisted
+  credential is re-registered once on `401` when a bootstrap token is available.
+- Latchflo provenance emitted by the built-in agent now uses
+  `source: "latchflo"`. Deprecated `x-korrx-*` response aliases remain for
+  downstream migration.
 
 ## What shipped in v0.12.0
 
@@ -55,6 +74,34 @@ drain results.
 See [`CHANGELOG.md`](CHANGELOG.md) for the complete release history and
 [`ROADMAP.md`](ROADMAP.md) for planned work.
 
+## Latchflo managed mode
+
+Use [`config/tyr.latchflo.example.yaml`](config/tyr.latchflo.example.yaml) as the
+starting point. Managed pools must begin closed:
+
+```yaml
+pools:
+  - name: openai-primary
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 0
+    maxQueue: 0
+    limitsRevision: 0
+    admissionMode: enforce
+
+controlPlane:
+  type: latchflo
+  url: http://latchflo-control-plane:8080
+  instanceId: tyr-a
+  pools: [openai-primary]
+  bootstrapTokenEnv: LATCHFLO_AGENT_BOOTSTRAP_TOKEN
+  agentTokenFile: /var/lib/tyr/latchflo-agent.token
+```
+
+`/healthz` reports process liveness. `/readyz` returns `503` until all managed
+pools hold valid grants and returns to `503` when a grant expires. The listener
+may therefore remain observable while admission remains safely closed.
+
 ## Request lifecycle
 
 For each provider request, Tyr:
@@ -65,7 +112,7 @@ For each provider request, Tyr:
 4. Computes one immutable reservation preview.
 5. Captures the pool's complete versioned limit snapshot and calls
    `wouldAdmit(..., { detail: true })` with the exact reservation.
-6. Calls the native v3.11 `run()` path with the same reservation and the pool's
+6. Calls the native v3.12 `run()` path with the same reservation and the pool's
    configured `enforce` or `observe` mode.
 7. Reconciles live and final provider usage. Native observe bypass releases also
    feed adaptive estimation when provider usage is available.
@@ -130,6 +177,7 @@ not for representing actual upstream load while bypasses are running.
 | `POST` | `/v1/chat/completions` | Admission-gated OpenAI Chat Completions proxy |
 | `GET` | `/stats` | Live per-pool bulkhead statistics |
 | `GET` | `/healthz` | Process liveness |
+| `GET` | `/readyz` | Managed readiness; `503` until all configured Latchflo grants are valid |
 
 A provider route is enabled only when its upstream base URL is configured.
 Calling a disabled provider route returns `404` with
@@ -157,7 +205,7 @@ Every validated, pool-routed request includes an advisory snapshot:
 | `x-admission-preview-reason` | Present when the advisory result rejects |
 | `x-admission-reserved-tokens` | Exact input-plus-output reservation when a token budget exists |
 | `x-admission-id` | Bulkhead UUID, or `shadow-...` for an observe-mode bypass |
-| `x-admission-outcome` | `admitted` or native v3.11 `bypassed` outcome |
+| `x-admission-outcome` | `admitted` or native v3.12 `bypassed` outcome |
 | `x-admission-revision` | Revision active when execution began; immediate rejections use the preview revision |
 | `x-admission-bypass-reason` | Capacity reason simulated by an observe-mode bypass |
 | `x-latchflo-grant-id` | Exact Latchflo capacity grant associated with `x-admission-revision`, when present |
@@ -416,15 +464,62 @@ estimates across process restarts are more important than local calibration.
 expires, Tyr records the outstanding count, closes remaining HTTP connections,
 and returns the snapshot from `shutdown()`.
 
-## Runtime control-plane integration
+## Latchflo managed mode
 
-`createGateway()` returns a narrow `control` object intended for an embedded
-agent that receives grants or desired-state snapshots from a separate control
-plane. It does not expose the request-execution bulkhead itself.
+File configuration can make Latchflo operation part of Tyr's normal process
+lifecycle. No package installation or `src/index.ts` modification is required.
+
+```yaml
+controlPlane:
+  type: latchflo
+  url: http://latchflo-control-plane:8080
+  instanceId: tyr-a
+  pools: [interactive-claude, batch-openai]
+  bootstrapTokenEnv: LATCHFLO_AGENT_BOOTSTRAP_TOKEN
+  agentTokenFile: /var/lib/tyr/latchflo-agent.token
+  retryIntervalMs: 1000
+  retryMaxIntervalMs: 30000
+  requestTimeoutMs: 5000
+  metadata:
+    region: us-west
+    zone: us-west-2a
+    version: 0.13.0
+    endpoint: http://tyr-a:8787
+    labels:
+      environment: demo
+```
+
+The bootstrap credential is read from the named environment variable only when
+no persisted agent token exists. After registration, Tyr writes the rotated
+agent token atomically with owner-only permissions. Relative token paths are
+resolved against the configuration file directory.
+
+Tyr opens its HTTP listener even when Latchflo is temporarily unavailable so
+`/healthz` can distinguish process health from control-plane readiness.
+Transient registration, heartbeat, and desired-state failures use single-flight,
+bounded exponential backoff with jitter; `429` and `503` `Retry-After` values are
+honored as a minimum delay. Permanent configuration, authentication, and
+protocol failures are not retried continuously. Every control-plane request is
+bounded by `requestTimeoutMs`.
+
+`/readyz` remains `503` until every managed pool has a complete unexpired grant.
+A transient poll failure does not discard a still-valid lease. When a grant
+expires, Tyr applies the reserved next even revision with zero capacity and
+immediately becomes unready. Grant acknowledgements are best-effort and cannot
+interrupt local expiration enforcement after limits have been applied.
+
+Omit `controlPlane.pools` to manage every pool declared in the Tyr file. Pool
+names are validated at startup, and a grant batch is preflighted before any
+local pool mutates. Queue timeout, model routing, estimator policy, admission
+mode, and provider upstreams remain construction-time settings.
+
+### Embedded control surface
+
+`createGateway()` still returns the narrow `control` object for custom embedded
+agents and tests. It does not expose the request-execution bulkhead itself.
 
 ```ts
-const { server, control, shutdown } = createGateway(options);
-
+const { control } = createGateway(options);
 const result = control.applyLimits([
   {
     pool: "interactive-claude",
@@ -432,10 +527,7 @@ const result = control.applyLimits([
       revision: 101,
       maxConcurrent: 24,
       maxQueue: 0,
-      tokenBudget: {
-        budget: 240_000,
-        highPriorityReserve: 48_000,
-      },
+      tokenBudget: { budget: 240_000, highPriorityReserve: 48_000 },
     },
     provenance: {
       source: "latchflo",
@@ -445,50 +537,17 @@ const result = control.applyLimits([
       expiresAt: "2026-07-24T18:30:00.000Z",
     },
   },
-  {
-    pool: "batch-openai",
-    limits: {
-      revision: 101,
-      maxConcurrent: 8,
-      maxQueue: 32,
-      tokenBudget: {
-        budget: 80_000,
-        highPriorityReserve: 0,
-      },
-    },
-  },
 ]);
 
-if (!result.applied) {
-  console.error(result.reason, result.pool, result.current);
-}
+if (!result.applied) console.error(result.reason, result.pool);
 ```
 
-Every update must provide the complete snapshot expected by that pool. A
-token-budgeted pool requires `tokenBudget`; a pool created without token-budget
-admission must omit it. Revisions must be strictly greater than the currently
-applied revision.
-
-When `provenance` is supplied, its revision must equal the limit revision.
-Tyr retains a bounded per-pool revision ledger so an in-flight request keeps
-the grant identity captured at admission even after a newer grant is applied.
-
-Tyr preflights the complete batch before mutating any pool. Unknown names,
-duplicate pool entries, invalid fields, or a stale revision therefore cannot
-partially update the local process. After preflight, all snapshots are applied
-synchronously in one event-loop turn.
-
-Reductions use shrink-by-attrition: existing in-flight work and already accepted
-waiters are not cancelled. Increasing concurrency starts accepted waiters after
-the complete snapshot is installed. Setting `maxConcurrent: 0` disables new
-admissions immediately and can be used as a per-pool kill switch. `control.limits()`
-returns the currently applied snapshots; `control.stats()` includes the same
-revision alongside operational counters.
-
-Queue timeout, model routing, estimator policy, admission mode, and provider
-upstreams remain construction-time settings. They are deliberately outside the
-v3.11 limit snapshot and still require process replacement or a future pool
-lifecycle API.
+Every update must provide the complete snapshot expected by that pool.
+Revisions must be strictly greater than the current revision, and provenance
+revision must match the limit revision. Tyr retains a bounded revision ledger
+so in-flight requests remain attributable to the grant captured at admission.
+Reductions use shrink-by-attrition; setting `maxConcurrent: 0` disables new
+admissions immediately.
 
 ## Priority safety
 
@@ -544,7 +603,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.10.0 .
+docker build -t tyr-admission-controller:0.13.0 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -555,7 +614,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.10.0
+  tyr-admission-controller:0.13.0
 ```
 
 Or use the included Compose example:
@@ -612,12 +671,11 @@ reverse-proxy layer.
 
 ## Known limitations
 
-- Budgets and statistics are per process. N replicas can collectively admit
-  approximately N times a per-replica budget unless capacity is externally
-  partitioned or coordinated.
-- Versioned limit snapshots are local to one process. Tyr supplies the data-plane
-  application surface, but no central distributor, lease allocator, grant TTL,
-  or fencing epoch is included yet.
+- Standalone budgets and statistics are per process. Configure Latchflo managed
+  mode when replicas must share a bounded fleet-wide capacity envelope.
+- Latchflo coordination uses expiring partitioned grants rather than a strict
+  distributed lease on every request. Capacity can be temporarily unavailable
+  during safe lease handoff.
 - Routing, upstream, estimator, timeout, and admission-mode configuration is
   loaded only at startup. Only the v3.11 admission-limit snapshot is remotely
   replaceable at runtime.
@@ -646,7 +704,8 @@ src/
   adapters.ts       provider validation, projection, and usage parsing
   cli.ts            offline configuration validation command
   config.ts         YAML and legacy environment configuration loading
-  index.ts          validated process entrypoint
+  index.ts          validated process entrypoint and managed-mode lifecycle
+  latchflo.ts        built-in Latchflo agent, retry, readiness, and token persistence
   pools.ts          v3.11 policy runtime, versioned limits, observe mode, and drain
   server.ts         HTTP proxy, admission, timeouts, and shutdown
   sse.ts            Anthropic streaming usage extraction
@@ -656,6 +715,7 @@ test/
   admission.test.ts request projection and estimator regression tests
   config.test.ts    file-schema and environment compatibility tests
   gateway.test.ts   gateway end-to-end tests
+  latchflo.test.ts  managed-agent, readiness, persistence, and expiration tests
   pools-v311.test.ts v3.11 preview, provenance, observe, reconfiguration, and drain tests
 Dockerfile          production multi-stage image
 compose.example.yaml local file-configured container example

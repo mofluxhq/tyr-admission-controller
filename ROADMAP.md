@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.11.1` pilot release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.13.0` managed-mode release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,17 +21,18 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.11.1
+## Current baseline: v0.13.0
 
 The current release provides:
 
 - Anthropic Messages and OpenAI Chat Completions proxy routes.
 - Model-prefix routing to independently configured local pools.
-- A v3.11 pool policy runtime using exact reservation previews, native observe
+- A v3.12 pool policy runtime using exact reservation previews, native observe
   mode, and complete versioned admission-limit snapshots.
 - Tyr-local all-or-nothing runtime updates across named pools, with stale
   revision protection and shrink-by-attrition semantics.
-- A narrow control surface for an embedded fleet or grant agent.
+- First-class Latchflo-managed operation with registration, persisted credentials,
+  readiness, expiring grants, and fail-closed zero-capacity startup.
 - Admission-linearized revisions and a bounded per-pool Korrx provenance ledger
   containing grant ID, controller epoch, and expiration.
 - Exact grant-attribution response headers for admissions, bypasses, and
@@ -44,11 +45,20 @@ The current release provides:
 - Strict startup validation, YAML configuration, offline validation, Docker and
   Compose assets, and expanded local policy statistics.
 
-Known commercial limitations include no central grant distributor or lease allocator, no authenticated
-tenant/application identity, no standard metrics exporter, no durable audit
-trail, limited protocol coverage, and no fully supported deployment package.
+Known commercial limitations include a single-controller SQLite control plane, no authenticated
+tenant/application identity, no OpenTelemetry exporter, limited protocol
+coverage, and no hardened multi-region deployment package.
 
 ## Release sequence
+
+### v0.13.0 — First-class Latchflo managed mode
+
+**Status:** Released 2026-07-26
+
+- Added configuration-driven control-plane registration and desired-state polling.
+- Added persisted rotated credentials, readiness gating, and graceful lifecycle wiring.
+- Added fail-closed zero-capacity startup through `async-bulkhead-llm` 3.12.0.
+- Added strict desired-state validation and lease-expiration enforcement.
 
 ### v0.12.0 — Latchflo rebrand compatibility
 

@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-26
+
+### Added
+
+- Added first-class `controlPlane.type: latchflo` file configuration with
+  instance identity, managed pool selection, metadata, retry cadence, bootstrap
+  credential environment lookup, and persisted rotated agent tokens.
+- Added a built-in Latchflo agent that registers, polls desired state, applies
+  complete higher-revision limit batches, acknowledges grants, and preserves
+  exact grant provenance for admission and rejection telemetry.
+- Added `/readyz`; it returns `503 control_plane_not_ready` until all managed
+  pools hold valid, unexpired grants while `/healthz` continues to report
+  process liveness.
+- Added single-flight startup and background retry behavior with request deadlines,
+  bounded exponential backoff, jitter, and `Retry-After` support so Tyr remains
+  observable without synchronizing a fleet against an unavailable control plane.
+- Added atomic owner-only agent-token persistence and graceful agent shutdown.
+- Added configuration, readiness, provenance, expiration, and credential
+  persistence tests.
+
+### Changed
+
+- The built-in agent emits `source: "latchflo"`. Tyr continues accepting the
+  deprecated `"korrx"` source and emitting deprecated `x-korrx-*` aliases.
+- Managed operation no longer requires installing the control-plane package
+  into Tyr or editing `src/index.ts`.
+- Upgraded `async-bulkhead-llm` to 3.12.0. Latchflo-managed pools are now
+  required to start at zero concurrency, zero queue capacity, revision zero,
+  and enforcement mode so startup is fail closed before the first grant.
+- Desired-state ingestion now validates response structure, instance identity,
+  managed pools, duplicate grants, controller epochs, revisions, timestamps,
+  expiration ordering, and token-budget relationships before applying limits.
+- Valid leases remain ready through transient desired-state poll failures until
+  their expiration deadline. Persisted credentials are refreshed through a
+  serialized bootstrap registration after a `401`. Grant acknowledgements are
+  best-effort and cannot interrupt local expiration scheduling after a grant is
+  applied; permanent configuration, authentication, and protocol failures are not
+  retried continuously.
+
 ## [0.12.0] - 2026-07-25
 
 ### Added

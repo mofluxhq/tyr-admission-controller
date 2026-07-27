@@ -1,6 +1,6 @@
 {
   "name": "tyr-admission-controller",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "license": "SEE LICENSE IN LICENSE.txt",
   "description": "Tyr is a capacity guard for LLM traffic that reserves expected token capacity before execution, sheds requests that would overcommit a model pool, and reconciles reservations from live provider usage.",
@@ -23,7 +23,7 @@
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {
-    "async-bulkhead-llm": "3.11.1",
+    "async-bulkhead-llm": "3.12.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
@@ -41,6 +41,7 @@
   "files": [
     "dist",
     "config/tyr.example.yaml",
+    "config/tyr.latchflo.example.yaml",
     "config/tyr.schema.json",
     "README.md"
   ]

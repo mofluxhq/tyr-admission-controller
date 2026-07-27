@@ -1,9 +1,27 @@
 import { loadRuntimeConfig } from "./config.js";
+import {
+  createLatchfloManagedMode,
+  type LatchfloManagedMode,
+} from "./latchflo.js";
 import { createGateway } from "./server.js";
 
 const runtime = loadRuntimeConfig();
 const { port, gateway, source } = runtime;
-const { server, shutdown } = createGateway(gateway);
+let managedMode: LatchfloManagedMode | undefined;
+const createdGateway = createGateway({
+  ...gateway,
+  ...(runtime.controlPlane === undefined
+    ? {}
+    : { isReady: () => managedMode?.ready() ?? false }),
+});
+const { server, control, shutdown } = createdGateway;
+
+if (runtime.controlPlane !== undefined) {
+  managedMode = createLatchfloManagedMode({
+    config: runtime.controlPlane,
+    control,
+  });
+}
 
 if (source.kind === "file") {
   console.log(
@@ -23,6 +41,12 @@ server.listen(port, () => {
       : undefined,
   ].filter(Boolean);
   console.log(`tyr-admission-controller listening on :${port} (${routes.join(", ")})`);
+  if (runtime.controlPlane !== undefined) {
+    console.log(
+      `Latchflo managed mode configured instance=${runtime.controlPlane.instanceId} pools=${runtime.controlPlane.pools.join(",")} controlPlane=${runtime.controlPlane.url}`,
+    );
+    managedMode?.start();
+  }
 });
 
 let shuttingDown = false;
@@ -30,6 +54,7 @@ let shuttingDown = false;
 function handleShutdownSignal(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  managedMode?.stop();
   console.log(`${signal} received, draining in-flight requests...`);
   shutdown()
     .then((result) => {

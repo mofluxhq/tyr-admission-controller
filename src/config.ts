@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { parseDocument } from "yaml";
+import type { LatchfloAgentMetadata, LatchfloRuntimeConfig } from "./latchflo.js";
 import type { PoolConfig } from "./pools.js";
 import type { GatewayOptions } from "./server.js";
 
@@ -17,6 +18,7 @@ export type RuntimeConfigSource =
 export type RuntimeConfig = {
   port: number;
   gateway: GatewayOptions;
+  controlPlane?: LatchfloRuntimeConfig;
   source: RuntimeConfigSource;
 };
 
@@ -421,6 +423,189 @@ function providerBaseUrl(
   );
 }
 
+
+function optionalString(
+  parent: ObjectValue,
+  key: string,
+  field: string,
+): string | undefined {
+  const value = parent[key];
+  return value === undefined ? undefined : requiredString(value, field);
+}
+
+function normalizeLabels(value: unknown, field: string): Record<string, string> {
+  const labels = objectValue(value, field);
+  const normalized: Record<string, string> = {};
+  for (const [key, labelValue] of Object.entries(labels)) {
+    const normalizedKey = requiredString(key, `${field} key`);
+    normalized[normalizedKey] = requiredString(labelValue, `${field}.${key}`);
+  }
+  return normalized;
+}
+
+function normalizeControlPlaneMetadata(
+  value: unknown,
+): LatchfloAgentMetadata | undefined {
+  if (value === undefined) return undefined;
+  const metadata = objectValue(value, "controlPlane.metadata");
+  assertKnownKeys(
+    metadata,
+    ["region", "zone", "version", "endpoint", "labels"],
+    "controlPlane.metadata",
+  );
+  const region = optionalString(metadata, "region", "controlPlane.metadata.region");
+  const zone = optionalString(metadata, "zone", "controlPlane.metadata.zone");
+  const version = optionalString(
+    metadata,
+    "version",
+    "controlPlane.metadata.version",
+  );
+  const endpoint = optionalString(
+    metadata,
+    "endpoint",
+    "controlPlane.metadata.endpoint",
+  );
+  const labels =
+    metadata["labels"] === undefined
+      ? undefined
+      : normalizeLabels(metadata["labels"], "controlPlane.metadata.labels");
+  return {
+    ...(region === undefined ? {} : { region }),
+    ...(zone === undefined ? {} : { zone }),
+    ...(version === undefined ? {} : { version }),
+    ...(endpoint === undefined ? {} : { endpoint }),
+    ...(labels === undefined ? {} : { labels }),
+  };
+}
+
+function normalizeControlPlane(
+  value: unknown,
+  pools: readonly PoolConfig[],
+  sourcePath: string,
+): LatchfloRuntimeConfig | undefined {
+  if (value === undefined) return undefined;
+  const controlPlane = objectValue(value, "controlPlane");
+  assertKnownKeys(
+    controlPlane,
+    [
+      "type",
+      "url",
+      "instanceId",
+      "pools",
+      "bootstrapTokenEnv",
+      "agentTokenFile",
+      "retryIntervalMs",
+      "retryMaxIntervalMs",
+      "requestTimeoutMs",
+      "metadata",
+    ],
+    "controlPlane",
+  );
+  const type = requiredString(controlPlane["type"], "controlPlane.type");
+  if (type !== "latchflo") {
+    throw new Error('controlPlane.type must be "latchflo"');
+  }
+  const url = absoluteHttpUrl(controlPlane["url"], "controlPlane.url");
+  const instanceId = requiredString(
+    controlPlane["instanceId"],
+    "controlPlane.instanceId",
+  );
+  const configuredPools = controlPlane["pools"];
+  let managedPools: string[];
+  if (configuredPools === undefined) {
+    managedPools = pools.map((pool) => pool.name);
+  } else {
+    if (!Array.isArray(configuredPools) || configuredPools.length === 0) {
+      throw new Error("controlPlane.pools must be a non-empty array");
+    }
+    managedPools = configuredPools.map((pool, index) =>
+      requiredString(pool, `controlPlane.pools[${index}]`),
+    );
+  }
+  if (new Set(managedPools).size !== managedPools.length) {
+    throw new Error("controlPlane.pools must not contain duplicates");
+  }
+  const knownPools = new Set(pools.map((pool) => pool.name));
+  for (const pool of managedPools) {
+    if (!knownPools.has(pool)) {
+      throw new Error(`controlPlane.pools references unknown Tyr pool ${pool}`);
+    }
+  }
+  const poolsByName = new Map(pools.map((pool) => [pool.name, pool]));
+  for (const poolName of managedPools) {
+    const pool = poolsByName.get(poolName);
+    if (pool === undefined) continue;
+    if (pool.maxConcurrent !== 0) {
+      throw new Error(
+        `Latchflo-managed pool ${poolName} must start with maxConcurrent: 0`,
+      );
+    }
+    if ((pool.maxQueue ?? 0) !== 0) {
+      throw new Error(
+        `Latchflo-managed pool ${poolName} must start with maxQueue: 0`,
+      );
+    }
+    if ((pool.initialRevision ?? 0) !== 0) {
+      throw new Error(
+        `Latchflo-managed pool ${poolName} must start with limitsRevision: 0`,
+      );
+    }
+    if ((pool.admissionMode ?? "enforce") !== "enforce") {
+      throw new Error(
+        `Latchflo-managed pool ${poolName} must use admissionMode: enforce`,
+      );
+    }
+  }
+  const bootstrapTokenEnv =
+    optionalString(
+      controlPlane,
+      "bootstrapTokenEnv",
+      "controlPlane.bootstrapTokenEnv",
+    ) ?? "LATCHFLO_AGENT_BOOTSTRAP_TOKEN";
+  const agentTokenFileValue = optionalString(
+    controlPlane,
+    "agentTokenFile",
+    "controlPlane.agentTokenFile",
+  );
+  const agentTokenFile =
+    agentTokenFileValue === undefined
+      ? undefined
+      : resolve(dirname(sourcePath), agentTokenFileValue);
+  const retryIntervalMs =
+    optionalInteger(
+      controlPlane,
+      "retryIntervalMs",
+      "controlPlane.retryIntervalMs",
+      { min: 100 },
+    ) ?? 1_000;
+  const retryMaxIntervalMs =
+    optionalInteger(
+      controlPlane,
+      "retryMaxIntervalMs",
+      "controlPlane.retryMaxIntervalMs",
+      { min: retryIntervalMs },
+    ) ?? 30_000;
+  const requestTimeoutMs =
+    optionalInteger(
+      controlPlane,
+      "requestTimeoutMs",
+      "controlPlane.requestTimeoutMs",
+      { min: 100 },
+    ) ?? 5_000;
+  const metadata = normalizeControlPlaneMetadata(controlPlane["metadata"]);
+  return {
+    url,
+    instanceId,
+    pools: managedPools,
+    bootstrapTokenEnv,
+    ...(agentTokenFile === undefined ? {} : { agentTokenFile }),
+    retryIntervalMs,
+    retryMaxIntervalMs,
+    requestTimeoutMs,
+    ...(metadata === undefined ? {} : { metadata }),
+  };
+}
+
 function normalizePool(value: unknown, index: number): PoolConfig {
   const field = `pools[${index}]`;
   const pool = objectValue(value, field);
@@ -452,7 +637,7 @@ function normalizePool(value: unknown, index: number): PoolConfig {
   const maxConcurrent = requiredInteger(
     pool["maxConcurrent"],
     `${field}.maxConcurrent`,
-    { min: 1 },
+    { min: 0 },
   );
   const maxQueue = optionalInteger(
     pool,
@@ -636,6 +821,7 @@ function normalizeFileConfiguration(
       "shutdown",
       "priority",
       "pools",
+      "controlPlane",
     ],
     "configuration",
   );
@@ -743,6 +929,12 @@ function normalizeFileConfiguration(
     }
   }
 
+  const controlPlane = normalizeControlPlane(
+    root["controlPlane"],
+    pools,
+    source.path,
+  );
+
   return {
     port,
     gateway: {
@@ -759,6 +951,7 @@ function normalizeFileConfiguration(
       trustPriorityHeader,
       pools,
     },
+    ...(controlPlane === undefined ? {} : { controlPlane }),
     source: {
       kind: "file",
       path: source.path,

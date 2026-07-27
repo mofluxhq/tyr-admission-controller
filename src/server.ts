@@ -97,6 +97,8 @@ export type GatewayOptions = {
    * strips client copies and injects the header itself.
    */
   trustPriorityHeader?: boolean;
+  /** Optional process-level readiness gate, such as managed control-plane state. */
+  isReady?: () => boolean;
   pools: PoolConfig[];
 };
 
@@ -310,6 +312,9 @@ function validateGatewayOptions(opts: GatewayOptions): void {
     typeof opts.trustPriorityHeader !== "boolean"
   ) {
     throw new Error("trustPriorityHeader must be a boolean");
+  }
+  if (opts.isReady !== undefined && typeof opts.isReady !== "function") {
+    throw new Error("isReady must be a function");
   }
 }
 
@@ -699,6 +704,17 @@ export function createGateway(opts: GatewayOptions) {
     }
     if (req.method === "GET" && pathname === "/healthz") {
       sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === "GET" && pathname === "/readyz") {
+      const ready = opts.isReady?.() ?? true;
+      sendJson(
+        res,
+        ready ? 200 : 503,
+        ready
+          ? { ok: true }
+          : { ok: false, reason: "control_plane_not_ready" },
+      );
       return;
     }
     sendJson(res, 404, { error: { type: "not_found" } });

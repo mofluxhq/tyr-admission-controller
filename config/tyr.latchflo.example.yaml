@@ -1,0 +1,50 @@
+# Tyr 0.13 first-class Latchflo managed-mode example.
+version: 1
+
+server:
+  port: 8787
+
+upstreams:
+  openai:
+    baseUrl: http://mock-provider:9000
+
+timeouts:
+  responseHeadersMs: 30000
+  streamIdleMs: 30000
+  clientStallMs: 30000
+
+shutdown:
+  drainTimeoutMs: 30000
+
+priority:
+  trustHeader: false
+
+pools:
+  - name: openai-primary
+    modelPrefixes: [gpt, o1, o3, o4]
+    estimatorModel: gpt-4o
+    # Managed pools must begin closed. Latchflo's first odd revision opens them.
+    maxConcurrent: 0
+    maxQueue: 0
+    limitsRevision: 0
+    admissionMode: enforce
+    defaultOutputReservation: 4096
+
+controlPlane:
+  type: latchflo
+  url: http://latchflo-control-plane:8080
+  instanceId: tyr-a
+  pools: [openai-primary]
+  bootstrapTokenEnv: LATCHFLO_AGENT_BOOTSTRAP_TOKEN
+  agentTokenFile: /var/lib/tyr/latchflo-agent.token
+  # Startup retries use bounded exponential backoff with equal jitter.
+  retryIntervalMs: 1000
+  retryMaxIntervalMs: 30000
+  requestTimeoutMs: 5000
+  metadata:
+    region: us-west
+    zone: us-west-2a
+    version: 0.13.0
+    endpoint: http://tyr-a:8787
+    labels:
+      environment: demo

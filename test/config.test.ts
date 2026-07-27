@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   loadRuntimeConfig,
   loadRuntimeConfigFile,
@@ -136,6 +136,121 @@ pools:
     expect(config.port).toBe(8787);
     expect(config.gateway.trustPriorityHeader).toBe(false);
     expect(config.gateway.pools[0]?.budget).toBe(0);
+  });
+
+  it("loads first-class Latchflo managed-mode configuration", () => {
+    const path = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: http://mock-provider:9000 }
+pools:
+  - name: openai-primary
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 0
+    maxQueue: 0
+    limitsRevision: 0
+    admissionMode: enforce
+controlPlane:
+  type: latchflo
+  url: http://latchflo:8080/
+  instanceId: tyr-a
+  bootstrapTokenEnv: DEMO_BOOTSTRAP_TOKEN
+  agentTokenFile: ./state/agent.token
+  retryIntervalMs: 500
+  retryMaxIntervalMs: 5000
+  requestTimeoutMs: 1500
+  metadata:
+    region: us-west
+    zone: us-west-2a
+    version: 0.13.0
+    endpoint: http://tyr-a:8787
+    labels:
+      environment: demo
+`);
+    const config = loadRuntimeConfigFile(path);
+    expect(config.controlPlane).toEqual({
+      url: "http://latchflo:8080",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      bootstrapTokenEnv: "DEMO_BOOTSTRAP_TOKEN",
+      agentTokenFile: join(dirname(path), "state", "agent.token"),
+      retryIntervalMs: 500,
+      retryMaxIntervalMs: 5000,
+      requestTimeoutMs: 1500,
+      metadata: {
+        region: "us-west",
+        zone: "us-west-2a",
+        version: "0.13.0",
+        endpoint: "http://tyr-a:8787",
+        labels: { environment: "demo" },
+      },
+    });
+  });
+
+  it("rejects unknown or duplicate Latchflo pool references", () => {
+    const unknown = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: http://localhost:9000 }
+pools:
+  - name: known
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 1
+controlPlane:
+  type: latchflo
+  url: http://localhost:8080
+  instanceId: tyr-a
+  pools: [missing]
+`, "unknown-control-pool.yaml");
+    expect(() => loadRuntimeConfigFile(unknown)).toThrow(/unknown Tyr pool missing/);
+
+    const duplicate = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: http://localhost:9000 }
+pools:
+  - name: known
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 1
+controlPlane:
+  type: latchflo
+  url: http://localhost:8080
+  instanceId: tyr-a
+  pools: [known, known]
+`, "duplicate-control-pool.yaml");
+    expect(() => loadRuntimeConfigFile(duplicate)).toThrow(/must not contain duplicates/);
+  });
+
+
+
+  it("requires every Latchflo-managed pool to start fail closed", () => {
+    const cases = [
+      ["maxConcurrent: 1", /must start with maxConcurrent: 0/],
+      ["maxConcurrent: 0\n    maxQueue: 1", /must start with maxQueue: 0/],
+      ["maxConcurrent: 0\n    limitsRevision: 2", /must start with limitsRevision: 0/],
+      ["maxConcurrent: 0\n    admissionMode: observe", /must use admissionMode: enforce/],
+    ] as const;
+
+    for (const [index, [poolSettings, expected]] of cases.entries()) {
+      const path = tempConfig(`
+version: 1
+upstreams:
+  openai: { baseUrl: http://localhost:9000 }
+pools:
+  - name: managed
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    ${poolSettings}
+controlPlane:
+  type: latchflo
+  url: http://localhost:8080
+  instanceId: tyr-a
+`, `managed-${index}.yaml`);
+      expect(() => loadRuntimeConfigFile(path)).toThrow(expected);
+    }
   });
 
   it("loads the opaque-media reservation override", () => {
