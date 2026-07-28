@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.13.0` managed-mode release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.14.0` telemetry release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.13.0
+## Current baseline: v0.14.0
 
 The current release provides:
 
@@ -44,12 +44,24 @@ The current release provides:
 - Bounded graceful drain with outstanding-work reporting.
 - Strict startup validation, YAML configuration, offline validation, Docker and
   Compose assets, and expanded local policy statistics.
+- Native bounded-cardinality Prometheus metrics, optional structured admission
+  audit events, operator-token protection, and a provisioned Grafana demo.
 
 Known commercial limitations include a single-controller SQLite control plane, no authenticated
-tenant/application identity, no OpenTelemetry exporter, limited protocol
+tenant/application identity, no OTLP exporter or durable audit store, limited protocol
 coverage, and no hardened multi-region deployment package.
 
 ## Release sequence
+
+### v0.14.0 — Production telemetry and demonstrable value
+
+**Status:** Released 2026-07-28
+
+- Added bounded Prometheus metrics for capacity, admission, rejection, token,
+  duration, upstream, readiness, grant, and Latchflo failure signals.
+- Added structured admission audit records with settlement and final usage.
+- Added optional operator bearer protection for `/stats` and `/metrics`.
+- Added a local Prometheus/Grafana/mock-provider overload demonstration.
 
 ### v0.13.0 — First-class Latchflo managed mode
 
@@ -117,10 +129,11 @@ Outcome:
 - Clients and operators can correlate an admitted HTTP request with its
   reservation lifecycle using one stable identifier.
 
-Remaining limitations carried into the next milestone:
+Limitations at that release:
 
-- No standard metrics exporter, authenticated tenant/application identity,
-  protected operational endpoints, or structured audit event stream.
+- Standard metrics export, operator protection, and structured audit events were
+  delivered later in v0.14.0; authenticated tenant/application identity remains
+  future work.
 
 ### v0.9.0 — Adaptive and observable admission policy
 
@@ -145,10 +158,11 @@ Outcome:
 - Estimation can adapt to workload and tokenizer drift while remaining bounded.
 - Shutdown no longer needs to wait forever on a stalled stream.
 
-Remaining limitations carried into the next milestone:
+Limitations at that release:
 
-- No standard metrics exporter, authenticated tenant/application identity,
-  protected operational endpoints, or structured audit event stream.
+- Standard metrics export, operator protection, and structured audit events were
+  delivered later in v0.14.0; authenticated tenant/application identity remains
+  future work.
 
 ### v0.10.0 — Versioned data-plane control
 
@@ -172,9 +186,11 @@ Outcome:
 - Tyr can safely reduce or restore local capacity without restarting or cancelling active work.
 - Delayed or duplicated control messages cannot overwrite a newer local revision.
 
-Remaining limitations carried into the next milestone:
+Limitations at that release:
 
-- No central distributor, grant TTL, allocator epoch, identity layer, standard telemetry exporter, or durable audit stream.
+- Latchflo-managed expiring grants arrived in v0.13.0 and Prometheus/audit
+  telemetry arrived in v0.14.0; identity and durable audit storage remain future
+  work.
 
 ### v0.11.0 — Provenance-correct distributed admission
 
@@ -200,59 +216,68 @@ Outcome:
 - Operators can trace each decision to the exact versioned, expiring capacity
   grant that governed it.
 
-### v0.12.0 — Observable and identifiable
+### v0.15.0 — Authenticated identity and telemetry export
 
 **Target duration:** 2–3 weeks
-**Goal:** Make Tyr safe to pilot and capable of proving that admission control improves production outcomes.
+**Goal:** Make Tyr safe for authenticated design-partner pilots and integrate its
+telemetry with existing observability pipelines.
 
 Planned work:
 
-- Add OpenTelemetry metrics with OTLP and Prometheus export options.
-- Record admission and rejection counts by bounded pool, provider, priority, and reason labels.
-- Export active token hold, configured budget, available capacity, and active request counts.
-- Record provider `429`, response-timeout, idle-timeout, usage-overrun, client-disconnect, and stream-stall events.
-- Record estimated, reserved, consumed, and refunded token values without high-cardinality metric labels.
 - Add JWT verification using configurable issuers, audiences, and JWKS endpoints.
-- Derive a request context containing `tenantId`, `applicationId`, `subject`, and roles from verified claims.
-- Protect `/stats` and future administration routes with role-based authorization.
-- Emit structured admission audit events with decision, reason, request identity, pool, model, priority, reservation, and relevant capacity snapshot.
-- Add `/readyz` and make readiness false during shutdown.
+- Derive a request context containing `tenantId`, `applicationId`, `subject`, and
+  roles from verified claims.
+- Authorize operator endpoints by role while retaining the simple bearer-token
+  option for local deployments.
+- Add OTLP/OpenTelemetry export without removing the built-in Prometheus endpoint.
+- Add a documented durable audit-sink interface and identity fields to structured
+  audit events.
+- Add cardinality and authentication regression coverage.
 
 Exit criteria:
 
-- A local saturation test visibly correlates Tyr rejections with reduced upstream `429` responses.
-- No unauthenticated request can obtain high priority or access protected operational data.
-- Metrics pass cardinality tests and do not use tenant, subject, or request ID as default labels.
-- Every admission and rejection produces a documented reason and structured audit event.
+- No unauthenticated request can obtain high priority or access protected
+  operational data.
+- Identity fields never become unbounded default metric labels.
+- The same admission signals can be exported through Prometheus or OTLP.
 
 Deferred from this release:
 
 - Managed API-key issuance and rotation.
-- Durable audit storage or a search UI.
 - Per-tenant bulkhead instances.
+- A bundled audit search UI.
 
-### v0.13.0 — Ecosystem and modern OpenAI support
+### v0.16.0 — Ecosystem and modern OpenAI support
 
 **Target duration:** 2–3 weeks
-**Goal:** Reduce adoption friction and support the most commercially important modern OpenAI workload.
+**Goal:** Reduce adoption friction and support the most commercially important
+modern OpenAI workload.
 
 Planned work:
 
 - Add an OpenAI Responses API adapter with streaming usage accounting.
-- Account for instructions, input items, tool definitions, tool calls, images, files, and response output limits.
-- Add direct OpenAI and Anthropic SDK integration examples and automated smoke tests.
+- Account for instructions, input items, tool definitions, tool calls, images,
+  files, and response output limits.
+- Add direct OpenAI and Anthropic SDK integration examples and automated smoke
+  tests.
 - Add tested vLLM/OpenAI-compatible endpoint support and deployment guidance.
-- Add a tested LiteLLM chaining configuration and identity-header propagation contract.
-- Document a generic reverse-proxy integration contract for existing internal gateways.
+- Add a tested LiteLLM chaining configuration and identity-header propagation
+  contract.
+- Document a generic reverse-proxy integration contract for existing internal
+  gateways.
 - Publish an error and admission-reason compatibility reference.
 - Add bounded non-streaming upstream response buffering.
-- Forward a documented allowlist of provider diagnostic headers, including request identifiers where available.
+- Forward a documented allowlist of provider diagnostic headers, including
+  request identifiers where available.
 
 Exit criteria:
 
-- OpenAI Responses non-streaming and streaming requests pass admission, usage-correction, disconnect, timeout, and malformed-input tests.
-- Direct SDK, vLLM, and LiteLLM examples run in CI against deterministic test services.
-- An existing gateway can propagate authenticated tenant and application identity without exposing trusted priority headers to clients.
+- OpenAI Responses non-streaming and streaming requests pass admission,
+  usage-correction, disconnect, timeout, and malformed-input tests.
+- Direct SDK, vLLM, and LiteLLM examples run in CI against deterministic test
+  services.
+- An existing gateway can propagate authenticated tenant and application
+  identity without exposing trusted priority headers to clients.
 
 Deferred from this release:
 
@@ -260,62 +285,69 @@ Deferred from this release:
 - Generic MCP session accounting.
 - Native Kong or Envoy extensions.
 
-### v0.14.0 — Distributed token leases
+### v0.17.0 — Fleet coordination hardening
 
 **Target duration:** 4–6 weeks
-**Goal:** Enforce one capacity budget across multiple Tyr replicas.
+**Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas
+and remove the remaining single-controller operational dependency.
 
 Planned work:
 
-- Introduce a coordination interface independent of Redis-specific types.
-- Implement Redis-backed atomic token and concurrency leases.
-- Use unique lease IDs, bounded TTLs, heartbeats, idempotent release, and expired-lease reclamation.
-- Define fail-open and fail-closed behavior explicitly per pool; default protected pools to fail closed.
-- Ensure usage growth and refunds update distributed holds atomically.
-- Add runtime pool-budget updates and zero-budget admission kill switches.
-- Expose coordinator health, lease age, reclamation, conflict, and degraded-mode metrics.
-- Add multi-process and fault-injection tests for crash recovery, network interruption, clock skew, duplicate release, and Redis failover.
-- Document conservative capacity behavior during coordinator loss.
+- Define and test multi-controller failover semantics for Latchflo grants.
+- Preserve monotonic controller epochs, revisions, and grant expiration across
+  failover.
+- Add allocator conflict, stale-leader, clock-skew, and network-partition tests.
+- Expose controller health, grant age, expiration, conflict, and degraded-mode
+  metrics.
+- Add multi-process Tyr and control-plane fault-injection tests.
+- Publish conservative fail-closed deployment and recovery guidance.
 
 Exit criteria:
 
-- Multiple gateway replicas cannot collectively admit more than the configured distributed budget, except for a documented bounded overrun caused by post-admission usage correction.
-- A crashed replica's abandoned capacity is reclaimed within the configured lease window.
-- Duplicate, delayed, or reordered lease operations cannot create capacity.
-- Operators can disable a pool across all replicas without restarting them.
+- Multiple Tyr replicas cannot collectively exceed the capacity assigned by the
+  active Latchflo controller.
+- Controller failover cannot revive stale grants or create capacity.
+- Operators can identify stale, expiring, and conflicted grants from telemetry.
 
 Non-goals:
 
-- Building a custom centralized coordinator.
+- Embedding a second coordination system directly in Tyr.
 - Automatically discovering provider quotas.
-- Kubernetes-only budget partitioning as the primary correctness mechanism.
+- Making Kubernetes the source of admission correctness.
 
-### v0.15.0 — Tenant policy and fairness
+### v0.18.0 — Tenant policy and fairness
 
 **Target duration:** 2–4 weeks
-**Goal:** Support paid multi-tenant deployments without creating unbounded gateway state.
+**Goal:** Support paid multi-tenant deployments without creating unbounded gateway
+state.
 
 Planned work:
 
 - Add model-access allow and deny policies by tenant and application.
-- Add bounded per-tenant token, concurrency, and priority policies within shared physical pools.
+- Add bounded per-tenant token, concurrency, and priority policies within shared
+  physical pools.
 - Add weighted or reserved capacity for selected service classes.
-- Define deterministic policy precedence across global, pool, tenant, and application scopes.
+- Define deterministic policy precedence across global, pool, tenant, and
+  application scopes.
 - Add policy versioning, validation, dry-run evaluation, and atomic reload.
 - Include policy identifiers and versions in audit events.
 - Add fairness and noisy-neighbor tests across multiple tenants and priorities.
-- Add optional durable audit export through OpenTelemetry logs or a documented sink interface.
+- Add optional durable audit export through OpenTelemetry logs or a documented
+  sink interface.
 
 Exit criteria:
 
-- A tenant cannot access a disallowed model or consume another tenant's reserved capacity.
+- A tenant cannot access a disallowed model or consume another tenant's reserved
+  capacity.
 - Policy reload cannot partially apply an invalid configuration.
-- Tenant churn does not create unbounded timers, metric series, or bulkhead objects.
-- Saturation tests demonstrate that interactive traffic remains available while lower-priority batch work is shed.
+- Tenant churn does not create unbounded timers, metric series, or bulkhead
+  objects.
+- Saturation tests demonstrate that interactive traffic remains available while
+  lower-priority batch work is shed.
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.14.0
+**Target duration:** 3–5 weeks after v0.18.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:

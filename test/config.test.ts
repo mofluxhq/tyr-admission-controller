@@ -38,6 +38,11 @@ shutdown:
   drainTimeoutMs: 45000
 priority:
   trustHeader: false
+telemetry:
+  metrics:
+    enabled: false
+  audit:
+    enabled: true
 upstreams:
   anthropic:
     baseUrl: https://api.anthropic.com
@@ -81,6 +86,10 @@ describe("file configuration", () => {
     expect(config.gateway.idleTimeoutMs).toBe(20_000);
     expect(config.gateway.clientStallTimeoutMs).toBe(30_000);
     expect(config.gateway.shutdownDrainTimeoutMs).toBe(45_000);
+    expect(config.gateway.telemetry).toEqual({
+      metricsEnabled: false,
+      auditEnabled: true,
+    });
     expect(config.gateway.pools).toEqual([
       {
         name: "interactive",
@@ -135,6 +144,10 @@ pools:
     const config = loadRuntimeConfigFile(path);
     expect(config.port).toBe(8787);
     expect(config.gateway.trustPriorityHeader).toBe(false);
+    expect(config.gateway.telemetry).toEqual({
+      metricsEnabled: true,
+      auditEnabled: false,
+    });
     expect(config.gateway.pools[0]?.budget).toBe(0);
   });
 
@@ -431,6 +444,27 @@ pools:
     ).toThrow(/ADAPTIVE_MAX_CORRECTION/);
   });
 
+  it("allows operational telemetry environment overrides in file mode", () => {
+    const path = tempConfig(validConfig);
+    const config = loadRuntimeConfigFile(path, {
+      TYR_METRICS_ENABLED: "true",
+      TYR_AUDIT_ENABLED: "false",
+      TYR_OPERATOR_BEARER_TOKEN: "operator-secret",
+    });
+    expect(config.gateway.telemetry).toEqual({
+      metricsEnabled: true,
+      auditEnabled: false,
+    });
+    expect(config.gateway.operatorBearerToken).toBe("operator-secret");
+  });
+
+  it("validates telemetry environment booleans", () => {
+    const path = tempConfig(validConfig);
+    expect(() =>
+      loadRuntimeConfigFile(path, { TYR_METRICS_ENABLED: "sometimes" }),
+    ).toThrow(/TYR_METRICS_ENABLED/);
+  });
+
   it("reports malformed YAML and missing files", () => {
     const malformed = tempConfig("version: 1\npools: [\n");
     expect(() => loadRuntimeConfigFile(malformed)).toThrow(/invalid YAML/);
@@ -470,9 +504,17 @@ pools:
       ADAPTIVE_MAX_CORRECTION: "1.7",
       ADAPTIVE_MAX_MODELS: "10",
       SHUTDOWN_DRAIN_TIMEOUT_MS: "25000",
+      TYR_METRICS_ENABLED: "false",
+      TYR_AUDIT_ENABLED: "true",
+      TYR_OPERATOR_BEARER_TOKEN: "legacy-secret",
     });
     expect(config.source).toEqual({ kind: "environment" });
     expect(config.gateway.shutdownDrainTimeoutMs).toBe(25_000);
+    expect(config.gateway.telemetry).toEqual({
+      metricsEnabled: false,
+      auditEnabled: true,
+    });
+    expect(config.gateway.operatorBearerToken).toBe("legacy-secret");
     expect(config.gateway.pools[0]).toMatchObject({
       budget: 0,
       admissionMode: "observe",

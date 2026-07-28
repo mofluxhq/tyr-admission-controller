@@ -1,6 +1,7 @@
-Release Tyr 0.13.0 with first-class Latchflo managed mode
+Release Tyr 0.14.0 with Prometheus telemetry and admission auditing
 
-Add configuration-driven registration, desired-state polling, persisted rotated
-agent credentials, readiness gating, strict grant validation, and local
-fail-closed expiration. Upgrade async-bulkhead-llm to 3.12.0 so managed pools can
-start at zero concurrency and remain closed until the first valid grant arrives.
+Add bounded-cardinality Prometheus metrics, optional structured admission audit
+events, bearer-token protection for operator endpoints, Latchflo failure metrics,
+and a provisioned local Prometheus/Grafana overload demo. Include configuration,
+documentation, and runtime coverage for admitted, rejected, bypassed, timeout, and
+upstream-failure paths.

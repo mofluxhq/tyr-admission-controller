@@ -1,8 +1,10 @@
+import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import {
   LLMBulkheadRejectedError,
   type LLMRejectReason,
   type LLMPriority,
+  type TokenUsage,
 } from "async-bulkhead-llm";
 import {
   createPools,
@@ -16,6 +18,13 @@ import {
 } from "./pools.js";
 import type { LLMAdmissionLimits } from "async-bulkhead-llm";
 import { anthropicAdapter, openaiAdapter, type Adapter } from "./adapters.js";
+import {
+  TyrTelemetry,
+  type TyrAdmissionAuditEvent,
+  type TyrAuditSettlement,
+  type TyrRequestOutcome,
+  type TyrTelemetryOptions,
+} from "./telemetry.js";
 
 export type GatewayOptions = {
   /**
@@ -99,6 +108,10 @@ export type GatewayOptions = {
   trustPriorityHeader?: boolean;
   /** Optional process-level readiness gate, such as managed control-plane state. */
   isReady?: () => boolean;
+  /** Prometheus and structured admission-audit configuration. */
+  telemetry?: TyrTelemetryOptions;
+  /** Optional bearer token protecting /stats and /metrics. */
+  operatorBearerToken?: string;
   pools: PoolConfig[];
 };
 
@@ -207,6 +220,46 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
+function sendText(
+  res: ServerResponse,
+  status: number,
+  body: string,
+  contentType: string,
+): void {
+  res.writeHead(status, {
+    "content-type": contentType,
+    "content-length": Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
+function bearerTokenMatches(
+  req: IncomingMessage,
+  expectedToken: string | undefined,
+): boolean {
+  if (expectedToken === undefined) return true;
+  const authorization = req.headers.authorization;
+  if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) {
+    return false;
+  }
+  const supplied = Buffer.from(authorization.slice("Bearer ".length), "utf8");
+  const expected = Buffer.from(expectedToken, "utf8");
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function requestOutcomeForStatus(status: number): TyrRequestOutcome {
+  if (status >= 500) return "upstream_5xx";
+  if (status >= 400) return "upstream_4xx";
+  return "success";
+}
+
+function upstreamOutcomeForStatus(status: number): string {
+  if (status >= 500) return "5xx";
+  if (status >= 400) return "4xx";
+  if (status >= 300) return "3xx";
+  return "2xx";
+}
+
 // Resolves once the response's write buffer has drained below its
 // highWaterMark, or once the response closes — whichever comes first.
 // Resolving on 'close' prevents hanging forever if the client disconnects
@@ -226,6 +279,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 export function waitForDrain(
   res: ServerResponse,
   timeoutMs?: number,
+  onTimeout?: () => void,
 ): Promise<void> {
   if (res.destroyed) return Promise.resolve();
 
@@ -251,6 +305,7 @@ export function waitForDrain(
       timer = setTimeout(() => {
         // Does not resolve directly — destroying triggers 'close' above,
         // which is the single source of truth for "give up" resolution.
+        onTimeout?.();
         res.destroy();
       }, timeoutMs);
     }
@@ -316,11 +371,38 @@ function validateGatewayOptions(opts: GatewayOptions): void {
   if (opts.isReady !== undefined && typeof opts.isReady !== "function") {
     throw new Error("isReady must be a function");
   }
+  if (
+    opts.operatorBearerToken !== undefined &&
+    (typeof opts.operatorBearerToken !== "string" ||
+      opts.operatorBearerToken.trim().length === 0)
+  ) {
+    throw new Error("operatorBearerToken must be a non-empty string");
+  }
+  if (
+    opts.telemetry?.metricsEnabled !== undefined &&
+    typeof opts.telemetry.metricsEnabled !== "boolean"
+  ) {
+    throw new Error("telemetry.metricsEnabled must be a boolean");
+  }
+  if (
+    opts.telemetry?.auditEnabled !== undefined &&
+    typeof opts.telemetry.auditEnabled !== "boolean"
+  ) {
+    throw new Error("telemetry.auditEnabled must be a boolean");
+  }
+  if (
+    opts.telemetry?.auditSink !== undefined &&
+    typeof opts.telemetry.auditSink !== "function"
+  ) {
+    throw new Error("telemetry.auditSink must be a function");
+  }
 }
 
 export function createGateway(opts: GatewayOptions) {
   validateGatewayOptions(opts);
   const pools = createPools(opts.pools);
+  const telemetry = new TyrTelemetry(opts.telemetry);
+  const operatorBearerToken = opts.operatorBearerToken;
   const control: TyrControlPlane = Object.freeze({
     limits: () => pools.limits(),
     stats: () => pools.stats(),
@@ -355,6 +437,7 @@ export function createGateway(opts: GatewayOptions) {
       req: IncomingMessage,
       res: ServerResponse,
     ): Promise<void> {
+      const requestStartedAt = performance.now();
       let raw: Buffer;
       try {
         raw = await readBody(req, maxRequestBodyBytes);
@@ -373,6 +456,7 @@ export function createGateway(opts: GatewayOptions) {
         }
         throw err;
       }
+
       let parsed: unknown;
       try {
         parsed = JSON.parse(raw.toString("utf8"));
@@ -419,7 +503,7 @@ export function createGateway(opts: GatewayOptions) {
       }
 
       // Calculate one immutable reservation and pass it verbatim to both the
-      // detailed advisory check and the authoritative v3.11 admission path.
+      // detailed advisory check and the authoritative admission path.
       const preparation = pool.prepare(llmRequest, priority);
       res.setHeader("x-admission-mode", preparation.mode);
       res.setHeader(
@@ -446,34 +530,67 @@ export function createGateway(opts: GatewayOptions) {
       }
 
       const wantsStream = adapter.isStreamRequested(body);
-
-      // Abort upstream work if the client disconnects. Response-timeout and
-      // idle-timeout are layered on top of the same controller below, so
-      // whichever fires first — client disconnect, response timeout, or
-      // stream stall — aborts the in-flight upstream call.
       const abort = new AbortController();
-      res.on("close", () => {
-        if (!res.writableEnded) abort.abort();
-      });
       const admissionSignal: AbortSignal = abort.signal;
+      let failureKind:
+        | "response_timeout"
+        | "idle_timeout"
+        | "client_disconnect"
+        | "client_stall"
+        | undefined;
+      let observedUsage: TokenUsage | undefined;
+      let requestRecorded = false;
+      let admissionAudit:
+        | Omit<
+            TyrAdmissionAuditEvent,
+            "schema" | "timestamp" | "event" | "settlement" | "usage"
+          >
+        | undefined;
 
-      // Tracks which timeout (if any) triggered the abort, so the catch
-      // block can report the right error type.
-      let timeoutKind: "response" | "idle" | undefined;
+      const recordRequest = (outcome: TyrRequestOutcome): void => {
+        if (requestRecorded) return;
+        requestRecorded = true;
+        telemetry.recordRequest({
+          pool: pool.name,
+          provider: adapter.shape,
+          outcome,
+          durationSeconds: (performance.now() - requestStartedAt) / 1_000,
+        });
+      };
+
+      const emitAdmissionAudit = (
+        settlement: TyrAuditSettlement,
+        usage?: TokenUsage,
+      ): void => {
+        if (admissionAudit === undefined) return;
+        telemetry.emitAdmissionAudit({
+          ...admissionAudit,
+          settlement,
+          ...(usage === undefined ? {} : { usage }),
+        });
+        admissionAudit = undefined;
+      };
+
+      res.on("close", () => {
+        if (!res.writableEnded) {
+          failureKind ??= "client_disconnect";
+          abort.abort();
+        }
+      });
 
       const headers: Record<string, string> = {};
-      for (const h of adapter.forwardHeaders) {
-        const v = req.headers[h];
-        if (typeof v === "string") headers[h] = v;
+      for (const header of adapter.forwardHeaders) {
+        const value = req.headers[header];
+        if (typeof value === "string") headers[header] = value;
       }
 
       try {
-        await pool.run(
+        const result = await pool.run(
           llmRequest,
           preparation,
           async (signal, ctx) => {
             if (ctx !== undefined) {
-              // Stable v3.11 identity and native observe-mode outcome.
+              // Stable admission identity and native observe-mode outcome.
               res.setHeader("x-admission-id", ctx.admissionId);
               res.setHeader("x-admission-outcome", ctx.admission);
               res.setHeader("x-admission-revision", String(ctx.limitRevision));
@@ -481,141 +598,181 @@ export function createGateway(opts: GatewayOptions) {
               if (ctx.bypassReason !== undefined) {
                 res.setHeader("x-admission-bypass-reason", ctx.bypassReason);
               }
-            }
 
-            // Response timeout: bounds how long we wait for the upstream to
-            // send response headers (i.e. for fetch() to resolve). Cleared
-            // the instant headers arrive — it has no bearing on how long a
-            // streaming body may subsequently run.
-            let responseTimer: ReturnType<typeof setTimeout> | undefined;
-            if (responseTimeoutMs !== undefined) {
-              responseTimer = setTimeout(() => {
-                timeoutKind = "response";
-                abort.abort();
-              }, responseTimeoutMs);
-            }
-
-            let upstreamRes: Response;
-            try {
-              upstreamRes = await fetch(`${upstream}${adapter.path}`, {
-                method: "POST",
-                headers,
-                body: raw,
-                ...(signal !== undefined ? { signal } : {}),
+              telemetry.recordAdmissionStart({
+                pool: pool.name,
+                priority,
+                outcome: ctx.admission,
               });
-            } finally {
-              if (responseTimer !== undefined) clearTimeout(responseTimer);
+              admissionAudit = {
+                outcome: ctx.admission,
+                pool: pool.name,
+                provider: adapter.shape,
+                priority,
+                model,
+                admissionId: ctx.admissionId,
+                limitRevision: ctx.limitRevision,
+                ...(ctx.bypassReason === undefined
+                  ? {}
+                  : { reason: ctx.bypassReason }),
+                ...(ctx.reservation === null
+                  ? {}
+                  : { reservedTokens: ctx.reservation.reserved }),
+                ...(ctx.provenance === undefined
+                  ? {}
+                  : { grant: ctx.provenance }),
+              };
             }
 
-            if (wantsStream && upstreamRes.body) {
+            const upstreamStartedAt = performance.now();
+            let upstreamMetricOutcome = "upstream_error";
+            try {
+              // Response timeout bounds how long fetch waits for upstream
+              // response headers. It is cleared as soon as headers arrive.
+              let responseTimer: ReturnType<typeof setTimeout> | undefined;
+              if (responseTimeoutMs !== undefined) {
+                responseTimer = setTimeout(() => {
+                  failureKind = "response_timeout";
+                  abort.abort();
+                }, responseTimeoutMs);
+              }
+
+              let upstreamRes: Response;
+              try {
+                upstreamRes = await fetch(`${upstream}${adapter.path}`, {
+                  method: "POST",
+                  headers,
+                  body: raw,
+                  ...(signal !== undefined ? { signal } : {}),
+                });
+              } finally {
+                if (responseTimer !== undefined) clearTimeout(responseTimer);
+              }
+
+              telemetry.recordUpstreamResponse({
+                pool: pool.name,
+                provider: adapter.shape,
+                status: upstreamRes.status,
+              });
+              upstreamMetricOutcome = upstreamOutcomeForStatus(
+                upstreamRes.status,
+              );
+
+              if (wantsStream && upstreamRes.body) {
+                res.writeHead(upstreamRes.status, {
+                  "content-type":
+                    upstreamRes.headers.get("content-type") ??
+                    "text/event-stream",
+                  "cache-control": "no-cache",
+                  connection: "keep-alive",
+                });
+                const extractor = adapter.createStreamExtractor((usage) => {
+                  observedUsage = usage;
+                  ctx?.reportUsage(usage);
+                });
+                const decoder = new TextDecoder();
+
+                let idleTimer: ReturnType<typeof setTimeout> | undefined;
+                const armIdleTimer = () => {
+                  if (idleTimeoutMs === undefined) return;
+                  if (idleTimer !== undefined) clearTimeout(idleTimer);
+                  idleTimer = setTimeout(() => {
+                    failureKind = "idle_timeout";
+                    abort.abort();
+                  }, idleTimeoutMs);
+                };
+
+                try {
+                  armIdleTimer();
+                  for await (const chunk of upstreamRes.body) {
+                    armIdleTimer();
+                    extractor.push(decoder.decode(chunk, { stream: true }));
+                    if (!res.write(chunk)) {
+                      await waitForDrain(res, clientStallTimeoutMs, () => {
+                        failureKind = "client_stall";
+                      });
+                    }
+                  }
+                } finally {
+                  if (idleTimer !== undefined) clearTimeout(idleTimer);
+                }
+
+                res.end();
+                observedUsage = extractor.current();
+                return { usage: observedUsage, status: upstreamRes.status };
+              }
+
+              const text = await upstreamRes.text();
               res.writeHead(upstreamRes.status, {
                 "content-type":
                   upstreamRes.headers.get("content-type") ??
-                  "text/event-stream",
-                "cache-control": "no-cache",
-                connection: "keep-alive",
+                  "application/json",
+                "content-length": Buffer.byteLength(text),
               });
-              const extractor = adapter.createStreamExtractor((usage) => {
-                ctx?.reportUsage(usage);
-              });
-              const decoder = new TextDecoder();
-
-              // Idle timeout: bounds the gap between consecutive chunks.
-              // Resets on every chunk, so a stream that keeps sending data
-              // — regardless of total duration — is never killed by this.
-              let idleTimer: ReturnType<typeof setTimeout> | undefined;
-              const armIdleTimer = () => {
-                if (idleTimeoutMs === undefined) return;
-                if (idleTimer !== undefined) clearTimeout(idleTimer);
-                idleTimer = setTimeout(() => {
-                  timeoutKind = "idle";
-                  abort.abort();
-                }, idleTimeoutMs);
-              };
+              res.end(text);
 
               try {
-                armIdleTimer();
-                for await (const chunk of upstreamRes.body) {
-                  armIdleTimer();
-                  extractor.push(decoder.decode(chunk, { stream: true }));
-                  // Backpressure: if the client's write buffer is full,
-                  // pause pulling further chunks from upstream until it
-                  // drains (or the response closes). Without this, a slow
-                  // client reading a fast upstream stream would let Node
-                  // buffer the entire response in memory unbounded.
-                  if (!res.write(chunk)) {
-                    await waitForDrain(res, clientStallTimeoutMs);
-                  }
-
-                }
-              } finally {
-                if (idleTimer !== undefined) clearTimeout(idleTimer);
+                observedUsage = adapter.parseUsage(JSON.parse(text));
+              } catch {
+                // Non-JSON upstream response: no usage to report.
               }
-
-              res.end();
-              // release() falls back to the last reported usage for refund.
-              return { usage: extractor.current() };
+              return { usage: observedUsage, status: upstreamRes.status };
+            } finally {
+              if (failureKind !== undefined) {
+                upstreamMetricOutcome = failureKind;
+              }
+              telemetry.recordUpstreamDuration({
+                pool: pool.name,
+                provider: adapter.shape,
+                outcome: upstreamMetricOutcome,
+                durationSeconds: (performance.now() - upstreamStartedAt) / 1_000,
+              });
             }
-
-            const text = await upstreamRes.text();
-            // Explicit content-length (rather than relying on Node's
-            // chunked-encoding fallback) since we've already buffered the
-            // full upstream body here — this keeps response framing
-            // deterministic for any client relying on content-length to
-            // know where one response ends and the next begins, e.g. a
-            // pipelined HTTP/1.1 client reading two responses off a
-            // single socket back-to-back.
-            res.writeHead(upstreamRes.status, {
-              "content-type":
-                upstreamRes.headers.get("content-type") ??
-                "application/json",
-              "content-length": Buffer.byteLength(text),
-            });
-            res.end(text);
-
-
-            let usage;
-            try {
-              usage = adapter.parseUsage(JSON.parse(text));
-            } catch {
-              // non-JSON upstream response: no usage to report
-            }
-            return { usage };
           },
           {
             priority,
             signal: admissionSignal,
-            getUsage: (result) => result.usage,
+            getUsage: (value) => value.usage,
           },
-
         );
+
+        recordRequest(requestOutcomeForStatus(result.status));
+        emitAdmissionAudit("completed", result.usage);
       } catch (err) {
-        if (res.headersSent) {
-          // Stream already started; nothing safe to send. Terminate.
-          res.destroy();
-          return;
-        }
         if (err instanceof LLMBulkheadRejectedError) {
           const status = rejectStatus(err.reason);
           const rejectionRevision =
             err.detail?.limitRevision ?? pool.controller.limits().revision;
-          res.setHeader(
-            "x-admission-revision",
-            String(rejectionRevision),
-          );
-          setGrantProvenanceHeaders(
-            res,
-            pool.controller.provenance(rejectionRevision),
-          );
+          const provenance = pool.controller.provenance(rejectionRevision);
+          telemetry.recordRejection({
+            pool: pool.name,
+            priority,
+            reason: err.reason,
+          });
+          telemetry.emitAdmissionAudit({
+            outcome: "rejected",
+            settlement: "rejected",
+            pool: pool.name,
+            provider: adapter.shape,
+            priority,
+            model,
+            limitRevision: rejectionRevision,
+            reason: err.reason,
+            ...(preparation.reservation === null
+              ? {}
+              : { reservedTokens: preparation.reservation.reserved }),
+            ...(provenance === undefined ? {} : { grant: provenance }),
+          });
+          recordRequest("admission_rejected");
+
+          if (res.headersSent) {
+            res.destroy();
+            return;
+          }
+          res.setHeader("x-admission-revision", String(rejectionRevision));
+          setGrantProvenanceHeaders(res, provenance);
           res.setHeader("x-admission-reason", err.reason);
           if (err.reason === "shutdown") {
-            // Tell the client (and Node's keep-alive machinery) to close
-            // this connection rather than keep it alive: the gateway is
-            // shutting down, so there's no point idling the socket for a
-            // pipelined/future request that would only be rejected again.
-            // This also lets server.close()'s callback (and therefore
-            // shutdown()) resolve promptly instead of waiting out the
-            // keep-alive timeout on an otherwise-idle connection.
             res.setHeader("connection", "close");
           }
           sendJson(res, status, {
@@ -625,32 +782,41 @@ export function createGateway(opts: GatewayOptions) {
               pool: pool.name,
               detail: err.detail ?? null,
             },
-
           });
           return;
         }
-        if (
-          err instanceof Error &&
-          (err.name === "AbortError" || err.name === "TimeoutError")
-        ) {
-          if (timeoutKind === "response") {
-            sendJson(res, 504, {
-              error: {
-                type: "response_timeout",
-                message: `upstream did not respond within ${responseTimeoutMs}ms`,
-              },
-            });
-            return;
-          }
-          if (timeoutKind === "idle") {
-            sendJson(res, 504, {
-              error: {
-                type: "idle_timeout",
-                message: `upstream stream stalled for ${idleTimeoutMs}ms`,
-              },
-            });
-            return;
-          }
+
+        const settlement: Exclude<TyrAuditSettlement, "completed" | "rejected"> =
+          failureKind ?? "upstream_error";
+        recordRequest(settlement);
+        emitAdmissionAudit(settlement, observedUsage);
+
+        if (res.headersSent) {
+          // A stream already started; no safe response body remains.
+          res.destroy();
+          return;
+        }
+        if (settlement === "client_disconnect" || settlement === "client_stall") {
+          res.destroy();
+          return;
+        }
+        if (settlement === "response_timeout") {
+          sendJson(res, 504, {
+            error: {
+              type: "response_timeout",
+              message: `upstream did not respond within ${responseTimeoutMs}ms`,
+            },
+          });
+          return;
+        }
+        if (settlement === "idle_timeout") {
+          sendJson(res, 504, {
+            error: {
+              type: "idle_timeout",
+              message: `upstream stream stalled for ${idleTimeoutMs}ms`,
+            },
+          });
+          return;
         }
         sendJson(res, 502, {
           error: {
@@ -658,7 +824,6 @@ export function createGateway(opts: GatewayOptions) {
             message: err instanceof Error ? err.message : String(err),
           },
         });
-
       }
     };
   }
@@ -698,8 +863,29 @@ export function createGateway(opts: GatewayOptions) {
       });
       return;
     }
-    if (req.method === "GET" && pathname === "/stats") {
-      sendJson(res, 200, pools.stats());
+    if (
+      req.method === "GET" &&
+      (pathname === "/stats" || pathname === "/metrics")
+    ) {
+      if (!bearerTokenMatches(req, operatorBearerToken)) {
+        res.setHeader("www-authenticate", 'Bearer realm="tyr-operator"');
+        sendJson(res, 401, { error: { type: "operator_unauthorized" } });
+        return;
+      }
+      if (pathname === "/stats") {
+        sendJson(res, 200, pools.stats());
+        return;
+      }
+      if (!telemetry.metricsEnabled) {
+        sendJson(res, 404, { error: { type: "metrics_disabled" } });
+        return;
+      }
+      sendText(
+        res,
+        200,
+        telemetry.renderPrometheus(pools.stats(), opts.isReady?.() ?? true),
+        "text/plain; version=0.0.4; charset=utf-8",
+      );
       return;
     }
     if (req.method === "GET" && pathname === "/healthz") {
@@ -751,6 +937,6 @@ export function createGateway(opts: GatewayOptions) {
     return shuttingDown;
   }
 
-  return { server, control, shutdown };
+  return { server, control, telemetry, shutdown };
 }
 

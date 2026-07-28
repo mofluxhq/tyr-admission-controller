@@ -5,17 +5,36 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.13.0 is built on
+Tyr 0.14.0 is built on
 [`async-bulkhead-llm@3.12.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.13.0, single-process data plane, proprietary software. See
+> **Status:** v0.14.0, single-process data plane, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr now includes first-class Latchflo managed
 > mode with configuration-driven registration, expiring grants, readiness,
 > persisted agent credentials, and fail-closed expiration behavior.
+
+## What shipped in v0.14.0
+
+- Added a native Prometheus text exporter at `GET /metrics` with bounded labels
+  for admission decisions, rejections, request outcomes, upstream status,
+  durations, pool capacity, token accounting, readiness, grant expiration, and
+  Latchflo integration failures.
+- Added optional structured JSON admission audit events. Each admitted,
+  observe-bypassed, or rejected decision records its pool, provider, priority,
+  model, exact limit revision, reservation, grant provenance, settlement, and
+  final provider usage when available. Request, admission, model, and grant IDs
+  are never used as metric labels.
+- Added optional bearer-token protection for both `/stats` and `/metrics` through
+  `TYR_OPERATOR_BEARER_TOKEN`; liveness and readiness probes remain public.
+- Added a zero-cost Docker Compose demo with a mock OpenAI-compatible provider,
+  Prometheus, an automatically provisioned Grafana dashboard, and repeatable
+  normal-load and overload generators.
+- Added Latchflo startup, poll, heartbeat, acknowledgement, and expiration
+  failure counters without changing fail-closed grant enforcement.
 
 ## What shipped in v0.13.0
 
@@ -74,7 +93,7 @@ drain results.
 See [`CHANGELOG.md`](CHANGELOG.md) for the complete release history and
 [`ROADMAP.md`](ROADMAP.md) for planned work.
 
-## Latchflo managed mode
+## Latchflo managed-mode overview
 
 Use [`config/tyr.latchflo.example.yaml`](config/tyr.latchflo.example.yaml) as the
 starting point. Managed pools must begin closed:
@@ -175,7 +194,8 @@ not for representing actual upstream load while bypasses are running.
 |---|---|---|
 | `POST` | `/v1/messages` | Admission-gated Anthropic Messages proxy |
 | `POST` | `/v1/chat/completions` | Admission-gated OpenAI Chat Completions proxy |
-| `GET` | `/stats` | Live per-pool bulkhead statistics |
+| `GET` | `/stats` | Live per-pool bulkhead statistics; optional operator bearer token |
+| `GET` | `/metrics` | Prometheus text exposition; optional operator bearer token |
 | `GET` | `/healthz` | Process liveness |
 | `GET` | `/readyz` | Managed readiness; `503` until all configured Latchflo grants are valid |
 
@@ -247,6 +267,12 @@ Install dependencies and run the release checks:
 ```bash
 npm ci
 npm run release:check
+
+# Zero-cost metrics demonstration
+npm run demo:up
+npm run demo:normal
+npm run demo:overload
+npm run demo:down
 ```
 
 Copy the example configuration:
@@ -376,6 +402,12 @@ shutdown:
 priority:
   trustHeader: false
 
+telemetry:
+  metrics:
+    enabled: true
+  audit:
+    enabled: false
+
 pools:
   - name: interactive-claude
     modelPrefixes: [claude-sonnet-4, claude-haiku-4]
@@ -422,6 +454,8 @@ pools:
 | `timeouts.clientStallMs` | No | Maximum wait for a backpressured client to drain |
 | `shutdown.drainTimeoutMs` | No | Bounded graceful-drain deadline; omit for unbounded drain |
 | `priority.trustHeader` | No | Trust raw `x-priority`; default `false` |
+| `telemetry.metrics.enabled` | No | Expose Prometheus text at `/metrics`; default `true` |
+| `telemetry.audit.enabled` | No | Emit one structured JSON line per admission decision; default `false` |
 | `pools[].name` | Yes | Unique pool name used in stats and rejection details |
 | `pools[].modelPrefixes` | Yes | Unique prefixes; longest matching prefix wins |
 | `pools[].estimatorModel` | Yes | Model used for estimator ratios; requests are not rewritten |
@@ -460,7 +494,7 @@ accounts for that cost.
 custom exact tokenizer is already supplying reservations or when deterministic
 estimates across process restarts are more important than local calibration.
 
-`shutdown.drainTimeoutMs` uses the v3.11 bounded drain result. When the deadline
+`shutdown.drainTimeoutMs` uses the v3.12 bounded drain result. When the deadline
 expires, Tyr records the outstanding count, closes remaining HTTP connections,
 and returns the snapshot from `shutdown()`.
 
@@ -483,7 +517,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.13.0
+    version: 0.14.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -603,7 +637,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.13.0 .
+docker build -t tyr-admission-controller:0.14.0 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -614,7 +648,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.13.0
+  tyr-admission-controller:0.14.0
 ```
 
 Or use the included Compose example:
@@ -649,6 +683,42 @@ npm start
 See [`.env.example`](.env.example) for every legacy variable. New multi-pool
 deployments should use file configuration.
 
+## Prometheus and Grafana demo
+
+The repository includes a completely local demonstration that does not call a
+paid model provider:
+
+```bash
+npm run demo:up
+```
+
+Open Grafana at `http://localhost:3000`. The **Moflux / Tyr Overload
+Protection** dashboard and Prometheus datasource are provisioned automatically.
+Prometheus is also available at `http://localhost:9090`, and Tyr at
+`http://localhost:8787`.
+
+In a second terminal, establish the normal baseline:
+
+```bash
+npm run demo:normal
+```
+
+Then generate a fail-fast overload burst:
+
+```bash
+npm run demo:overload
+```
+
+The dashboard shows the four-slot concurrency ceiling, admitted traffic,
+capacity rejections by reason, token holds and refunds, upstream status, p95
+latency, and readiness. The mock provider deliberately holds calls for 1.2 seconds,
+so the overloaded run makes Tyr's pre-provider shedding visible without API
+keys or usage charges. Stop and remove the stack with `npm run demo:down`.
+
+The demo intentionally leaves the operator token unset. When enabling
+`TYR_OPERATOR_BEARER_TOKEN`, add the same bearer credential to Prometheus's
+scrape configuration.
+
 ## Runtime behavior
 
 Request bodies are buffered up to `maxRequestBodyBytes`, 1 MiB by default.
@@ -661,13 +731,24 @@ explicit `content-length`.
 in-flight bulkhead work. Requests reaching an existing keep-alive connection
 during shutdown receive `503` with `x-admission-reason: shutdown`. When
 `shutdown.drainTimeoutMs` is configured, Tyr closes remaining connections after
-the bounded v3.11 drain snapshot reports outstanding work.
+the bounded v3.12 drain snapshot reports outstanding work.
 
 `/stats` exposes the live bulkhead statistics plus a `tyr` object for each pool.
 That object contains admission mode, advisory admit/reject counts, observe-mode
-bypass counts, and adaptive correction snapshots. The endpoint is operational
-data and is currently unauthenticated; protect it at the network or
-reverse-proxy layer.
+bypass counts, adaptive correction snapshots, and current Latchflo provenance.
+
+`/metrics` exposes Prometheus text format with only bounded dimensions: configured
+pool name, provider shape, priority, status class, outcome, and enumerated reason.
+Model strings, request IDs, admission IDs, grant IDs, and tenant-supplied values
+never become metric labels. Set `TYR_OPERATOR_BEARER_TOKEN` to require
+`Authorization: Bearer <token>` for both `/stats` and `/metrics`. Leave it unset
+for the local demo or protect the endpoints at the network layer.
+
+Set `telemetry.audit.enabled: true` or `TYR_AUDIT_ENABLED=true` to emit one JSON
+line per admission decision. Audit output is intentionally richer than metrics
+and can include model, admission ID, reservation, exact grant provenance, final
+usage, and settlement. Audit-sink failures are isolated from proxy behavior and
+counted by `tyr_audit_write_failures_total`.
 
 ## Known limitations
 
@@ -677,12 +758,12 @@ reverse-proxy layer.
   distributed lease on every request. Capacity can be temporarily unavailable
   during safe lease handoff.
 - Routing, upstream, estimator, timeout, and admission-mode configuration is
-  loaded only at startup. Only the v3.11 admission-limit snapshot is remotely
+  loaded only at startup. Only the v3.12 admission-limit snapshot is remotely
   replaceable at runtime.
 - Adaptive calibration is local, learned only from live observations, and is not
   persisted across restarts.
-- `/stats` and provider routes have no built-in authentication or authorization.
-- There is no OpenTelemetry or Prometheus exporter and no durable audit trail.
+- Provider routes still require authentication and authorization at an upstream gateway or trusted application boundary. The built-in operator token covers only `/stats` and `/metrics`.
+- Prometheus export is built in, but OTLP/OpenTelemetry export and durable audit storage remain external integration work.
 - SSE usage extraction must be verified against the exact provider API versions
   used in production. Missing usage affects reservation refunds, not proxying.
 - Upstream response headers are not generally passed through; Tyr returns the
@@ -690,8 +771,8 @@ reverse-proxy layer.
 - There is no Anthropic/OpenAI format translation.
 - There is no active-stream termination policy for post-admission usage
   overruns.
-- Distributed leases, tenant policy, and supported Helm packaging remain roadmap
-  work.
+- Multi-controller Latchflo failover, tenant policy, and supported Helm packaging
+  remain roadmap work.
 
 ## Repository layout
 
@@ -706,8 +787,9 @@ src/
   config.ts         YAML and legacy environment configuration loading
   index.ts          validated process entrypoint and managed-mode lifecycle
   latchflo.ts        built-in Latchflo agent, retry, readiness, and token persistence
-  pools.ts          v3.11 policy runtime, versioned limits, observe mode, and drain
-  server.ts         HTTP proxy, admission, timeouts, and shutdown
+  pools.ts          v3.12 policy runtime, versioned limits, observe mode, and drain
+  server.ts         HTTP proxy, admission, telemetry, timeouts, and shutdown
+  telemetry.ts      Prometheus metrics and structured admission audit events
   sse.ts            Anthropic streaming usage extraction
   sse-openai.ts     OpenAI streaming usage extraction
   validation.ts     provider-agnostic request shape validation
@@ -719,6 +801,7 @@ test/
   pools-v311.test.ts v3.11 preview, provenance, observe, reconfiguration, and drain tests
 Dockerfile          production multi-stage image
 compose.example.yaml local file-configured container example
+demo/                mock provider, Prometheus, Grafana, dashboard, and load generator
 ```
 
 ## Development commands
@@ -731,6 +814,12 @@ npm test
 npm run build
 npm run smoke
 npm run release:check
+
+# Zero-cost metrics demonstration
+npm run demo:up
+npm run demo:normal
+npm run demo:overload
+npm run demo:down
 ```
 
 ## License

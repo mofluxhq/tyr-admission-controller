@@ -1,0 +1,40 @@
+version: 1
+
+server:
+  port: 8787
+
+upstreams:
+  openai:
+    baseUrl: http://mock-provider:9000
+
+timeouts:
+  responseHeadersMs: 5000
+  streamIdleMs: 5000
+  clientStallMs: 5000
+
+shutdown:
+  drainTimeoutMs: 5000
+
+priority:
+  trustHeader: true
+
+telemetry:
+  metrics:
+    enabled: true
+  audit:
+    enabled: true
+
+pools:
+  - name: openai-demo
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 4
+    maxQueue: 0
+    limitsRevision: 1
+    admissionMode: enforce
+    inFlightTokenBudget: 12000
+    highPriorityTokenReserve: 3000
+    defaultOutputReservation: 1000
+    adaptiveEstimation:
+      enabled: true
+      minSamples: 3

@@ -13,6 +13,10 @@ import {
 } from "../src/server.js";
 import { loadRuntimeConfig } from "../src/config.js";
 import type {
+  TyrAdmissionAuditEvent,
+  TyrTelemetryOptions,
+} from "../src/telemetry.js";
+import type {
   AdaptiveEstimationConfig,
   AdmissionMode,
   PoolsDrainResult,
@@ -251,6 +255,8 @@ function startGateway(
     trustPriorityHeader?: boolean;
     resolvePriority?: GatewayOptions["resolvePriority"];
     isReady?: GatewayOptions["isReady"];
+    telemetry?: TyrTelemetryOptions;
+    operatorBearerToken?: string;
   } = {},
 ): Promise<{
   server: Server;
@@ -280,6 +286,10 @@ function startGateway(
       ? { resolvePriority: opts.resolvePriority }
       : {}),
     ...(opts.isReady !== undefined ? { isReady: opts.isReady } : {}),
+    ...(opts.telemetry !== undefined ? { telemetry: opts.telemetry } : {}),
+    ...(opts.operatorBearerToken !== undefined
+      ? { operatorBearerToken: opts.operatorBearerToken }
+      : {}),
     pools: [
       {
         name: "test-pool",
@@ -1025,6 +1035,142 @@ describe("admission-gateway", () => {
       const available = await fetch(`${gw.url}/readyz`);
       expect(available.status).toBe(200);
       expect(await available.json()).toEqual({ ok: true });
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("exports bounded Prometheus metrics and one completed admission audit", async () => {
+    const auditEvents: TyrAdmissionAuditEvent[] = [];
+    const gw = await startGateway(
+      { maxConcurrent: 2, budget: 5_000 },
+      {
+        telemetry: {
+          metricsEnabled: true,
+          auditEnabled: true,
+          auditSink: (event) => auditEvents.push(event),
+        },
+      },
+    );
+    try {
+      const response = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("telemetry")),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+
+      const metricsResponse = await fetch(`${gw.url}/metrics`);
+      expect(metricsResponse.status).toBe(200);
+      expect(metricsResponse.headers.get("content-type")).toContain(
+        "text/plain; version=0.0.4",
+      );
+      const metrics = await metricsResponse.text();
+      expect(metrics).toContain('tyr_build_info{version="0.14.0"} 1');
+      expect(metrics).toContain(
+        'tyr_admission_decisions_total{outcome="admitted",pool="test-pool",priority="normal"} 1',
+      );
+      expect(metrics).toContain('tyr_pool_tokens_consumed_total{pool="test-pool"} 50');
+      expect(metrics).toContain(
+        'tyr_upstream_responses_total{pool="test-pool",provider="anthropic",status_class="2xx"} 1',
+      );
+      expect(metrics).not.toContain("admission_id=");
+      expect(metrics).not.toContain("grant_id=");
+      expect(metrics).not.toContain("model=");
+
+      expect(auditEvents).toHaveLength(1);
+      expect(auditEvents[0]).toMatchObject({
+        schema: "tyr.admission-audit.v1",
+        event: "admission_decision",
+        outcome: "admitted",
+        settlement: "completed",
+        pool: "test-pool",
+        provider: "anthropic",
+        priority: "normal",
+        model: "claude-sonnet-4-5",
+        limitRevision: 0,
+        usage: { input: 20, output: 30 },
+      });
+      expect(auditEvents[0]?.admissionId).toMatch(/^[0-9a-f-]{36}$/i);
+      expect(auditEvents[0]?.reservedTokens).toBeGreaterThan(0);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("audits and counts admission rejections", async () => {
+    const auditEvents: TyrAdmissionAuditEvent[] = [];
+    const gw = await startGateway(
+      { maxConcurrent: 0, budget: 0 },
+      {
+        telemetry: {
+          auditEnabled: true,
+          auditSink: (event) => auditEvents.push(event),
+        },
+      },
+    );
+    try {
+      const response = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("reject")),
+      });
+      expect(response.status).toBe(429);
+
+      const metrics = await (await fetch(`${gw.url}/metrics`)).text();
+      expect(metrics).toContain(
+        'tyr_admission_decisions_total{outcome="rejected",pool="test-pool",priority="normal"} 1',
+      );
+      expect(metrics).toContain(
+        'tyr_admission_rejections_total{pool="test-pool",priority="normal",reason="budget_limit"} 1',
+      );
+      expect(auditEvents).toHaveLength(1);
+      expect(auditEvents[0]).toMatchObject({
+        outcome: "rejected",
+        settlement: "rejected",
+        reason: "budget_limit",
+      });
+      expect(auditEvents[0]?.admissionId).toBeUndefined();
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("optionally protects /stats and /metrics with an operator bearer token", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 1 },
+      { operatorBearerToken: "demo-secret" },
+    );
+    try {
+      for (const path of ["/stats", "/metrics"]) {
+        const unauthorized = await fetch(`${gw.url}${path}`);
+        expect(unauthorized.status).toBe(401);
+        expect(unauthorized.headers.get("www-authenticate")).toContain(
+          "tyr-operator",
+        );
+
+        const authorized = await fetch(`${gw.url}${path}`, {
+          headers: { authorization: "Bearer demo-secret" },
+        });
+        expect(authorized.status).toBe(200);
+      }
+
+      const health = await fetch(`${gw.url}/healthz`);
+      expect(health.status).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("can disable the Prometheus endpoint without disabling /stats", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 1 },
+      { telemetry: { metricsEnabled: false } },
+    );
+    try {
+      expect((await fetch(`${gw.url}/metrics`)).status).toBe(404);
+      expect((await fetch(`${gw.url}/stats`)).status).toBe(200);
     } finally {
       gw.server.close();
     }

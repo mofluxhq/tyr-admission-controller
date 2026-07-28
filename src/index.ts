@@ -14,12 +14,13 @@ const createdGateway = createGateway({
     ? {}
     : { isReady: () => managedMode?.ready() ?? false }),
 });
-const { server, control, shutdown } = createdGateway;
+const { server, control, telemetry, shutdown } = createdGateway;
 
 if (runtime.controlPlane !== undefined) {
   managedMode = createLatchfloManagedMode({
     config: runtime.controlPlane,
     control,
+    onFailure: (event) => telemetry.recordLatchfloFailure(event),
   });
 }
 

@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-28
+
+### Added
+
+- Added native Prometheus exposition at `GET /metrics` with bounded dimensions
+  for admission decisions, rejection reasons, gateway outcomes, upstream status
+  classes, request/upstream duration histograms, pool limits and utilization,
+  token reservation/reconciliation, readiness, grant expiration, controller
+  epoch, audit failures, and Latchflo integration failures.
+- Added optional structured `tyr.admission-audit.v1` JSON events for admitted,
+  observe-bypassed, and rejected decisions. Completed admissions include final
+  provider usage when available and exact grant provenance without placing
+  request, admission, model, or grant identifiers into metric labels.
+- Added `TYR_OPERATOR_BEARER_TOKEN` protection for `/stats` and `/metrics` while
+  leaving `/healthz` and `/readyz` available to orchestrators.
+- Added versioned file configuration for `telemetry.metrics.enabled` and
+  `telemetry.audit.enabled`, plus environment overrides.
+- Added a local Docker Compose demonstration with a mock provider, Prometheus,
+  provisioned Grafana datasource/dashboard, and normal/overload load scripts.
+- Added regression coverage for metric exposition, cardinality boundaries,
+  audit settlement and usage, rejected-decision audit, endpoint protection, and
+  telemetry configuration.
+
+### Changed
+
+- `createGateway()` now also returns its `telemetry` collector so the built-in
+  Latchflo managed mode can report bounded integration-failure counters.
+- Client disconnect, client-stall, response-timeout, idle-timeout, and upstream
+  error paths now produce explicit request and audit outcomes without changing
+  their existing admission or response semantics.
+
+
 ## [0.13.0] - 2026-07-26
 
 ### Added

@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Tyr demo
+    orgId: 1
+    folder: Moflux
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 2
+    options:
+      path: /var/lib/grafana/dashboards

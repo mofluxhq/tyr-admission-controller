@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 250ms
+  evaluation_interval: 250ms
+
+scrape_configs:
+  - job_name: tyr
+    metrics_path: /metrics
+    static_configs:
+      - targets: [tyr:8787]

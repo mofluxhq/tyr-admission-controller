@@ -9,6 +9,10 @@ import { dirname } from "node:path";
 import type { LLMAdmissionLimits } from "async-bulkhead-llm";
 import type { PoolLimitsUpdate } from "./pools.js";
 import type { TyrControlPlane } from "./server.js";
+import type {
+  LatchfloFailureOperation,
+  LatchfloFailureReason,
+} from "./telemetry.js";
 
 export type LatchfloAgentMetadata = {
   readonly region?: string;
@@ -71,6 +75,21 @@ type RegistrationResponse = {
 
 type Logger = Pick<Console, "info" | "warn" | "error">;
 type JsonObject = Record<string, unknown>;
+type FailureReporter = (event: {
+  operation: LatchfloFailureOperation;
+  reason: LatchfloFailureReason;
+}) => void;
+
+function reportFailure(
+  reporter: FailureReporter | undefined,
+  event: Parameters<FailureReporter>[0],
+): void {
+  try {
+    reporter?.(event);
+  } catch {
+    // Observability callbacks must never change control-plane behavior.
+  }
+}
 
 class LatchfloRequestError extends Error {
   constructor(
@@ -161,6 +180,10 @@ export type LatchfloTyrAgentOptions = {
   readonly fetch?: typeof globalThis.fetch;
   readonly onAgentToken?: (token: string) => void | Promise<void>;
   readonly onReadyChange?: (ready: boolean) => void;
+  readonly onFailure?: (event: {
+    operation: LatchfloFailureOperation;
+    reason: LatchfloFailureReason;
+  }) => void;
   readonly requestTimeoutMs?: number;
   readonly retryIntervalMs?: number;
   readonly retryMaxIntervalMs?: number;
@@ -673,6 +696,7 @@ export class LatchfloTyrAgent {
         },
       );
       if (!response.ok) {
+        reportFailure(this.options.onFailure, { operation: "ack", reason: "http_error" });
         this.#logger.warn(
           `grant acknowledgement failed: ${await readError(response)}`,
         );
@@ -680,6 +704,10 @@ export class LatchfloTyrAgent {
     } catch (error) {
       // Acknowledgement delivery is best-effort. Local lease enforcement and
       // expiration scheduling must still complete after limits were applied.
+      reportFailure(this.options.onFailure, {
+        operation: "ack",
+        reason: "transport_error",
+      });
       this.#logger.warn("grant acknowledgement failed", error);
     }
   }
@@ -702,6 +730,10 @@ export class LatchfloTyrAgent {
       );
     } catch (error) {
       const requestError = normalizeRequestError(error, "Latchflo heartbeat");
+      reportFailure(this.options.onFailure, {
+        operation: "heartbeat",
+        reason: requestError.retryable ? "retryable" : "permanent",
+      });
       if (!requestError.retryable) {
         this.#logger.error(
           "Latchflo heartbeat stopped after a permanent failure",
@@ -747,6 +779,10 @@ export class LatchfloTyrAgent {
         error,
         "Latchflo desired-state poll",
       );
+      reportFailure(this.options.onFailure, {
+        operation: "poll",
+        reason: requestError.retryable ? "retryable" : "permanent",
+      });
       if (!requestError.retryable) {
         this.#logger.error(
           "Latchflo desired-state polling stopped after a permanent failure; existing grants remain enforced until expiration",
@@ -820,6 +856,10 @@ export class LatchfloTyrAgent {
     });
     const result = this.options.control.applyLimits(updates);
     if (!result.applied) {
+      reportFailure(this.options.onFailure, {
+        operation: "expiration",
+        reason: "apply_error",
+      });
       this.#logger.error("failed to apply Latchflo expiration kill switch", result);
     } else {
       for (const grant of expired) this.#grants.delete(grant.pool);
@@ -921,6 +961,10 @@ export function createLatchfloManagedMode(options: {
   readonly fetch?: typeof globalThis.fetch;
   readonly random?: () => number;
   readonly logger?: Logger;
+  readonly onFailure?: (event: {
+    operation: LatchfloFailureOperation;
+    reason: LatchfloFailureReason;
+  }) => void;
 }): LatchfloManagedMode {
   const logger = options.logger ?? console;
   const env = options.env ?? process.env;
@@ -948,6 +992,9 @@ export function createLatchfloManagedMode(options: {
             persistAgentToken(options.config.agentTokenFile as string, token),
         }),
     logger,
+    ...(options.onFailure === undefined
+      ? {}
+      : { onFailure: options.onFailure }),
   });
 
   let stopped = false;
@@ -991,6 +1038,10 @@ export function createLatchfloManagedMode(options: {
       })
       .catch((error: unknown) => {
         const requestError = normalizeRequestError(error, "Latchflo startup");
+        reportFailure(options.onFailure, {
+          operation: "startup",
+          reason: requestError.retryable ? "retryable" : "permanent",
+        });
         if (requestError.retryable) {
           scheduleRetry(requestError);
         } else {

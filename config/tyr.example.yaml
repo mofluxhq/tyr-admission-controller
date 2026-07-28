@@ -26,7 +26,7 @@ timeouts:
   clientStallMs: 30000
 
 shutdown:
-  # Uses async-bulkhead-llm v3.11 bounded drain. At the deadline Tyr reports
+  # Uses async-bulkhead-llm v3.12 bounded drain. At the deadline Tyr reports
   # outstanding work and closes remaining HTTP connections. Omit to wait
   # indefinitely, preserving the previous behavior.
   drainTimeoutMs: 30000
@@ -35,6 +35,14 @@ priority:
   # Keep false unless a trusted proxy strips client copies of x-priority and
   # injects an authenticated value.
   trustHeader: false
+
+telemetry:
+  metrics:
+    # Prometheus text format is served at GET /metrics.
+    enabled: true
+  audit:
+    # Emits one JSON line per admitted, bypassed, or rejected decision.
+    enabled: false
 
 pools:
   - name: interactive-claude
@@ -45,7 +53,7 @@ pools:
     # Used by the admission estimator; it does not rewrite the requested model.
     estimatorModel: claude-sonnet-4-5
     maxConcurrent: 40
-    # v3.11 complete admission-limit snapshot. maxQueue defaults to 0.
+    # v3.12 complete admission-limit snapshot. maxQueue defaults to 0.
     # limitsRevision must increase for every runtime control-plane update.
     maxQueue: 0
     limitsRevision: 100
@@ -63,7 +71,7 @@ pools:
     # Fixed surcharge per opaque image/audio/document/file/video block.
     # Omit for the conservative default of 2048; set 0 to disable it.
     opaqueMediaInputTokenReservation: 2048
-    # Per-model EWMA calibration. Native v3.11 observe bypasses also feed it. Enabled by default for budgeted pools.
+    # Per-model EWMA calibration. Native v3.12 observe bypasses also feed it. Enabled by default for budgeted pools.
     # It learns only from provider-reported input usage and is local/in-memory.
     adaptiveEstimation:
       enabled: true

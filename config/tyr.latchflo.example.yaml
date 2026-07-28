@@ -1,4 +1,4 @@
-# Tyr 0.13 first-class Latchflo managed-mode example.
+# Tyr 0.14 Latchflo managed-mode example.
 version: 1
 
 server:
@@ -18,6 +18,12 @@ shutdown:
 
 priority:
   trustHeader: false
+
+telemetry:
+  metrics:
+    enabled: true
+  audit:
+    enabled: true
 
 pools:
   - name: openai-primary
@@ -44,7 +50,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.13.0
+    version: 0.14.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo

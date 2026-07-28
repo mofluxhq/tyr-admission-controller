@@ -138,6 +138,17 @@ function booleanEnv(
   throw new Error(`${name} must be true, false, 1, or 0`);
 }
 
+function optionalBooleanEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+): boolean | undefined {
+  const raw = envString(env, name)?.toLowerCase();
+  if (raw === undefined) return undefined;
+  if (raw === "true" || raw === "1") return true;
+  if (raw === "false" || raw === "0") return false;
+  throw new Error(`${name} must be true, false, 1, or 0`);
+}
+
 function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
   const upstreamUrl = envString(env, "UPSTREAM_URL");
   const openaiUpstreamUrl = envString(env, "OPENAI_UPSTREAM_URL");
@@ -191,6 +202,9 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
     "TRUST_X_PRIORITY_HEADER",
     false,
   );
+  const metricsEnabled = booleanEnv(env, "TYR_METRICS_ENABLED", true);
+  const auditEnabled = booleanEnv(env, "TYR_AUDIT_ENABLED", false);
+  const operatorBearerToken = envString(env, "TYR_OPERATOR_BEARER_TOKEN");
   const admissionMode = admissionModeEnv(env);
   const adaptiveSmoothing = optionalNumberEnv(env, "ADAPTIVE_SMOOTHING", {
     exclusiveMin: 0,
@@ -256,6 +270,8 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
         ? { shutdownDrainTimeoutMs }
         : {}),
       trustPriorityHeader,
+      telemetry: { metricsEnabled, auditEnabled },
+      ...(operatorBearerToken === undefined ? {} : { operatorBearerToken }),
       pools: [
         {
           name: "default",
@@ -809,6 +825,7 @@ function normalizePool(value: unknown, index: number): PoolConfig {
 function normalizeFileConfiguration(
   raw: unknown,
   source: { path: string; fingerprint: string },
+  env: NodeJS.ProcessEnv,
 ): RuntimeConfig {
   const root = objectValue(raw, "configuration");
   assertKnownKeys(
@@ -820,6 +837,7 @@ function normalizeFileConfiguration(
       "timeouts",
       "shutdown",
       "priority",
+      "telemetry",
       "pools",
       "controlPlane",
     ],
@@ -905,6 +923,23 @@ function normalizeFileConfiguration(
   const trustPriorityHeader =
     optionalBoolean(priority, "trustHeader", "priority.trustHeader") ?? false;
 
+  const telemetry = optionalObjectValue(root, "telemetry", "telemetry") ?? {};
+  assertKnownKeys(telemetry, ["metrics", "audit"], "telemetry");
+  const metrics =
+    optionalObjectValue(telemetry, "metrics", "telemetry.metrics") ?? {};
+  assertKnownKeys(metrics, ["enabled"], "telemetry.metrics");
+  const audit = optionalObjectValue(telemetry, "audit", "telemetry.audit") ?? {};
+  assertKnownKeys(audit, ["enabled"], "telemetry.audit");
+  const metricsEnabled =
+    optionalBooleanEnv(env, "TYR_METRICS_ENABLED") ??
+    optionalBoolean(metrics, "enabled", "telemetry.metrics.enabled") ??
+    true;
+  const auditEnabled =
+    optionalBooleanEnv(env, "TYR_AUDIT_ENABLED") ??
+    optionalBoolean(audit, "enabled", "telemetry.audit.enabled") ??
+    false;
+  const operatorBearerToken = envString(env, "TYR_OPERATOR_BEARER_TOKEN");
+
   const poolsValue = root["pools"];
   if (!Array.isArray(poolsValue) || poolsValue.length === 0) {
     throw new Error("pools must be a non-empty array");
@@ -949,6 +984,8 @@ function normalizeFileConfiguration(
         ? { shutdownDrainTimeoutMs }
         : {}),
       trustPriorityHeader,
+      telemetry: { metricsEnabled, auditEnabled },
+      ...(operatorBearerToken === undefined ? {} : { operatorBearerToken }),
       pools,
     },
     ...(controlPlane === undefined ? {} : { controlPlane }),
@@ -961,7 +998,10 @@ function normalizeFileConfiguration(
   };
 }
 
-export function loadRuntimeConfigFile(filePath: string): RuntimeConfig {
+export function loadRuntimeConfigFile(
+  filePath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): RuntimeConfig {
   const absolutePath = resolve(filePath);
   let text: string;
   try {
@@ -996,10 +1036,14 @@ export function loadRuntimeConfigFile(filePath: string): RuntimeConfig {
   }
 
   const fingerprint = createHash("sha256").update(text).digest("hex");
-  return normalizeFileConfiguration(raw, {
-    path: absolutePath,
-    fingerprint,
-  });
+  return normalizeFileConfiguration(
+    raw,
+    {
+      path: absolutePath,
+      fingerprint,
+    },
+    env,
+  );
 }
 
 function assertNoLegacyEnvironmentConfiguration(env: NodeJS.ProcessEnv): void {
@@ -1019,7 +1063,7 @@ export function loadRuntimeConfig(
   const configFile = envString(env, "TYR_CONFIG_FILE");
   if (configFile !== undefined) {
     assertNoLegacyEnvironmentConfiguration(env);
-    return loadRuntimeConfigFile(configFile);
+    return loadRuntimeConfigFile(configFile, env);
   }
   return loadLegacyEnvironmentConfig(env);
 }

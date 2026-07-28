@@ -1,6 +1,6 @@
 {
   "name": "tyr-admission-controller",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "private": true,
   "license": "SEE LICENSE IN LICENSE.txt",
   "description": "Tyr is a capacity guard for LLM traffic that reserves expected token capacity before execution, sheds requests that would overcommit a model pool, and reconciles reservations from live provider usage.",
@@ -20,7 +20,12 @@
     "smoke": "node --input-type=module -e \"await import('./dist/server.js'); await import('./dist/adapters.js');\"",
     "release:check": "npm run lint && npm run typecheck && npm test && npm run build && npm run smoke && npm pack --dry-run",
     "lint": "eslint . --max-warnings=0",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "demo:up": "docker compose -f demo/compose.metrics.yaml up --build",
+    "demo:down": "docker compose -f demo/compose.metrics.yaml down",
+    "demo:normal": "node demo/load.mjs --requests 12 --concurrency 2",
+    "demo:overload": "node demo/load.mjs --requests 100 --concurrency 25",
+    "smoke:telemetry": "npm run build && node scripts/telemetry-smoke.mjs"
   },
   "dependencies": {
     "async-bulkhead-llm": "3.12.0",

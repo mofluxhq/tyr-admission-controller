@@ -8,5 +8,18 @@ export default [
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  {
+    files: ["demo/**/*.mjs", "scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        Buffer: "readonly",
+        console: "readonly",
+        fetch: "readonly",
+        performance: "readonly",
+        process: "readonly",
+        setTimeout: "readonly",
+      },
+    },
+  },
   prettier,
 ];
