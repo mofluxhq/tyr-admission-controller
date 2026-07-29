@@ -19,6 +19,14 @@ import {
 import type { LLMAdmissionLimits } from "async-bulkhead-llm";
 import { anthropicAdapter, openaiAdapter, type Adapter } from "./adapters.js";
 import {
+  hasAnyRole,
+  normalizeRequestIdentity,
+  requireAnyRole,
+  TyrIdentityError,
+  type TyrIdentityOptions,
+  type TyrRequestIdentity,
+} from "./identity.js";
+import {
   TyrTelemetry,
   type TyrAdmissionAuditEvent,
   type TyrAuditSettlement,
@@ -98,6 +106,7 @@ export type GatewayOptions = {
    */
   resolvePriority?: (
     req: IncomingMessage,
+    identity?: TyrRequestIdentity,
   ) => LLMPriority | Promise<LLMPriority>;
   /**
    * Trust the raw client-supplied `x-priority` header. Disabled by default
@@ -108,6 +117,8 @@ export type GatewayOptions = {
   trustPriorityHeader?: boolean;
   /** Optional process-level readiness gate, such as managed control-plane state. */
   isReady?: () => boolean;
+  /** Authenticated request identity, role authorization, and role priority. */
+  identity?: TyrIdentityOptions;
   /** Prometheus and structured admission-audit configuration. */
   telemetry?: TyrTelemetryOptions;
   /** Optional bearer token protecting /stats and /metrics. */
@@ -345,6 +356,40 @@ function normalizeUpstreamUrl(
   return parsed.toString().replace(/\/$/, "");
 }
 
+function validateRoleList(roles: readonly string[] | undefined, field: string): void {
+  if (roles === undefined) return;
+  if (!Array.isArray(roles)) throw new Error(`${field} must be a string array`);
+  for (const role of roles) {
+    if (typeof role !== "string" || role.trim().length === 0) {
+      throw new Error(`${field} must contain only non-empty strings`);
+    }
+  }
+}
+
+function identityFailure(error: unknown): TyrIdentityError {
+  if (error instanceof TyrIdentityError) return error;
+  return new TyrIdentityError(
+    "identity_invalid",
+    error instanceof Error ? error.message : "identity authentication failed",
+    401,
+  );
+}
+
+function sendIdentityFailure(res: ServerResponse, error: TyrIdentityError): void {
+  if (error.status === 401) {
+    res.setHeader("www-authenticate", 'Bearer realm="tyr-identity"');
+  }
+  sendJson(res, error.status, { error: { type: error.code } });
+}
+
+function effectiveIdentityCredentialHeader(
+  identity: TyrIdentityOptions | undefined,
+): string | undefined {
+  return (
+    identity?.credentialHeader ?? identity?.authenticate.credentialHeader
+  )?.trim().toLowerCase();
+}
+
 function validateGatewayOptions(opts: GatewayOptions): void {
   assertOptionalInteger(opts.responseTimeoutMs, "responseTimeoutMs", 0);
   assertOptionalInteger(opts.idleTimeoutMs, "idleTimeoutMs", 0);
@@ -370,6 +415,38 @@ function validateGatewayOptions(opts: GatewayOptions): void {
   }
   if (opts.isReady !== undefined && typeof opts.isReady !== "function") {
     throw new Error("isReady must be a function");
+  }
+  if (opts.identity !== undefined) {
+    if (typeof opts.identity.authenticate !== "function") {
+      throw new Error("identity.authenticate must be a function");
+    }
+    const effectiveHeader = effectiveIdentityCredentialHeader(opts.identity);
+    if (effectiveHeader !== undefined) {
+      const header = effectiveHeader;
+      if (!/^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(header)) {
+        throw new Error("identity.credentialHeader must be a valid HTTP header name");
+      }
+      const providerHeaders = new Set([
+        "authorization",
+        "content-type",
+        "x-api-key",
+        "anthropic-version",
+        "anthropic-beta",
+        "openai-organization",
+        "openai-project",
+      ]);
+      if (providerHeaders.has(header)) {
+        throw new Error(
+          `identity.credentialHeader conflicts with provider header ${header}`,
+        );
+      }
+    }
+    validateRoleList(opts.identity.invokeRoles, "identity.invokeRoles");
+    validateRoleList(opts.identity.operatorRoles, "identity.operatorRoles");
+    validateRoleList(
+      opts.identity.highPriorityRoles,
+      "identity.highPriorityRoles",
+    );
   }
   if (
     opts.operatorBearerToken !== undefined &&
@@ -403,6 +480,10 @@ export function createGateway(opts: GatewayOptions) {
   const pools = createPools(opts.pools);
   const telemetry = new TyrTelemetry(opts.telemetry);
   const operatorBearerToken = opts.operatorBearerToken;
+  const identityOptions = opts.identity;
+  const identityCredentialHeader =
+    effectiveIdentityCredentialHeader(identityOptions) ??
+    "x-tyr-identity-token";
   const control: TyrControlPlane = Object.freeze({
     limits: () => pools.limits(),
     stats: () => pools.stats(),
@@ -428,9 +509,22 @@ export function createGateway(opts: GatewayOptions) {
   const resolvePriority = opts.resolvePriority;
   const trustPriorityHeader = opts.trustPriorityHeader ?? false;
 
-
-
-
+  async function authenticateIdentity(
+    req: IncomingMessage,
+  ): Promise<TyrRequestIdentity> {
+    if (identityOptions === undefined) {
+      throw new TyrIdentityError(
+        "identity_required",
+        "request identity is not configured",
+        401,
+      );
+    }
+    try {
+      return normalizeRequestIdentity(await identityOptions.authenticate(req));
+    } catch (error) {
+      throw identityFailure(error);
+    }
+  }
 
   function makeHandler(adapter: Adapter, upstream: string) {
     return async function handle(
@@ -438,6 +532,22 @@ export function createGateway(opts: GatewayOptions) {
       res: ServerResponse,
     ): Promise<void> {
       const requestStartedAt = performance.now();
+      let requestIdentity: TyrRequestIdentity | undefined;
+      if (identityOptions !== undefined) {
+        try {
+          requestIdentity = await authenticateIdentity(req);
+          requireAnyRole(requestIdentity, identityOptions.invokeRoles);
+        } catch (error) {
+          // Do not buffer unauthorized payloads. Drain only to keep Node's HTTP
+          // parser in a defined state, then close this connection after the
+          // response so unread request bytes cannot contaminate keep-alive.
+          req.resume();
+          res.setHeader("connection", "close");
+          sendIdentityFailure(res, identityFailure(error));
+          return;
+        }
+      }
+
       let raw: Buffer;
       try {
         raw = await readBody(req, maxRequestBodyBytes);
@@ -488,12 +598,19 @@ export function createGateway(opts: GatewayOptions) {
 
       let priority: LLMPriority = "normal";
       if (resolvePriority !== undefined) {
-        priority = await resolvePriority(req);
+        priority = await resolvePriority(req, requestIdentity);
         if (priority !== "normal" && priority !== "high") {
           throw new Error(
             `resolvePriority returned invalid priority: ${String(priority)}`,
           );
         }
+      } else if (requestIdentity !== undefined && identityOptions !== undefined) {
+        priority = hasAnyRole(
+          requestIdentity,
+          identityOptions.highPriorityRoles,
+        )
+          ? "high"
+          : "normal";
       } else if (trustPriorityHeader) {
         priority = parsePriority(
           typeof req.headers["x-priority"] === "string"
@@ -580,6 +697,9 @@ export function createGateway(opts: GatewayOptions) {
 
       const headers: Record<string, string> = {};
       for (const header of adapter.forwardHeaders) {
+        if (identityOptions !== undefined && header === identityCredentialHeader) {
+          continue;
+        }
         const value = req.headers[header];
         if (typeof value === "string") headers[header] = value;
       }
@@ -609,6 +729,9 @@ export function createGateway(opts: GatewayOptions) {
                 pool: pool.name,
                 provider: adapter.shape,
                 priority,
+                ...(requestIdentity === undefined
+                  ? {}
+                  : { identity: requestIdentity }),
                 model,
                 admissionId: ctx.admissionId,
                 limitRevision: ctx.limitRevision,
@@ -755,6 +878,9 @@ export function createGateway(opts: GatewayOptions) {
             pool: pool.name,
             provider: adapter.shape,
             priority,
+            ...(requestIdentity === undefined
+              ? {}
+              : { identity: requestIdentity }),
             model,
             limitRevision: rejectionRevision,
             reason: err.reason,
@@ -836,6 +962,57 @@ export function createGateway(opts: GatewayOptions) {
     ? makeHandler(openaiAdapter, openaiUpstream)
     : undefined;
 
+  async function authorizeOperator(
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<boolean> {
+    if (
+      operatorBearerToken !== undefined &&
+      bearerTokenMatches(req, operatorBearerToken)
+    ) {
+      return true;
+    }
+
+    const operatorRoles = identityOptions?.operatorRoles;
+    if (identityOptions !== undefined && operatorRoles !== undefined && operatorRoles.length > 0) {
+      try {
+        const identity = await authenticateIdentity(req);
+        requireAnyRole(identity, operatorRoles);
+        return true;
+      } catch (error) {
+        sendIdentityFailure(res, identityFailure(error));
+        return false;
+      }
+    }
+
+    if (operatorBearerToken === undefined) return true;
+    res.setHeader("www-authenticate", 'Bearer realm="tyr-operator"');
+    sendJson(res, 401, { error: { type: "operator_unauthorized" } });
+    return false;
+  }
+
+  async function handleOperatorRoute(
+    req: IncomingMessage,
+    res: ServerResponse,
+    pathname: "/stats" | "/metrics",
+  ): Promise<void> {
+    if (!(await authorizeOperator(req, res))) return;
+    if (pathname === "/stats") {
+      sendJson(res, 200, pools.stats());
+      return;
+    }
+    if (!telemetry.metricsEnabled) {
+      sendJson(res, 404, { error: { type: "metrics_disabled" } });
+      return;
+    }
+    sendText(
+      res,
+      200,
+      telemetry.renderPrometheus(pools.stats(), opts.isReady?.() ?? true),
+      "text/plain; version=0.0.4; charset=utf-8",
+    );
+  }
+
   const server = createServer((req, res) => {
     // Route matching compares only the pathname, not the complete raw
     // URL — a request like "/v1/messages?x=1" must still match the
@@ -867,25 +1044,9 @@ export function createGateway(opts: GatewayOptions) {
       req.method === "GET" &&
       (pathname === "/stats" || pathname === "/metrics")
     ) {
-      if (!bearerTokenMatches(req, operatorBearerToken)) {
-        res.setHeader("www-authenticate", 'Bearer realm="tyr-operator"');
-        sendJson(res, 401, { error: { type: "operator_unauthorized" } });
-        return;
-      }
-      if (pathname === "/stats") {
-        sendJson(res, 200, pools.stats());
-        return;
-      }
-      if (!telemetry.metricsEnabled) {
-        sendJson(res, 404, { error: { type: "metrics_disabled" } });
-        return;
-      }
-      sendText(
-        res,
-        200,
-        telemetry.renderPrometheus(pools.stats(), opts.isReady?.() ?? true),
-        "text/plain; version=0.0.4; charset=utf-8",
-      );
+      void handleOperatorRoute(req, res, pathname).catch(() => {
+        if (!res.headersSent) sendJson(res, 500, { error: { type: "internal" } });
+      });
       return;
     }
     if (req.method === "GET" && pathname === "/healthz") {

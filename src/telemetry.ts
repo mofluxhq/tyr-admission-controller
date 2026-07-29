@@ -1,5 +1,6 @@
 import type { LLMPriority, LLMRejectReason, TokenUsage } from "async-bulkhead-llm";
 import type { ApiShape } from "./adapters.js";
+import type { TyrRequestIdentity } from "./identity.js";
 import type { AdmissionProvenance, TyrPoolStats } from "./pools.js";
 
 export type TyrAdmissionOutcome = "admitted" | "bypassed" | "rejected";
@@ -25,7 +26,7 @@ export type TyrAuditSettlement =
   | "upstream_error";
 
 export type TyrAdmissionAuditEvent = {
-  readonly schema: "tyr.admission-audit.v1";
+  readonly schema: "tyr.admission-audit.v2";
   readonly timestamp: string;
   readonly event: "admission_decision";
   readonly outcome: TyrAdmissionOutcome;
@@ -40,6 +41,7 @@ export type TyrAdmissionAuditEvent = {
   readonly reservedTokens?: number;
   readonly grant?: AdmissionProvenance;
   readonly usage?: TokenUsage;
+  readonly identity?: TyrRequestIdentity;
 };
 
 export type LatchfloFailureOperation =
@@ -284,7 +286,7 @@ export class TyrTelemetry {
     if (!this.auditEnabled) return;
     try {
       this.#auditSink({
-        schema: "tyr.admission-audit.v1",
+        schema: "tyr.admission-audit.v2",
         timestamp: new Date().toISOString(),
         event: "admission_decision",
         ...event,
@@ -303,7 +305,7 @@ export class TyrTelemetry {
     const lines: string[] = [];
 
     addMetricHeader(lines, "tyr_build_info", "gauge", "Tyr build information.");
-    addSample(lines, "tyr_build_info", 1, { version: "0.14.0" });
+    addSample(lines, "tyr_build_info", 1, { version: "0.15.0" });
 
     addMetricHeader(lines, "tyr_ready", "gauge", "Whether Tyr is ready to accept managed traffic.");
     addSample(lines, "tyr_ready", ready ? 1 : 0);

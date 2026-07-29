@@ -16,6 +16,7 @@ import type {
   TyrAdmissionAuditEvent,
   TyrTelemetryOptions,
 } from "../src/telemetry.js";
+import type { TyrIdentityOptions } from "../src/identity.js";
 import type {
   AdaptiveEstimationConfig,
   AdmissionMode,
@@ -257,6 +258,7 @@ function startGateway(
     isReady?: GatewayOptions["isReady"];
     telemetry?: TyrTelemetryOptions;
     operatorBearerToken?: string;
+    identity?: TyrIdentityOptions;
   } = {},
 ): Promise<{
   server: Server;
@@ -290,6 +292,7 @@ function startGateway(
     ...(opts.operatorBearerToken !== undefined
       ? { operatorBearerToken: opts.operatorBearerToken }
       : {}),
+    ...(opts.identity !== undefined ? { identity: opts.identity } : {}),
     pools: [
       {
         name: "test-pool",
@@ -1040,6 +1043,135 @@ describe("admission-gateway", () => {
     }
   });
 
+  it("authenticates and authorizes before reading or parsing the request body", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 1 },
+      {
+        identity: {
+          authenticate: () => {
+            throw new Error("missing identity");
+          },
+          invokeRoles: ["tyr.invoke"],
+        },
+      },
+    );
+    try {
+      const response = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "not-json",
+      });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("connection")).toBe("close");
+      expect(await response.json()).toEqual({
+        error: { type: "identity_invalid" },
+      });
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("uses authenticated roles for invoke authorization, priority, and audit attribution", async () => {
+    const auditEvents: TyrAdmissionAuditEvent[] = [];
+    const gw = await startGateway(
+      {
+        maxConcurrent: 2,
+        budget: 5_000,
+        highPriorityReserve: 1_000,
+      },
+      {
+        identity: {
+          authenticate: (req) => ({
+            subject: String(req.headers["x-test-subject"] ?? "user-1"),
+            tenantId: "tenant-a",
+            applicationId: "app-web",
+            roles: String(req.headers["x-test-roles"] ?? "")
+              .split(" ")
+              .filter(Boolean),
+          }),
+          invokeRoles: ["tyr.invoke"],
+          highPriorityRoles: ["tyr.priority.high"],
+        },
+        trustPriorityHeader: true,
+        telemetry: {
+          auditEnabled: true,
+          auditSink: (event) => auditEvents.push(event),
+        },
+      },
+    );
+    try {
+      const forbidden = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-test-roles": "tyr.priority.high",
+        },
+        body: JSON.stringify(msg("forbidden")),
+      });
+      expect(forbidden.status).toBe(403);
+      expect(await forbidden.json()).toEqual({
+        error: { type: "identity_forbidden" },
+      });
+
+      const admitted = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-test-subject": "user-42",
+          "x-test-roles": "tyr.invoke tyr.priority.high",
+          "x-priority": "normal",
+        },
+        body: JSON.stringify(msg("identity")),
+      });
+      expect(admitted.status).toBe(200);
+      await admitted.text();
+      expect(auditEvents).toHaveLength(1);
+      expect(auditEvents[0]).toMatchObject({
+        schema: "tyr.admission-audit.v2",
+        priority: "high",
+        identity: {
+          subject: "user-42",
+          tenantId: "tenant-a",
+          applicationId: "app-web",
+          roles: ["tyr.invoke", "tyr.priority.high"],
+        },
+      });
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("authorizes operator endpoints from authenticated operator roles", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 1 },
+      {
+        identity: {
+          authenticate: (req) => ({
+            subject: "operator",
+            roles:
+              req.headers["x-test-role"] === "operator"
+                ? ["tyr.operator"]
+                : ["tyr.invoke"],
+          }),
+          operatorRoles: ["tyr.operator"],
+        },
+      },
+    );
+    try {
+      const forbidden = await fetch(`${gw.url}/stats`, {
+        headers: { "x-test-role": "invoke" },
+      });
+      expect(forbidden.status).toBe(403);
+
+      const authorized = await fetch(`${gw.url}/stats`, {
+        headers: { "x-test-role": "operator" },
+      });
+      expect(authorized.status).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+
   it("exports bounded Prometheus metrics and one completed admission audit", async () => {
     const auditEvents: TyrAdmissionAuditEvent[] = [];
     const gw = await startGateway(
@@ -1067,7 +1199,7 @@ describe("admission-gateway", () => {
         "text/plain; version=0.0.4",
       );
       const metrics = await metricsResponse.text();
-      expect(metrics).toContain('tyr_build_info{version="0.14.0"} 1');
+      expect(metrics).toContain('tyr_build_info{version="0.15.0"} 1');
       expect(metrics).toContain(
         'tyr_admission_decisions_total{outcome="admitted",pool="test-pool",priority="normal"} 1',
       );
@@ -1081,7 +1213,7 @@ describe("admission-gateway", () => {
 
       expect(auditEvents).toHaveLength(1);
       expect(auditEvents[0]).toMatchObject({
-        schema: "tyr.admission-audit.v1",
+        schema: "tyr.admission-audit.v2",
         event: "admission_decision",
         outcome: "admitted",
         settlement: "completed",
@@ -2098,6 +2230,16 @@ describe("admission-gateway", () => {
         ],
       }),
     ).toThrow(/duplicate model prefix/);
+    expect(() =>
+      createGateway({
+        upstreamUrl: "https://example.com",
+        identity: {
+          credentialHeader: "authorization",
+          authenticate: () => ({ subject: "user", roles: [] }),
+        },
+        pools: [basePool],
+      }),
+    ).toThrow(/conflicts with provider header authorization/);
   });
 
   it("validates environment configuration with actionable errors", () => {

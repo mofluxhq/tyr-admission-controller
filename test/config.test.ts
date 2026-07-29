@@ -128,6 +128,74 @@ describe("file configuration", () => {
     }
   });
 
+  it("loads first-class JWT identity and role policy configuration", () => {
+    const path = tempConfig(`
+version: 1
+identity:
+  jwt:
+    jwksUrl: https://identity.example.com/.well-known/jwks.json
+    issuer: https://identity.example.com/
+    audience: [tyr, moflux]
+    header: x-tyr-identity-token
+    algorithms: [RS256, RS512]
+    cacheTtlMs: 120000
+    requestTimeoutMs: 2500
+    clockSkewSeconds: 15
+    requireExpiration: true
+    claims:
+      subject: user_id
+      tenantId: organization_id
+      applicationId: client_id
+      roles: permissions
+  roles:
+    invoke: [tyr.invoke]
+    operator: [tyr.operator]
+    highPriority: [tyr.priority.high]
+upstreams:
+  openai:
+    baseUrl: http://localhost:8000
+pools:
+  - name: local
+    modelPrefixes: [local-]
+    estimatorModel: gpt-4o
+    maxConcurrent: 2
+`);
+    const config = loadRuntimeConfigFile(path);
+    expect(config.gateway.identity).toBeDefined();
+    expect(config.gateway.identity?.authenticate).toBeTypeOf("function");
+    expect(config.gateway.identity?.credentialHeader).toBe(
+      "x-tyr-identity-token",
+    );
+    expect(config.gateway.identity?.invokeRoles).toEqual(["tyr.invoke"]);
+    expect(config.gateway.identity?.operatorRoles).toEqual(["tyr.operator"]);
+    expect(config.gateway.identity?.highPriorityRoles).toEqual([
+      "tyr.priority.high",
+    ]);
+  });
+
+  it("rejects an identity header that conflicts with provider credentials", () => {
+    const path = tempConfig(`
+version: 1
+identity:
+  jwt:
+    jwksUrl: https://identity.example.com/jwks.json
+    issuer: issuer
+    audience: tyr
+    header: Authorization
+upstreams:
+  openai:
+    baseUrl: http://localhost:8000
+pools:
+  - name: local
+    modelPrefixes: [local-]
+    estimatorModel: gpt-4o
+    maxConcurrent: 2
+`);
+    expect(() => loadRuntimeConfigFile(path)).toThrow(
+      /conflicts with provider header authorization/,
+    );
+  });
+
   it("uses documented defaults for optional server and priority fields", () => {
     const path = tempConfig(`
 version: 1

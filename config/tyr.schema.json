@@ -203,6 +203,158 @@
           }
         }
       }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "jwt"
+      ],
+      "properties": {
+        "jwt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "jwksUrl",
+            "issuer",
+            "audience"
+          ],
+          "properties": {
+            "jwksUrl": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https?://"
+            },
+            "issuer": {
+              "type": "string",
+              "minLength": 1
+            },
+            "audience": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              ]
+            },
+            "header": {
+              "type": "string",
+              "minLength": 1,
+              "default": "x-tyr-identity-token",
+              "not": {
+                "enum": [
+                  "authorization",
+                  "content-type",
+                  "x-api-key",
+                  "anthropic-version",
+                  "anthropic-beta",
+                  "openai-organization",
+                  "openai-project"
+                ]
+              }
+            },
+            "algorithms": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "RS256",
+                  "RS384",
+                  "RS512"
+                ]
+              },
+              "default": [
+                "RS256"
+              ]
+            },
+            "cacheTtlMs": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 300000
+            },
+            "requestTimeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 5000
+            },
+            "clockSkewSeconds": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 30
+            },
+            "requireExpiration": {
+              "type": "boolean",
+              "default": true
+            },
+            "claims": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "subject": {
+                  "type": "string",
+                  "minLength": 1,
+                  "default": "sub"
+                },
+                "tenantId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "default": "tenant_id"
+                },
+                "applicationId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "default": "azp"
+                },
+                "roles": {
+                  "type": "string",
+                  "minLength": 1,
+                  "default": "roles"
+                }
+              }
+            }
+          }
+        },
+        "roles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "invoke": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "operator": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "highPriority": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
     }
   },
   "$defs": {

@@ -3,6 +3,12 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { parseDocument } from "yaml";
 import type { LatchfloAgentMetadata, LatchfloRuntimeConfig } from "./latchflo.js";
+import {
+  createJwtIdentityAuthenticator,
+  DEFAULT_TYR_IDENTITY_HEADER,
+  type JwtRsaAlgorithm,
+  type TyrIdentityOptions,
+} from "./identity.js";
 import type { PoolConfig } from "./pools.js";
 import type { GatewayOptions } from "./server.js";
 
@@ -459,6 +465,187 @@ function normalizeLabels(value: unknown, field: string): Record<string, string> 
   return normalized;
 }
 
+function stringArray(
+  value: unknown,
+  field: string,
+  opts: { minItems?: number } = {},
+): string[] {
+  if (!Array.isArray(value) || value.length < (opts.minItems ?? 0)) {
+    throw new Error(
+      `${field} must be an array with at least ${opts.minItems ?? 0} item(s)`,
+    );
+  }
+  const normalized = value.map((entry, index) =>
+    requiredString(entry, `${field}[${index}]`),
+  );
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error(`${field} must not contain duplicates`);
+  }
+  return normalized;
+}
+
+function stringOrStringArray(value: unknown, field: string): string | string[] {
+  if (typeof value === "string") return requiredString(value, field);
+  return stringArray(value, field, { minItems: 1 });
+}
+
+function normalizeIdentity(value: unknown): TyrIdentityOptions | undefined {
+  if (value === undefined) return undefined;
+  const identity = objectValue(value, "identity");
+  assertKnownKeys(identity, ["jwt", "roles"], "identity");
+
+  const jwt = objectValue(identity["jwt"], "identity.jwt");
+  assertKnownKeys(
+    jwt,
+    [
+      "jwksUrl",
+      "issuer",
+      "audience",
+      "header",
+      "algorithms",
+      "cacheTtlMs",
+      "requestTimeoutMs",
+      "clockSkewSeconds",
+      "requireExpiration",
+      "claims",
+    ],
+    "identity.jwt",
+  );
+  const jwksUrl = absoluteHttpUrl(jwt["jwksUrl"], "identity.jwt.jwksUrl");
+  const issuer = requiredString(jwt["issuer"], "identity.jwt.issuer");
+  const audience = stringOrStringArray(
+    jwt["audience"],
+    "identity.jwt.audience",
+  );
+  const header = optionalString(jwt, "header", "identity.jwt.header");
+  const credentialHeader = (header ?? DEFAULT_TYR_IDENTITY_HEADER).toLowerCase();
+  const providerHeaders = new Set([
+    "authorization",
+    "content-type",
+    "x-api-key",
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-organization",
+    "openai-project",
+  ]);
+  if (providerHeaders.has(credentialHeader)) {
+    throw new Error(
+      `identity.jwt.header conflicts with provider header ${credentialHeader}`,
+    );
+  }
+  const rawAlgorithms = jwt["algorithms"];
+  let algorithms: JwtRsaAlgorithm[] | undefined;
+  if (rawAlgorithms !== undefined) {
+    const values = stringArray(rawAlgorithms, "identity.jwt.algorithms", {
+      minItems: 1,
+    });
+    for (const value of values) {
+      if (value !== "RS256" && value !== "RS384" && value !== "RS512") {
+        throw new Error(
+          `identity.jwt.algorithms contains unsupported algorithm ${value}`,
+        );
+      }
+    }
+    algorithms = values as JwtRsaAlgorithm[];
+  }
+  const cacheTtlMs = optionalInteger(
+    jwt,
+    "cacheTtlMs",
+    "identity.jwt.cacheTtlMs",
+    { min: 0 },
+  );
+  const requestTimeoutMs = optionalInteger(
+    jwt,
+    "requestTimeoutMs",
+    "identity.jwt.requestTimeoutMs",
+    { min: 1 },
+  );
+  const clockSkewSeconds = optionalInteger(
+    jwt,
+    "clockSkewSeconds",
+    "identity.jwt.clockSkewSeconds",
+    { min: 0 },
+  );
+  const requireExpiration = optionalBoolean(
+    jwt,
+    "requireExpiration",
+    "identity.jwt.requireExpiration",
+  );
+
+  const claims = optionalObjectValue(jwt, "claims", "identity.jwt.claims") ?? {};
+  assertKnownKeys(
+    claims,
+    ["subject", "tenantId", "applicationId", "roles"],
+    "identity.jwt.claims",
+  );
+  const subject = optionalString(
+    claims,
+    "subject",
+    "identity.jwt.claims.subject",
+  );
+  const tenantId = optionalString(
+    claims,
+    "tenantId",
+    "identity.jwt.claims.tenantId",
+  );
+  const applicationId = optionalString(
+    claims,
+    "applicationId",
+    "identity.jwt.claims.applicationId",
+  );
+  const rolesClaim = optionalString(
+    claims,
+    "roles",
+    "identity.jwt.claims.roles",
+  );
+
+  const roleConfig = optionalObjectValue(identity, "roles", "identity.roles") ?? {};
+  assertKnownKeys(
+    roleConfig,
+    ["invoke", "operator", "highPriority"],
+    "identity.roles",
+  );
+  const invokeRoles =
+    roleConfig["invoke"] === undefined
+      ? undefined
+      : stringArray(roleConfig["invoke"], "identity.roles.invoke");
+  const operatorRoles =
+    roleConfig["operator"] === undefined
+      ? undefined
+      : stringArray(roleConfig["operator"], "identity.roles.operator");
+  const highPriorityRoles =
+    roleConfig["highPriority"] === undefined
+      ? undefined
+      : stringArray(
+          roleConfig["highPriority"],
+          "identity.roles.highPriority",
+        );
+
+  return {
+    credentialHeader,
+    authenticate: createJwtIdentityAuthenticator({
+      jwksUrl,
+      issuer,
+      audience,
+      ...(header === undefined ? {} : { header }),
+      ...(algorithms === undefined ? {} : { algorithms }),
+      ...(cacheTtlMs === undefined ? {} : { cacheTtlMs }),
+      ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
+      ...(clockSkewSeconds === undefined ? {} : { clockSkewSeconds }),
+      ...(requireExpiration === undefined ? {} : { requireExpiration }),
+      claims: {
+        ...(subject === undefined ? {} : { subject }),
+        ...(tenantId === undefined ? {} : { tenantId }),
+        ...(applicationId === undefined ? {} : { applicationId }),
+        ...(rolesClaim === undefined ? {} : { roles: rolesClaim }),
+      },
+    }),
+    ...(invokeRoles === undefined ? {} : { invokeRoles }),
+    ...(operatorRoles === undefined ? {} : { operatorRoles }),
+    ...(highPriorityRoles === undefined ? {} : { highPriorityRoles }),
+  };
+}
+
 function normalizeControlPlaneMetadata(
   value: unknown,
 ): LatchfloAgentMetadata | undefined {
@@ -837,6 +1024,7 @@ function normalizeFileConfiguration(
       "timeouts",
       "shutdown",
       "priority",
+      "identity",
       "telemetry",
       "pools",
       "controlPlane",
@@ -922,6 +1110,7 @@ function normalizeFileConfiguration(
   assertKnownKeys(priority, ["trustHeader"], "priority");
   const trustPriorityHeader =
     optionalBoolean(priority, "trustHeader", "priority.trustHeader") ?? false;
+  const identity = normalizeIdentity(root["identity"]);
 
   const telemetry = optionalObjectValue(root, "telemetry", "telemetry") ?? {};
   assertKnownKeys(telemetry, ["metrics", "audit"], "telemetry");
@@ -984,6 +1173,7 @@ function normalizeFileConfiguration(
         ? { shutdownDrainTimeoutMs }
         : {}),
       trustPriorityHeader,
+      ...(identity === undefined ? {} : { identity }),
       telemetry: { metricsEnabled, auditEnabled },
       ...(operatorBearerToken === undefined ? {} : { operatorBearerToken }),
       pools,

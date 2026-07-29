@@ -32,9 +32,36 @@ shutdown:
   drainTimeoutMs: 30000
 
 priority:
-  # Keep false unless a trusted proxy strips client copies of x-priority and
-  # injects an authenticated value.
+  # Legacy trusted-proxy fallback. Ignored for provider requests when
+  # first-class identity is configured below.
   trustHeader: false
+
+# Optional first-class request identity. When configured, provider requests
+# must present `Bearer <JWT>` in this header and are authenticated before Tyr
+# reads the request body. The provider Authorization header remains untouched.
+# identity:
+#   jwt:
+#     jwksUrl: https://identity.example.com/.well-known/jwks.json
+#     issuer: https://identity.example.com/
+#     audience: moflux-tyr
+#     header: x-tyr-identity-token
+#     algorithms: [RS256]
+#     cacheTtlMs: 300000
+#     requestTimeoutMs: 5000
+#     clockSkewSeconds: 30
+#     requireExpiration: true
+#     claims:
+#       subject: sub
+#       tenantId: tenant_id
+#       applicationId: azp
+#       roles: roles
+#   roles:
+#     # Each list uses any-of semantics. Empty/omitted invoke allows every
+#     # authenticated identity; operator access otherwise falls back to
+#     # TYR_OPERATOR_BEARER_TOKEN; highPriority defaults to normal priority.
+#     invoke: [tyr.invoke]
+#     operator: [tyr.operator]
+#     highPriority: [tyr.priority.high]
 
 telemetry:
   metrics:

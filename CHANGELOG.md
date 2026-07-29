@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-29
+
+### Added
+
+- Added immutable authenticated request identity with subject, optional tenant
+  and application IDs, and bounded roles.
+- Added configurable RS256/RS384/RS512 JWT verification against cached JWKS,
+  including issuer, audience, expiration, not-before, issued-at, key-ID,
+  algorithm, token-size, JWKS-size, timeout, and rotation validation.
+- Added versioned YAML and JSON Schema configuration under `identity.jwt` and
+  `identity.roles`. The default `x-tyr-identity-token` header keeps identity
+  credentials separate from provider `Authorization` headers.
+- Added any-of role authorization for provider invocation and operator
+  endpoints, plus role-based access to high-priority token reserves.
+- Added programmatic identity APIs and passed verified identity to
+  `GatewayOptions.resolvePriority(req, identity)`.
+- Added regression coverage for JWT validation, JWKS rotation, pre-body
+  authentication, role authorization, role priority, operator access, and audit
+  attribution.
+
+### Changed
+
+- Provider requests authenticate and authorize before Tyr buffers or parses the
+  request body.
+- When first-class identity is configured, verified role policy takes
+  precedence and raw `x-priority` is ignored. The legacy trusted-header path is
+  retained for deployments without first-class identity.
+- Structured admission audit events now use `tyr.admission-audit.v2` and include
+  authenticated identity on admitted, observe-bypassed, and rejected decisions.
+  Identity fields are not added to Prometheus labels.
+- `/stats` and `/metrics` can now be authorized by an authenticated operator
+  role; `TYR_OPERATOR_BEARER_TOKEN` remains available as an alternative.
+
 ## [0.14.0] - 2026-07-28
 
 ### Added

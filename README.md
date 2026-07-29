@@ -5,17 +5,35 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.14.0 is built on
+Tyr 0.15.0 is built on
 [`async-bulkhead-llm@3.12.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.14.0, single-process data plane, proprietary software. See
+> **Status:** v0.15.0, single-process data plane, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr now includes first-class Latchflo managed
 > mode with configuration-driven registration, expiring grants, readiness,
 > persisted agent credentials, and fail-closed expiration behavior.
+
+## What shipped in v0.15.0
+
+- Added first-class immutable request identity with `subject`, optional tenant and
+  application attribution, and bounded roles.
+- Added RS256/RS384/RS512 JWT verification against a cached JWKS endpoint, with
+  issuer, audience, expiration, not-before, issued-at, algorithm, key-ID, size,
+  timeout, and key-rotation validation.
+- Provider requests are authenticated and role-authorized before Tyr buffers or
+  parses their bodies. Identity uses `x-tyr-identity-token` by default so OpenAI
+  and Anthropic provider credentials in `Authorization` remain untouched.
+- Added any-of role policy for provider invocation, operator endpoints, and
+  high-priority token-reserve access. When identity is enabled, raw
+  `x-priority` cannot override verified role policy.
+- Upgraded structured admission audit events to
+  `tyr.admission-audit.v2`; admitted, observe-bypassed, and rejected decisions
+  now include their authenticated identity without adding tenant-supplied values
+  to Prometheus labels.
 
 ## What shipped in v0.14.0
 
@@ -192,10 +210,10 @@ not for representing actual upstream load while bypasses are running.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/v1/messages` | Admission-gated Anthropic Messages proxy |
-| `POST` | `/v1/chat/completions` | Admission-gated OpenAI Chat Completions proxy |
-| `GET` | `/stats` | Live per-pool bulkhead statistics; optional operator bearer token |
-| `GET` | `/metrics` | Prometheus text exposition; optional operator bearer token |
+| `POST` | `/v1/messages` | Identity-authorized, admission-gated Anthropic Messages proxy |
+| `POST` | `/v1/chat/completions` | Identity-authorized, admission-gated OpenAI Chat Completions proxy |
+| `GET` | `/stats` | Live per-pool statistics; optional operator JWT role or bearer token |
+| `GET` | `/metrics` | Prometheus text; optional operator JWT role or bearer token |
 | `GET` | `/healthz` | Process liveness |
 | `GET` | `/readyz` | Managed readiness; `503` until all configured Latchflo grants are valid |
 
@@ -402,6 +420,23 @@ shutdown:
 priority:
   trustHeader: false
 
+identity:
+  jwt:
+    jwksUrl: https://identity.example.com/.well-known/jwks.json
+    issuer: https://identity.example.com/
+    audience: moflux-tyr
+    header: x-tyr-identity-token
+    algorithms: [RS256]
+    claims:
+      subject: sub
+      tenantId: tenant_id
+      applicationId: azp
+      roles: roles
+  roles:
+    invoke: [tyr.invoke]
+    operator: [tyr.operator]
+    highPriority: [tyr.priority.high]
+
 telemetry:
   metrics:
     enabled: true
@@ -453,7 +488,20 @@ pools:
 | `timeouts.streamIdleMs` | No | Maximum gap between upstream stream chunks |
 | `timeouts.clientStallMs` | No | Maximum wait for a backpressured client to drain |
 | `shutdown.drainTimeoutMs` | No | Bounded graceful-drain deadline; omit for unbounded drain |
-| `priority.trustHeader` | No | Trust raw `x-priority`; default `false` |
+| `priority.trustHeader` | No | Legacy trusted-proxy fallback; ignored on provider routes when identity is configured |
+| `identity.jwt.jwksUrl` | Identity only | HTTP(S) JWKS endpoint used to verify JWT signatures |
+| `identity.jwt.issuer` | Identity only | Exact required `iss` claim |
+| `identity.jwt.audience` | Identity only | Required audience string or list; at least one must match `aud` |
+| `identity.jwt.header` | No | Header containing `Bearer <JWT>`; default `x-tyr-identity-token` |
+| `identity.jwt.algorithms` | No | Allowed RSA algorithms; default `[RS256]` |
+| `identity.jwt.cacheTtlMs` | No | JWKS cache lifetime; unknown `kid` forces one refresh |
+| `identity.jwt.requestTimeoutMs` | No | JWKS request deadline; default `5000` |
+| `identity.jwt.clockSkewSeconds` | No | Clock tolerance for `exp`, `nbf`, and `iat`; default `30` |
+| `identity.jwt.requireExpiration` | No | Require `exp`; default `true` |
+| `identity.jwt.claims.*` | No | Claim names for subject, tenant, application, and roles |
+| `identity.roles.invoke` | No | Any matching role may invoke provider routes; omitted/empty allows any authenticated identity |
+| `identity.roles.operator` | No | Any matching role may read `/stats` and `/metrics` |
+| `identity.roles.highPriority` | No | Any matching role receives `high` admission priority |
 | `telemetry.metrics.enabled` | No | Expose Prometheus text at `/metrics`; default `true` |
 | `telemetry.audit.enabled` | No | Emit one structured JSON line per admission decision; default `false` |
 | `pools[].name` | Yes | Unique pool name used in stats and rejection details |
@@ -517,7 +565,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.14.0
+    version: 0.15.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -583,34 +631,46 @@ so in-flight requests remain attributable to the grant captured at admission.
 Reductions use shrink-by-attrition; setting `maxConcurrent: 0` disables new
 admissions immediately.
 
-## Priority safety
+## Authenticated identity and priority safety
 
-Client-supplied `x-priority` is ignored by default. This prevents an
-unauthenticated caller from assigning itself the high-priority token reserve.
+Identity is optional for backward compatibility. Once `identity` is configured,
+every provider request must present a valid JWT before Tyr reads the request
+body. The default identity header is deliberately separate from
+`Authorization`, because Tyr forwards that provider credential to OpenAI and
+Anthropic. Tyr strips the configured identity credential header before
+forwarding and rejects configuration that reuses a provider-forwarded header.
 
-Raw-header trust can be enabled in file mode:
+```bash
+curl http://localhost:8787/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer YOUR_OPENAI_API_KEY' \
+  -H 'x-tyr-identity-token: Bearer YOUR_IDENTITY_JWT' \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}'
+```
+
+Role lists use any-of semantics. `identity.roles.invoke` authorizes provider
+routes, `identity.roles.operator` authorizes `/stats` and `/metrics`, and
+`identity.roles.highPriority` grants access to the reserved high-priority token
+headroom. Tenant, application, subject, and roles appear only in structured
+audit events, never in Prometheus labels.
+
+When identity is enabled, client-supplied `x-priority` is ignored even if the
+legacy trusted-header option is true. Embedded applications can still supply
+`GatewayOptions.resolvePriority(req, identity)` for custom policy; the verified
+identity is passed as the second argument. Programmatic authenticators using a
+custom credential header should also set `identity.credentialHeader` so Tyr
+strips it before provider forwarding.
+
+The legacy raw-header path remains available only when identity is not
+configured:
 
 ```yaml
 priority:
   trustHeader: true
 ```
 
-Enable this only behind a trusted proxy that removes client-provided copies,
-authenticates the caller, and injects its own header.
-
-Applications that instantiate `createGateway()` directly should prefer
-`GatewayOptions.resolvePriority` and derive priority from authenticated
-identity or trusted policy:
-
-```ts
-createGateway({
-  resolvePriority: async (req) => {
-    const identity = await authenticate(req);
-    return identity.plan === "interactive" ? "high" : "normal";
-  },
-  // upstreams and pools
-});
-```
+Enable that fallback only behind a trusted proxy that removes client copies,
+authenticates callers, and injects its own header.
 
 ## Validate configuration in CI
 
@@ -637,7 +697,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.14.0 .
+docker build -t tyr-admission-controller:0.15.0 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -648,7 +708,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.14.0
+  tyr-admission-controller:0.15.0
 ```
 
 Or use the included Compose example:
@@ -746,8 +806,8 @@ for the local demo or protect the endpoints at the network layer.
 
 Set `telemetry.audit.enabled: true` or `TYR_AUDIT_ENABLED=true` to emit one JSON
 line per admission decision. Audit output is intentionally richer than metrics
-and can include model, admission ID, reservation, exact grant provenance, final
-usage, and settlement. Audit-sink failures are isolated from proxy behavior and
+and can include authenticated subject, tenant, application, roles, model,
+admission ID, reservation, exact grant provenance, final usage, and settlement. Audit-sink failures are isolated from proxy behavior and
 counted by `tyr_audit_write_failures_total`.
 
 ## Known limitations
@@ -762,7 +822,7 @@ counted by `tyr_audit_write_failures_total`.
   replaceable at runtime.
 - Adaptive calibration is local, learned only from live observations, and is not
   persisted across restarts.
-- Provider routes still require authentication and authorization at an upstream gateway or trusted application boundary. The built-in operator token covers only `/stats` and `/metrics`.
+- JWT identity currently supports direct JWKS URLs and RSA signatures; OIDC discovery, EC signatures, and durable identity-policy distribution remain external work.
 - Prometheus export is built in, but OTLP/OpenTelemetry export and durable audit storage remain external integration work.
 - SSE usage extraction must be verified against the exact provider API versions
   used in production. Missing usage affects reservation refunds, not proxying.
@@ -785,6 +845,7 @@ src/
   adapters.ts       provider validation, projection, and usage parsing
   cli.ts            offline configuration validation command
   config.ts         YAML and legacy environment configuration loading
+  identity.ts       JWT/JWKS authentication, immutable identity, and role policy
   index.ts          validated process entrypoint and managed-mode lifecycle
   latchflo.ts        built-in Latchflo agent, retry, readiness, and token persistence
   pools.ts          v3.12 policy runtime, versioned limits, observe mode, and drain

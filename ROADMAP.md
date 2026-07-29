@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.14.0` telemetry release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.15.0` identity release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.14.0
+## Current baseline: v0.15.0
 
 The current release provides:
 
@@ -46,12 +46,21 @@ The current release provides:
   Compose assets, and expanded local policy statistics.
 - Native bounded-cardinality Prometheus metrics, optional structured admission
   audit events, operator-token protection, and a provisioned Grafana demo.
+- First-class JWT/JWKS request identity, role authorization for provider and
+  operator routes, role-based high priority, and identity-attributed audit events.
 
-Known commercial limitations include a single-controller SQLite control plane, no authenticated
-tenant/application identity, no OTLP exporter or durable audit store, limited protocol
-coverage, and no hardened multi-region deployment package.
+Known commercial limitations include a single-controller SQLite control plane, no OTLP exporter or durable audit store, direct-JWKS-only identity configuration, limited protocol coverage, and no hardened multi-region deployment package.
 
 ## Release sequence
+
+### v0.15.0 — Authenticated request identity
+
+**Status:** Released 2026-07-29
+
+- Added JWT/JWKS authentication before request-body buffering.
+- Added role authorization for provider invocation and operator endpoints.
+- Added verified role-based high-priority admission.
+- Added identity attribution to `tyr.admission-audit.v2`.
 
 ### v0.14.0 — Production telemetry and demonstrable value
 
@@ -132,8 +141,7 @@ Outcome:
 Limitations at that release:
 
 - Standard metrics export, operator protection, and structured audit events were
-  delivered later in v0.14.0; authenticated tenant/application identity remains
-  future work.
+  delivered later in v0.14.0; authenticated tenant/application identity arrived in v0.15.0.
 
 ### v0.9.0 — Adaptive and observable admission policy
 
@@ -161,8 +169,7 @@ Outcome:
 Limitations at that release:
 
 - Standard metrics export, operator protection, and structured audit events were
-  delivered later in v0.14.0; authenticated tenant/application identity remains
-  future work.
+  delivered later in v0.14.0; authenticated tenant/application identity arrived in v0.15.0.
 
 ### v0.10.0 — Versioned data-plane control
 
@@ -189,8 +196,7 @@ Outcome:
 Limitations at that release:
 
 - Latchflo-managed expiring grants arrived in v0.13.0 and Prometheus/audit
-  telemetry arrived in v0.14.0; identity and durable audit storage remain future
-  work.
+  telemetry arrived in v0.14.0; identity arrived in v0.15.0; durable audit storage remains future work.
 
 ### v0.11.0 — Provenance-correct distributed admission
 
