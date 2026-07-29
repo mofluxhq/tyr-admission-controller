@@ -54,9 +54,19 @@ function requestWithToken(token?: string): IncomingMessage {
 
 async function startJwks(
   keys: readonly JsonWebKey[],
-): Promise<{ url: string; setKeys: (next: readonly JsonWebKey[]) => void }> {
+): Promise<{
+  url: string;
+  setKeys: (next: readonly JsonWebKey[]) => void;
+  setAvailable: (available: boolean) => void;
+}> {
   let current = keys;
+  let available = true;
   const server = createServer((_req, res) => {
+    if (!available) {
+      res.writeHead(503, { "content-length": "0" });
+      res.end();
+      return;
+    }
     const body = JSON.stringify({ keys: current });
     res.writeHead(200, {
       "content-type": "application/json",
@@ -71,6 +81,9 @@ async function startJwks(
     url: `http://127.0.0.1:${port}/jwks`,
     setKeys: (next) => {
       current = next;
+    },
+    setAvailable: (next) => {
+      available = next;
     },
   };
 }
@@ -157,6 +170,80 @@ describe("JWT request identity", () => {
         authenticate(requestWithToken(jwt(pair.privateKey, "primary", claims))),
       ).rejects.toBeInstanceOf(TyrIdentityError);
     }
+  });
+
+  it("distinguishes verifier unavailability from invalid credentials", async () => {
+    const pair = keyPair("primary");
+    const jwks = await startJwks([pair.jwk]);
+    const authenticate = createJwtIdentityAuthenticator({
+      jwksUrl: jwks.url,
+      issuer: "issuer",
+      audience: "tyr",
+      cacheTtlMs: 60_000,
+    });
+    const now = Math.floor(Date.now() / 1_000);
+    const token = jwt(pair.privateKey, "primary", {
+      iss: "issuer",
+      aud: "tyr",
+      sub: "user",
+      exp: now + 60,
+    });
+
+    jwks.setAvailable(false);
+    await expect(authenticate(requestWithToken(token))).rejects.toMatchObject({
+      code: "identity_unavailable",
+      status: 503,
+    });
+
+    jwks.setAvailable(true);
+    await expect(authenticate(requestWithToken(token))).resolves.toMatchObject({
+      subject: "user",
+    });
+
+    jwks.setAvailable(false);
+    await expect(authenticate(requestWithToken(token))).resolves.toMatchObject({
+      subject: "user",
+    });
+  });
+
+  it("returns verifier unavailable when an unknown kid cannot be refreshed", async () => {
+    const first = keyPair("first");
+    const second = keyPair("second");
+    const jwks = await startJwks([first.jwk]);
+    const authenticate = createJwtIdentityAuthenticator({
+      jwksUrl: jwks.url,
+      issuer: "issuer",
+      audience: "tyr",
+      cacheTtlMs: 60_000,
+    });
+    const now = Math.floor(Date.now() / 1_000);
+    await authenticate(
+      requestWithToken(
+        jwt(first.privateKey, "first", {
+          iss: "issuer",
+          aud: "tyr",
+          sub: "one",
+          exp: now + 60,
+        }),
+      ),
+    );
+
+    jwks.setAvailable(false);
+    await expect(
+      authenticate(
+        requestWithToken(
+          jwt(second.privateKey, "second", {
+            iss: "issuer",
+            aud: "tyr",
+            sub: "two",
+            exp: now + 60,
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: "identity_unavailable",
+      status: 503,
+    });
   });
 
   it("refreshes a fresh JWKS cache once when a rotated kid appears", async () => {

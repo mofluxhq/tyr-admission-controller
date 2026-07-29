@@ -28,13 +28,14 @@ export type TyrIdentityOptions = Readonly<{
 export type TyrIdentityFailureCode =
   | "identity_required"
   | "identity_invalid"
-  | "identity_forbidden";
+  | "identity_forbidden"
+  | "identity_unavailable";
 
 export class TyrIdentityError extends Error {
   constructor(
     public readonly code: TyrIdentityFailureCode,
     message: string,
-    public readonly status: 401 | 403,
+    public readonly status: 401 | 403 | 503,
   ) {
     super(message);
     this.name = "TyrIdentityError";
@@ -98,6 +99,10 @@ const SUPPORTED_ALGORITHMS = new Set<JwtRsaAlgorithm>([
 
 function invalid(message: string): TyrIdentityError {
   return new TyrIdentityError("identity_invalid", message, 401);
+}
+
+function unavailable(message: string): TyrIdentityError {
+  return new TyrIdentityError("identity_unavailable", message, 503);
 }
 
 function assertNonEmptyString(value: unknown, field: string): string {
@@ -351,7 +356,7 @@ async function readBoundedResponseBody(
       total += chunk.length;
       if (total > maxBytes) {
         await reader.cancel();
-        throw invalid("JWKS response is too large");
+        throw unavailable("JWKS response is too large");
       }
       chunks.push(chunk);
     }
@@ -407,18 +412,18 @@ class JwksCache {
     try {
       response = await fetch(this.#url, { signal: controller.signal });
     } catch (error) {
-      throw invalid(
+      throw unavailable(
         `JWKS request failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
       clearTimeout(timeout);
     }
     if (!response.ok) {
-      throw invalid(`JWKS request returned HTTP ${response.status}`);
+      throw unavailable(`JWKS request returned HTTP ${response.status}`);
     }
     const contentLength = response.headers.get("content-length");
     if (contentLength !== null && Number(contentLength) > MAX_JWKS_BYTES) {
-      throw invalid("JWKS response is too large");
+      throw unavailable("JWKS response is too large");
     }
     const bytes = await readBoundedResponseBody(response, MAX_JWKS_BYTES);
 
@@ -426,16 +431,18 @@ class JwksCache {
     try {
       parsed = JSON.parse(bytes.toString("utf8"));
     } catch {
-      throw invalid("JWKS response is not valid JSON");
+      throw unavailable("JWKS response is not valid JSON");
     }
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      throw invalid("JWKS response must be an object");
+      throw unavailable("JWKS response must be an object");
     }
     const rawKeys = (parsed as Record<string, unknown>)["keys"];
     if (!Array.isArray(rawKeys) || rawKeys.length === 0) {
-      throw invalid("JWKS keys must be a non-empty array");
+      throw unavailable("JWKS keys must be a non-empty array");
     }
-    if (rawKeys.length > MAX_JWKS_KEYS) throw invalid("JWKS contains too many keys");
+    if (rawKeys.length > MAX_JWKS_KEYS) {
+      throw unavailable("JWKS contains too many keys");
+    }
 
     const keys: CachedJwk[] = [];
     for (const raw of rawKeys) {
@@ -460,7 +467,9 @@ class JwksCache {
         // Ignore malformed or unsupported keys; a missing usable kid is an auth failure.
       }
     }
-    if (keys.length === 0) throw invalid("JWKS contains no usable RSA signing keys");
+    if (keys.length === 0) {
+      throw unavailable("JWKS contains no usable RSA signing keys");
+    }
     this.#keys = Object.freeze(keys);
     this.#expiresAt = Date.now() + this.#cacheTtlMs;
     return this.#keys;

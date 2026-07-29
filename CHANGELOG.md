@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-29
+
+### Fixed
+
+- Distinguished caller-owned credential failures from identity-verifier
+  infrastructure failures. Missing, malformed, expired, incorrectly scoped,
+  or cryptographically invalid JWTs continue to return `401`; JWKS network,
+  timeout, HTTP, size, parsing, and unusable-key-set failures now return
+  `503 identity_unavailable` without a `WWW-Authenticate` challenge.
+- Preserved fail-closed cold-cache behavior while allowing clients and proxies
+  to retry transient identity-provider outages correctly. A valid warm-cache
+  key continues serving until its configured cache TTL expires.
+- Classified untyped exceptions from custom identity authenticators as
+  `503 identity_unavailable`; custom authenticators must throw an explicit
+  `TyrIdentityError` for `401` or `403` caller failures.
+
 ## [0.15.0] - 2026-07-29
 
 ### Added

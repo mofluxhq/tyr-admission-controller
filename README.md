@@ -5,14 +5,14 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.15.0 is built on
+Tyr 0.15.1 is built on
 [`async-bulkhead-llm@3.12.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.15.0, single-process data plane, proprietary software. See
+> **Status:** v0.15.1, single-process data plane, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr now includes first-class Latchflo managed
 > mode with configuration-driven registration, expiring grants, readiness,
 > persisted agent credentials, and fail-closed expiration behavior.
@@ -523,6 +523,13 @@ pools:
 | `pools[].adaptiveEstimation.maxCorrection` | No | Upper factor clamp; default `2` |
 | `pools[].adaptiveEstimation.maxModels` | No | Maximum tracked model keys; default `64` |
 
+Identity failures are separated by ownership: missing or invalid credentials return
+`401 identity_required` or `401 identity_invalid`; valid identities without a required
+role return `403 identity_forbidden`; and JWKS or custom-verifier infrastructure
+failures return `503 identity_unavailable`. Tyr remains fail closed when no usable key
+is cached, but the `503` response allows callers and proxies to retry transient IdP
+outages. A fresh cached key remains usable until `identity.jwt.cacheTtlMs` expires.
+
 `inFlightTokenBudget` is tri-state:
 
 - Omit it to disable token-budget admission for the pool.
@@ -565,7 +572,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.15.0
+    version: 0.15.1
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -697,7 +704,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.15.0 .
+docker build -t tyr-admission-controller:0.15.1 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -708,7 +715,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.15.0
+  tyr-admission-controller:0.15.1
 ```
 
 Or use the included Compose example:

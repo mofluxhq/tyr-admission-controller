@@ -16,7 +16,10 @@ import type {
   TyrAdmissionAuditEvent,
   TyrTelemetryOptions,
 } from "../src/telemetry.js";
-import type { TyrIdentityOptions } from "../src/identity.js";
+import {
+  TyrIdentityError,
+  type TyrIdentityOptions,
+} from "../src/identity.js";
 import type {
   AdaptiveEstimationConfig,
   AdmissionMode,
@@ -1049,7 +1052,11 @@ describe("admission-gateway", () => {
       {
         identity: {
           authenticate: () => {
-            throw new Error("missing identity");
+            throw new TyrIdentityError(
+              "identity_invalid",
+              "missing identity",
+              401,
+            );
           },
           invokeRoles: ["tyr.invoke"],
         },
@@ -1065,6 +1072,33 @@ describe("admission-gateway", () => {
       expect(response.headers.get("connection")).toBe("close");
       expect(await response.json()).toEqual({
         error: { type: "identity_invalid" },
+      });
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("returns 503 when the identity verifier is unavailable", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 1 },
+      {
+        identity: {
+          authenticate: () => {
+            throw new Error("identity provider unavailable");
+          },
+        },
+      },
+    );
+    try {
+      const response = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("unavailable")),
+      });
+      expect(response.status).toBe(503);
+      expect(response.headers.get("www-authenticate")).toBeNull();
+      expect(await response.json()).toEqual({
+        error: { type: "identity_unavailable" },
       });
     } finally {
       gw.server.close();
@@ -1199,7 +1233,7 @@ describe("admission-gateway", () => {
         "text/plain; version=0.0.4",
       );
       const metrics = await metricsResponse.text();
-      expect(metrics).toContain('tyr_build_info{version="0.15.0"} 1');
+      expect(metrics).toContain('tyr_build_info{version="0.15.1"} 1');
       expect(metrics).toContain(
         'tyr_admission_decisions_total{outcome="admitted",pool="test-pool",priority="normal"} 1',
       );

@@ -1,4 +1,4 @@
-Release Tyr 0.15.0 with authenticated request identity
+Release Tyr 0.15.1 with authenticated request identity
 
 Add JWT/JWKS authentication before request-body buffering, immutable request
 identity, role authorization for provider and operator routes, verified

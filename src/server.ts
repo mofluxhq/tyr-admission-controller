@@ -369,9 +369,9 @@ function validateRoleList(roles: readonly string[] | undefined, field: string): 
 function identityFailure(error: unknown): TyrIdentityError {
   if (error instanceof TyrIdentityError) return error;
   return new TyrIdentityError(
-    "identity_invalid",
+    "identity_unavailable",
     error instanceof Error ? error.message : "identity authentication failed",
-    401,
+    503,
   );
 }
 

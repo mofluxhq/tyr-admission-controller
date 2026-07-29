@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.15.0` identity release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.15.1` identity release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.15.0
+## Current baseline: v0.15.1
 
 The current release provides:
 
@@ -52,6 +52,16 @@ The current release provides:
 Known commercial limitations include a single-controller SQLite control plane, no OTLP exporter or durable audit store, direct-JWKS-only identity configuration, limited protocol coverage, and no hardened multi-region deployment package.
 
 ## Release sequence
+
+### v0.15.1 — Identity verifier availability semantics
+
+**Status:** Released 2026-07-29
+
+- Added `503 identity_unavailable` for JWKS and custom-verifier infrastructure
+  failures while preserving fail-closed verification.
+- Kept `401` for caller-owned credential failures and `403` for authorization
+  failures.
+- Preserved warm-cache operation through transient JWKS outages.
 
 ### v0.15.0 — Authenticated request identity
 
