@@ -8,6 +8,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-31
+
+### Added
+
+- Added `Retry-After` on capacity rejections. Tyr now estimates when the pool
+  will have room and tells the caller, instead of leaving it to guess with
+  blind exponential backoff. Emitted for `concurrency_limit`, `queue_limit`,
+  `budget_limit`, and `timeout`.
+- Added `x-admission-retry-after-ms` alongside it, carrying the precise wait.
+  This is the header to prefer. `Retry-After` has one-second resolution, and
+  most capacity waits under load are shorter than that.
+- Added the `retryHint` configuration block (`enabled`, `minMs`, `maxMs`,
+  `halfLifeMs`, `minSamples`) and the `TYR_RETRY_HINT_ENABLED` environment
+  override.
+
+### Changed
+
+- **Behavioral change on upgrade.** A client that already honors `Retry-After`
+  will change its retry timing against Tyr on waits of a second or more.
+  Shorter waits deliberately carry no `Retry-After` at all: rounding a 200ms
+  wait up to `Retry-After: 1` would park a compliant client five times longer
+  than necessary, which is worse advice than the backoff it would have chosen
+  itself. Those rejections carry only `x-admission-retry-after-ms`, so a client
+  that reads neither header behaves exactly as it did before. Set
+  `retryHint.enabled: false` to suppress both.
+
+### Notes
+
+- The estimate is derived from observed upstream completion intervals per pool,
+  held as a time-decayed moving average. Until a pool has produced
+  `minSamples` completions, no header is emitted at all — a missing header is
+  an honest "unknown", which is why `async-bulkhead-llm` continues to expose
+  capacity counters and no ETA of its own. The library cannot see how long work
+  takes; Tyr can, because it proxies it.
+
+### Fixed
+
+- Corrected the client-facing error contract table to include `401` identity
+  failures, `403` authorization failures, and both distinct `503` contracts:
+  retryable `identity_unavailable` verifier outages and shutdown admission
+  rejection.
+
 ## [0.15.1] - 2026-07-29
 
 ### Fixed
@@ -572,7 +614,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.15.1...v0.16.0
 [0.7.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.5.0...v0.6.0

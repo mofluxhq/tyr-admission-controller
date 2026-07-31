@@ -210,6 +210,10 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
   );
   const metricsEnabled = booleanEnv(env, "TYR_METRICS_ENABLED", true);
   const auditEnabled = booleanEnv(env, "TYR_AUDIT_ENABLED", false);
+  const retryHint = {
+    enabled: booleanEnv(env, "TYR_RETRY_HINT_ENABLED", true),
+  };
+
   const operatorBearerToken = envString(env, "TYR_OPERATOR_BEARER_TOKEN");
   const admissionMode = admissionModeEnv(env);
   const adaptiveSmoothing = optionalNumberEnv(env, "ADAPTIVE_SMOOTHING", {
@@ -277,6 +281,7 @@ function loadLegacyEnvironmentConfig(env: NodeJS.ProcessEnv): RuntimeConfig {
         : {}),
       trustPriorityHeader,
       telemetry: { metricsEnabled, auditEnabled },
+      retryHint,
       ...(operatorBearerToken === undefined ? {} : { operatorBearerToken }),
       pools: [
         {
@@ -366,6 +371,21 @@ function optionalInteger(
 ): number | undefined {
   const value = parent[key];
   return value === undefined ? undefined : requiredInteger(value, field, opts);
+}
+
+/**
+ * Spread-friendly form of `optionalInteger`: yields `{}` when the key is
+ * absent so an omitted field never becomes an explicit `undefined` under
+ * `exactOptionalPropertyTypes`.
+ */
+function optionalIntegerEntry<K extends string>(
+  parent: ObjectValue,
+  key: K,
+  field: string,
+  opts: { min: number; max?: number },
+): Partial<Record<K, number>> {
+  const value = optionalInteger(parent, key, field, opts);
+  return (value === undefined ? {} : { [key]: value }) as Partial<Record<K, number>>;
 }
 
 function requiredNumber(
@@ -1026,6 +1046,7 @@ function normalizeFileConfiguration(
       "priority",
       "identity",
       "telemetry",
+      "retryHint",
       "pools",
       "controlPlane",
     ],
@@ -1127,6 +1148,27 @@ function normalizeFileConfiguration(
     optionalBooleanEnv(env, "TYR_AUDIT_ENABLED") ??
     optionalBoolean(audit, "enabled", "telemetry.audit.enabled") ??
     false;
+  const retryHintValue = optionalObjectValue(root, "retryHint", "retryHint") ?? {};
+  assertKnownKeys(
+    retryHintValue,
+    ["enabled", "minMs", "maxMs", "halfLifeMs", "minSamples"],
+    "retryHint",
+  );
+  const retryHint = {
+    enabled:
+      optionalBooleanEnv(env, "TYR_RETRY_HINT_ENABLED") ??
+      optionalBoolean(retryHintValue, "enabled", "retryHint.enabled") ??
+      true,
+    ...optionalIntegerEntry(retryHintValue, "minMs", "retryHint.minMs", { min: 0 }),
+    ...optionalIntegerEntry(retryHintValue, "maxMs", "retryHint.maxMs", { min: 0 }),
+    ...optionalIntegerEntry(retryHintValue, "halfLifeMs", "retryHint.halfLifeMs", {
+      min: 1,
+    }),
+    ...optionalIntegerEntry(retryHintValue, "minSamples", "retryHint.minSamples", {
+      min: 1,
+    }),
+  };
+
   const operatorBearerToken = envString(env, "TYR_OPERATOR_BEARER_TOKEN");
 
   const poolsValue = root["pools"];
@@ -1175,6 +1217,7 @@ function normalizeFileConfiguration(
       trustPriorityHeader,
       ...(identity === undefined ? {} : { identity }),
       telemetry: { metricsEnabled, auditEnabled },
+      retryHint,
       ...(operatorBearerToken === undefined ? {} : { operatorBearerToken }),
       pools,
     },

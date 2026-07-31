@@ -17,6 +17,11 @@ import {
   type TyrPoolStats,
 } from "./pools.js";
 import type { LLMAdmissionLimits } from "async-bulkhead-llm";
+import {
+  RetryHintEstimator,
+  retryAfterSeconds,
+  type RetryHintOptions,
+} from "./retry-hint.js";
 import { anthropicAdapter, openaiAdapter, type Adapter } from "./adapters.js";
 import {
   hasAnyRole,
@@ -121,6 +126,15 @@ export type GatewayOptions = {
   identity?: TyrIdentityOptions;
   /** Prometheus and structured admission-audit configuration. */
   telemetry?: TyrTelemetryOptions;
+  /**
+   * Tuning for the `Retry-After` hint returned on capacity rejections.
+   *
+   * Tyr estimates the wait from observed upstream completion intervals for
+   * the pool. Until it has enough samples it emits no hint rather than a
+   * fabricated one. Omit to accept the defaults; set `enabled: false` to
+   * suppress the headers entirely.
+   */
+  retryHint?: RetryHintOptions;
   /** Optional bearer token protecting /stats and /metrics. */
   operatorBearerToken?: string;
   pools: PoolConfig[];
@@ -479,6 +493,7 @@ export function createGateway(opts: GatewayOptions) {
   validateGatewayOptions(opts);
   const pools = createPools(opts.pools);
   const telemetry = new TyrTelemetry(opts.telemetry);
+  const retryHints = new RetryHintEstimator(opts.retryHint);
   const operatorBearerToken = opts.operatorBearerToken;
   const identityOptions = opts.identity;
   const identityCredentialHeader =
@@ -850,6 +865,14 @@ export function createGateway(opts: GatewayOptions) {
                 outcome: upstreamMetricOutcome,
                 durationSeconds: (performance.now() - upstreamStartedAt) / 1_000,
               });
+              // Capacity returns to the pool here. Feeding the estimator from
+              // the same place keeps the Retry-After hint grounded in observed
+              // completions rather than in an assumed service time.
+              retryHints.observeCompletion(
+                pool.name,
+                preparation.reservation?.reserved ?? 0,
+                Date.now(),
+              );
             }
           },
           {
@@ -898,6 +921,21 @@ export function createGateway(opts: GatewayOptions) {
           res.setHeader("x-admission-revision", String(rejectionRevision));
           setGrantProvenanceHeaders(res, provenance);
           res.setHeader("x-admission-reason", err.reason);
+          const retryAfterMs = retryHints.hintMs(
+            pool.name,
+            err.reason,
+            err.detail,
+            Date.now(),
+          );
+          if (retryAfterMs !== undefined) {
+            // The precise value always; the whole-second header only when it
+            // can carry the wait without badly overstating it.
+            res.setHeader("x-admission-retry-after-ms", String(retryAfterMs));
+            const retryAfterSecs = retryAfterSeconds(retryAfterMs);
+            if (retryAfterSecs !== undefined) {
+              res.setHeader("retry-after", String(retryAfterSecs));
+            }
+          }
           if (err.reason === "shutdown") {
             res.setHeader("connection", "close");
           }

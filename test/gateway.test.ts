@@ -262,6 +262,7 @@ function startGateway(
     telemetry?: TyrTelemetryOptions;
     operatorBearerToken?: string;
     identity?: TyrIdentityOptions;
+    retryHint?: GatewayOptions["retryHint"];
   } = {},
 ): Promise<{
   server: Server;
@@ -296,6 +297,7 @@ function startGateway(
       ? { operatorBearerToken: opts.operatorBearerToken }
       : {}),
     ...(opts.identity !== undefined ? { identity: opts.identity } : {}),
+    ...(opts.retryHint !== undefined ? { retryHint: opts.retryHint } : {}),
     pools: [
       {
         name: "test-pool",
@@ -2301,3 +2303,113 @@ describe("admission-gateway", () => {
 
 
 
+
+describe("retry-after hint on rejection", () => {
+  // Saturates a 1-slot, 0-queue pool and returns the rejected response.
+  async function rejectAfterWarmup(
+    gw: { url: string },
+    warmupRequests: number,
+  ): Promise<Response> {
+    // Sequential completions teach the estimator the pool's completion rate.
+    for (let i = 0; i < warmupRequests; i += 1) {
+      const res = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("hi")),
+      });
+      expect(res.status).toBe(200);
+      await res.text();
+    }
+    // Occupy the only slot with a slow request, then collide with it.
+    const occupied = fetch(`${gw.url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(msg("slow")),
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    const rejected = await fetch(`${gw.url}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(msg("hi")),
+    });
+    await (await occupied).text();
+    return rejected;
+  }
+
+  it("emits Retry-After and the precise ms header once the pool is warm", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 1, maxQueue: 0, budget: 500_000 },
+      { retryHint: { minSamples: 2 } },
+    );
+    try {
+      const res = await rejectAfterWarmup(gw, 4);
+      expect(res.status).toBe(429);
+      expect(res.headers.get("x-admission-reason")).toBe("concurrency_limit");
+
+      const ms = Number(res.headers.get("x-admission-retry-after-ms"));
+      expect(ms).toBeGreaterThan(0);
+
+      // A short wait must NOT carry the whole-second header: rounding a
+      // sub-second wait up to 1s would be worse advice than none.
+      if (ms < 1_000) {
+        expect(res.headers.get("retry-after")).toBeNull();
+      } else {
+        const seconds = Number(res.headers.get("retry-after"));
+        expect(Number.isInteger(seconds)).toBe(true);
+        expect(seconds * 1_000).toBeGreaterThanOrEqual(ms);
+      }
+      await res.text();
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("adds the whole-second header once the wait exceeds one second", async () => {
+    // minMs forces a hint long enough for Retry-After to represent it.
+    const gw = await startGateway(
+      { maxConcurrent: 1, maxQueue: 0, budget: 500_000 },
+      { retryHint: { minSamples: 2, minMs: 2_500 } },
+    );
+    try {
+      const res = await rejectAfterWarmup(gw, 4);
+      expect(res.status).toBe(429);
+      expect(res.headers.get("x-admission-retry-after-ms")).toBe("2500");
+      expect(res.headers.get("retry-after")).toBe("3");
+      await res.text();
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("emits no hint before the pool has been observed", async () => {
+    // minSamples is unreachable here, standing in for a cold pool.
+    const gw = await startGateway(
+      { maxConcurrent: 1, maxQueue: 0, budget: 500_000 },
+      { retryHint: { minSamples: 50 } },
+    );
+    try {
+      const res = await rejectAfterWarmup(gw, 2);
+      expect(res.status).toBe(429);
+      expect(res.headers.get("retry-after")).toBeNull();
+      expect(res.headers.get("x-admission-retry-after-ms")).toBeNull();
+      await res.text();
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("emits no hint when disabled", async () => {
+    const gw = await startGateway(
+      { maxConcurrent: 1, maxQueue: 0, budget: 500_000 },
+      { retryHint: { enabled: false } },
+    );
+    try {
+      const res = await rejectAfterWarmup(gw, 4);
+      expect(res.status).toBe(429);
+      expect(res.headers.get("retry-after")).toBeNull();
+      await res.text();
+    } finally {
+      gw.server.close();
+    }
+  });
+});

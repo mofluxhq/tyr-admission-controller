@@ -251,26 +251,55 @@ Every validated, pool-routed request includes an advisory snapshot:
 | `x-korrx-grant-id` | Deprecated alias of `x-latchflo-grant-id`, identical value |
 | `x-korrx-controller-epoch` | Deprecated alias of `x-latchflo-controller-epoch`, identical value |
 
-Actual admission rejections also include `x-admission-reason`. Tyr does not
-fabricate a `Retry-After` header because a fail-fast capacity snapshot cannot
-provide an honest availability time. Advisory results are not guarantees;
-capacity can change before authoritative admission.
+Actual admission rejections also include `x-admission-reason`, and — when Tyr
+has enough evidence — a retry hint:
+
+| Header | Meaning |
+|---|---|
+| `x-admission-retry-after-ms` | The estimated wait in milliseconds. Always present when Tyr has a hint. Prefer this. |
+| `retry-after` | The same wait in whole seconds, per RFC 9110. Rounded up, so a caller that obeys it never arrives before capacity exists. **Only sent when the wait is at least one second** — below that the header cannot express it without overstating it badly, and Tyr leaves the client's own backoff alone rather than parking it five times too long. |
+
+Tyr estimates the wait from **observed upstream completion intervals** for the
+pool, held as a time-decayed moving average, combined with the queue depth or
+token deficit reported in the rejection detail. This is why the hint lives in
+Tyr and not in `async-bulkhead-llm`: the library only sees admission decisions
+and correctly refuses to invent an ETA it has no basis for, whereas Tyr proxies
+the work and watches it finish.
+
+The honesty rule survives the move. Until a pool has produced
+`retryHint.minSamples` completions, **no header is emitted at all** — a missing
+hint means "unknown", never a guess. Hints are omitted entirely for `shutdown`
+(this instance is draining; re-resolve rather than wait), `aborted` (the caller
+already gave up), and `unshareable_result` (a deduplication conflict that
+waiting cannot resolve).
+
+Set `retryHint.enabled: false`, or `TYR_RETRY_HINT_ENABLED=false`, to suppress
+both headers.
+
+Advisory results are not guarantees; capacity can change before authoritative
+admission, and a retry hint is an estimate rather than a reservation.
 
 ### Error contract
 
-| Status | Typical error type or reason |
-|---:|---|
-| `400` | `invalid_json` or `invalid_request` |
-| `404` | `not_found` or `route_not_configured` |
-| `413` | `payload_too_large` |
-| `422` | `unsupported_model` |
-| `429` | `admission_rejected`, commonly `budget_limit` or `concurrency_limit` |
-| `502` | `upstream_error` |
-| `503` | `admission_rejected` with reason `shutdown` |
-| `504` | `response_timeout`, `idle_timeout`, or admission timeout |
+| Status | Error type or reason | Meaning and retry guidance |
+|---:|---|---|
+| `400` | `invalid_json` or `invalid_request` | The request is malformed; correct it before retrying. |
+| `401` | `identity_required`, `identity_invalid`, or `operator_unauthorized` | Identity is missing or invalid, or the legacy operator token is absent or incorrect; do not retry the same credential unchanged. |
+| `403` | `identity_forbidden` | The verified identity lacks a required role; retry only after authorization changes. |
+| `404` | `not_found`, `route_not_configured`, or `metrics_disabled` | The route is unknown, its upstream is disabled, or metrics exposition is disabled. |
+| `413` | `payload_too_large` | The request body exceeds `server.maxRequestBodyBytes`. |
+| `422` | `unsupported_model` | No configured pool matches the requested model. |
+| `429` | `admission_rejected`, commonly `budget_limit` or `concurrency_limit` | Tyr is protecting bounded capacity; honor `x-admission-retry-after-ms` when present, otherwise retry with backoff or reduce demand. |
+| `500` | `internal` | Tyr encountered an unexpected internal failure; retry according to the caller's server-error policy. |
+| `502` | `upstream_error` | The configured provider failed before Tyr could return a valid response. |
+| `503` | `identity_unavailable` | Tyr cannot currently verify identity because the verifier or JWKS endpoint is unavailable; retry with backoff. |
+| `503` | `admission_rejected` with reason `shutdown` | This Tyr instance is draining and no longer accepts admissions; retry another instance or retry with backoff. |
+| `504` | `response_timeout`, `idle_timeout`, or `admission_rejected` with reason `timeout` | A configured response-header, stream-idle, or admission deadline expired. |
 
 Admission rejection bodies include the pool name and the bounded capacity detail
-reported by `async-bulkhead-llm`.
+reported by `async-bulkhead-llm`. Identity errors use `error.type` and do not
+include admission-capacity details. Only `401` identity responses include a
+`WWW-Authenticate` challenge; `503 identity_unavailable` deliberately does not.
 
 ## Requirements
 
@@ -523,12 +552,10 @@ pools:
 | `pools[].adaptiveEstimation.maxCorrection` | No | Upper factor clamp; default `2` |
 | `pools[].adaptiveEstimation.maxModels` | No | Maximum tracked model keys; default `64` |
 
-Identity failures are separated by ownership: missing or invalid credentials return
-`401 identity_required` or `401 identity_invalid`; valid identities without a required
-role return `403 identity_forbidden`; and JWKS or custom-verifier infrastructure
-failures return `503 identity_unavailable`. Tyr remains fail closed when no usable key
-is cached, but the `503` response allows callers and proxies to retry transient IdP
-outages. A fresh cached key remains usable until `identity.jwt.cacheTtlMs` expires.
+Identity verification remains fail closed when no usable key is cached. A fresh
+cached key remains usable until `identity.jwt.cacheTtlMs` expires, allowing Tyr to
+continue serving through a temporary JWKS outage without weakening signature
+verification.
 
 `inFlightTokenBudget` is tri-state:
 

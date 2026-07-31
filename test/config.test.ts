@@ -615,3 +615,38 @@ pools:
   });
 
 });
+
+describe("retryHint configuration", () => {
+  const withRetryHint = (block: string): string =>
+    validConfig.replace("telemetry:", `${block}telemetry:`);
+
+  it("defaults to enabled when the block is absent", () => {
+    const config = loadRuntimeConfigFile(tempConfig(validConfig));
+    expect(config.gateway.retryHint).toEqual({ enabled: true });
+  });
+
+  it("accepts explicit tuning", () => {
+    const path = tempConfig(
+      withRetryHint(
+        "retryHint:\n  enabled: true\n  minMs: 100\n  maxMs: 5000\n  halfLifeMs: 2000\n  minSamples: 5\n",
+      ),
+    );
+    expect(loadRuntimeConfigFile(path).gateway.retryHint).toEqual({
+      enabled: true,
+      minMs: 100,
+      maxMs: 5000,
+      halfLifeMs: 2000,
+      minSamples: 5,
+    });
+  });
+
+  it("rejects unknown keys", () => {
+    const path = tempConfig(withRetryHint("retryHint:\n  nope: 1\n"));
+    expect(() => loadRuntimeConfigFile(path)).toThrow(/retryHint/);
+  });
+
+  it("rejects out-of-range values", () => {
+    const path = tempConfig(withRetryHint("retryHint:\n  minSamples: 0\n"));
+    expect(() => loadRuntimeConfigFile(path)).toThrow(/minSamples/);
+  });
+});
