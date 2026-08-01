@@ -161,6 +161,8 @@ export type Pool = {
   name: string;
   mode: AdmissionMode;
   controller: PoolController;
+  /** Exact immutable reservation preview used by capacity-aware routing. */
+  estimate(request: LLMRequest): LLMReservationEstimate | null;
   prepare(request: LLMRequest, priority: LLMPriority): AdmissionPreparation;
   run<T>(
     request: LLMRequest,
@@ -652,6 +654,7 @@ function createPool(config: PoolConfig): Pool {
     name: config.name,
     mode,
     controller,
+    estimate: (request) => bulkhead.estimate(request),
     prepare,
     run,
     stats,

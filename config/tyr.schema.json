@@ -355,6 +355,74 @@
           }
         }
       }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "capacityAware": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "instanceId",
+            "sharedSecretEnv",
+            "peers"
+          ],
+          "properties": {
+            "instanceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sharedSecretEnv": {
+              "type": "string",
+              "minLength": 1
+            },
+            "pollIntervalMs": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 100
+            },
+            "staleAfterMs": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1000
+            },
+            "probeTimeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 250
+            },
+            "forwardTimeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 30000
+            },
+            "peers": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "baseUrl"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "baseUrl": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^https?://"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "$defs": {

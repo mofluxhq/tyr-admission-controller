@@ -5,17 +5,41 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.15.1 is built on
+Tyr 0.17.0 is built on
 [`async-bulkhead-llm@3.12.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.15.1, single-process data plane, proprietary software. See
+> **Status:** v0.17.0, distributed-capable data plane, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr now includes first-class Latchflo managed
 > mode with configuration-driven registration, expiring grants, readiness,
 > persisted agent credentials, and fail-closed expiration behavior.
+
+## What shipped in v0.17.0
+
+- Added optional capacity-aware routing across statically configured Tyr
+  replicas. The ingress ranks fresh, ready candidates using request-specific
+  concurrency and priority-adjusted token headroom.
+- Added a shared-secret-protected internal capacity snapshot endpoint and
+  asynchronous peer polling outside the provider request path.
+- Added authenticated, single-hop Tyr-to-Tyr forwarding. The destination Tyr
+  remains the authoritative admission controller, and routed requests are never
+  automatically retried after dispatch.
+- Added strict routing topology validation, spoofed-header rejection, bounded
+  probe and forwarding deadlines, and response headers identifying the ingress
+  and serving replica.
+- Latchflo is unchanged in this release. Peer membership is static startup
+  configuration and can be distributed by Latchflo in a later release.
+
+## What shipped in v0.16.0
+
+- Added completion-informed retry guidance for capacity rejections through the
+  precise `x-admission-retry-after-ms` header and standards-based `Retry-After`
+  when whole-second precision is appropriate.
+- Added bounded retry-hint configuration without changing admission limits or
+  automatically retrying provider requests inside Tyr.
 
 ## What shipped in v0.15.0
 
@@ -143,14 +167,17 @@ may therefore remain observable while admission remains safely closed.
 
 For each provider request, Tyr:
 
-1. Buffers and validates the JSON body within the configured size limit.
-2. Routes the model to the longest matching pool prefix.
-3. Projects provider prompt content into an admission request.
+1. Authenticates and authorizes the caller before buffering the request when
+   identity is enabled.
+2. Buffers and validates the JSON body within the configured size limit.
+3. Routes the model to the longest matching pool prefix and projects provider
+   prompt content into an admission request.
 4. Computes one immutable reservation preview.
-5. Captures the pool's complete versioned limit snapshot and calls
-   `wouldAdmit(..., { detail: true })` with the exact reservation.
-6. Calls the native v3.12 `run()` path with the same reservation and the pool's
-   configured `enforce` or `observe` mode.
+5. When capacity-aware routing is enabled, compares the local grant partition
+   with fresh peer snapshots and may forward the request once to a roomier Tyr.
+6. The serving Tyr captures its complete versioned limit snapshot, computes its
+   own authoritative reservation, and calls the native v3.12 `run()` path in
+   the configured `enforce` or `observe` mode.
 7. Reconciles live and final provider usage. Native observe bypass releases also
    feed adaptive estimation when provider usage is available.
 8. Releases remaining capacity when the request completes, fails, or the client
@@ -193,6 +220,55 @@ per-model EWMA correction after the configured minimum sample count. Output
 reservations are never adapted. Calibration is local, in-memory, and reset when
 the process restarts.
 
+## Capacity-aware replica routing
+
+Tyr can optionally route an external request to another Tyr replica before
+admission. Each replica publishes a shared-secret-protected capacity snapshot
+and polls its configured peers outside the request path. For each validated
+request, the ingress replica computes the exact local reservation and ranks
+fresh, ready replicas by the capacity that would remain after admitting it:
+
+- immediate concurrency headroom;
+- priority-adjusted token headroom when the pool has a token budget; and
+- the tighter normalized constraint, so a token-rich but concurrency-full
+  replica does not outrank an immediately admissible peer.
+
+Equal candidates prefer the local replica to avoid an unnecessary hop.
+Observe-mode pools stay local and are never selected as remote destinations, so
+shadow evaluation cannot silently change the request topology or bypass an
+enforce-mode ingress decision. A forwarded request carries an authenticated one-hop marker and can never be
+forwarded again, preventing routing loops. The destination Tyr remains the
+authoritative admission controller and may still reject if capacity changed
+after the last snapshot. Tyr never retries a request after forwarding it.
+
+This does not replace Latchflo. Latchflo still owns bounded fleet-wide grants;
+capacity-aware routing only chooses which current grant partition should
+evaluate a request. Replicas sharing a pool name must use compatible request
+projection and estimator policy. Tyr refuses to route between token-aware and token-unaware definitions of the
+same pool. Peer membership is static startup configuration in this release and
+can be distributed by Latchflo later.
+
+```yaml
+routing:
+  capacityAware:
+    instanceId: tyr-r1
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    pollIntervalMs: 100
+    staleAfterMs: 1000
+    probeTimeoutMs: 250
+    forwardTimeoutMs: 30000
+    peers:
+      - id: tyr-r2
+        baseUrl: http://tyr-r2:8787
+      - id: tyr-r3
+        baseUrl: http://tyr-r3:8787
+```
+
+Set the same random `TYR_ROUTING_SECRET` on every listed replica. Keep peer
+URLs on a trusted private network and use TLS whenever that network is not
+cryptographically isolated. Successful forwarding adds `x-tyr-routed-by` and
+`x-tyr-routed-to` to the client response.
+
 ## Admission modes
 
 `enforce` is the default and returns the normal `429`/`503` admission response.
@@ -216,6 +292,7 @@ not for representing actual upstream load while bypasses are running.
 | `GET` | `/metrics` | Prometheus text; optional operator JWT role or bearer token |
 | `GET` | `/healthz` | Process liveness |
 | `GET` | `/readyz` | Managed readiness; `503` until all configured Latchflo grants are valid |
+| `GET` | `/_tyr/capacity` | Protected internal capacity snapshot when replica routing is configured |
 
 A provider route is enabled only when its upstream base URL is configured.
 Calling a disabled provider route returns `404` with
@@ -250,6 +327,8 @@ Every validated, pool-routed request includes an advisory snapshot:
 | `x-latchflo-controller-epoch` | Latchflo fencing epoch that issued the associated grant |
 | `x-korrx-grant-id` | Deprecated alias of `x-latchflo-grant-id`, identical value |
 | `x-korrx-controller-epoch` | Deprecated alias of `x-latchflo-controller-epoch`, identical value |
+| `x-tyr-routed-by` | Ingress Tyr instance that selected a remote replica; present only after forwarding |
+| `x-tyr-routed-to` | Tyr instance that performed the authoritative admission and provider invocation |
 
 Actual admission rejections also include `x-admission-reason`, and — when Tyr
 has enough evidence — a retry hint:
@@ -284,17 +363,17 @@ admission, and a retry hint is an estimate rather than a reservation.
 | Status | Error type or reason | Meaning and retry guidance |
 |---:|---|---|
 | `400` | `invalid_json` or `invalid_request` | The request is malformed; correct it before retrying. |
-| `401` | `identity_required`, `identity_invalid`, or `operator_unauthorized` | Identity is missing or invalid, or the legacy operator token is absent or incorrect; do not retry the same credential unchanged. |
+| `401` | `identity_required`, `identity_invalid`, `operator_unauthorized`, or `routing_unauthorized` | Identity or an internal routing credential is missing or invalid; do not retry the same credential unchanged. |
 | `403` | `identity_forbidden` | The verified identity lacks a required role; retry only after authorization changes. |
-| `404` | `not_found`, `route_not_configured`, or `metrics_disabled` | The route is unknown, its upstream is disabled, or metrics exposition is disabled. |
+| `404` | `not_found`, `route_not_configured`, `routing_not_configured`, or `metrics_disabled` | The route is unknown, its upstream or replica routing is disabled, or metrics exposition is disabled. |
 | `413` | `payload_too_large` | The request body exceeds `server.maxRequestBodyBytes`. |
 | `422` | `unsupported_model` | No configured pool matches the requested model. |
 | `429` | `admission_rejected`, commonly `budget_limit` or `concurrency_limit` | Tyr is protecting bounded capacity; honor `x-admission-retry-after-ms` when present, otherwise retry with backoff or reduce demand. |
 | `500` | `internal` | Tyr encountered an unexpected internal failure; retry according to the caller's server-error policy. |
-| `502` | `upstream_error` | The configured provider failed before Tyr could return a valid response. |
+| `502` | `upstream_error` or `routing_peer_unavailable` | The provider or selected Tyr peer failed before a valid response was returned. A routed request is not automatically replayed. |
 | `503` | `identity_unavailable` | Tyr cannot currently verify identity because the verifier or JWKS endpoint is unavailable; retry with backoff. |
 | `503` | `admission_rejected` with reason `shutdown` | This Tyr instance is draining and no longer accepts admissions; retry another instance or retry with backoff. |
-| `504` | `response_timeout`, `idle_timeout`, or `admission_rejected` with reason `timeout` | A configured response-header, stream-idle, or admission deadline expired. |
+| `504` | `response_timeout`, `idle_timeout`, `routing_peer_timeout`, or `admission_rejected` with reason `timeout` | A provider, selected Tyr peer, stream-idle, or admission deadline expired; retry only according to the operation's idempotency policy. |
 
 Admission rejection bodies include the pool name and the bounded capacity detail
 reported by `async-bulkhead-llm`. Identity errors use `error.type` and do not
@@ -531,6 +610,13 @@ pools:
 | `identity.roles.invoke` | No | Any matching role may invoke provider routes; omitted/empty allows any authenticated identity |
 | `identity.roles.operator` | No | Any matching role may read `/stats` and `/metrics` |
 | `identity.roles.highPriority` | No | Any matching role receives `high` admission priority |
+| `routing.capacityAware.instanceId` | Routing only | Stable identifier for this Tyr replica |
+| `routing.capacityAware.sharedSecretEnv` | Routing only | Environment variable containing the shared Tyr-to-Tyr secret |
+| `routing.capacityAware.peers` | Routing only | Static peer IDs and base URLs; do not include the local instance |
+| `routing.capacityAware.pollIntervalMs` | No | Peer snapshot refresh cadence; default `100` |
+| `routing.capacityAware.staleAfterMs` | No | Maximum usable peer snapshot age; default `1000` |
+| `routing.capacityAware.probeTimeoutMs` | No | Peer capacity-probe deadline; default `250` |
+| `routing.capacityAware.forwardTimeoutMs` | No | Deadline for a routed peer to return response headers; default `30000` |
 | `telemetry.metrics.enabled` | No | Expose Prometheus text at `/metrics`; default `true` |
 | `telemetry.audit.enabled` | No | Emit one structured JSON line per admission decision; default `false` |
 | `pools[].name` | Yes | Unique pool name used in stats and rejection details |
@@ -851,6 +937,10 @@ counted by `tyr_audit_write_failures_total`.
 - Latchflo coordination uses expiring partitioned grants rather than a strict
   distributed lease on every request. Capacity can be temporarily unavailable
   during safe lease handoff.
+- Capacity-routing peer membership is static and loaded only at startup. Peer
+  snapshots are advisory and can race with authoritative admission; stale or
+  unavailable peers are ignored, and a routed rejection is returned without a
+  second automatic attempt.
 - Routing, upstream, estimator, timeout, and admission-mode configuration is
   loaded only at startup. Only the v3.12 admission-limit snapshot is remotely
   replaceable at runtime.
@@ -883,7 +973,8 @@ src/
   index.ts          validated process entrypoint and managed-mode lifecycle
   latchflo.ts        built-in Latchflo agent, retry, readiness, and token persistence
   pools.ts          v3.12 policy runtime, versioned limits, observe mode, and drain
-  server.ts         HTTP proxy, admission, telemetry, timeouts, and shutdown
+  routing.ts        protected peer snapshots and request-specific replica selection
+  server.ts         HTTP proxy, routing, admission, telemetry, timeouts, and shutdown
   telemetry.ts      Prometheus metrics and structured admission audit events
   sse.ts            Anthropic streaming usage extraction
   sse-openai.ts     OpenAI streaming usage extraction
@@ -892,6 +983,8 @@ test/
   admission.test.ts request projection and estimator regression tests
   config.test.ts    file-schema and environment compatibility tests
   gateway.test.ts   gateway end-to-end tests
+  routing.test.ts   request-specific replica-scoring regression tests
+  routing-gateway.test.ts authenticated one-hop routing integration tests
   latchflo.test.ts  managed-agent, readiness, persistence, and expiration tests
   pools-v311.test.ts v3.11 preview, provenance, observe, reconfiguration, and drain tests
 Dockerfile          production multi-stage image
@@ -908,6 +1001,7 @@ npm run typecheck
 npm test
 npm run build
 npm run smoke
+npm run verify:routing
 npm run release:check
 
 # Zero-cost metrics demonstration

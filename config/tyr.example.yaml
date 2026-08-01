@@ -36,6 +36,24 @@ priority:
   # first-class identity is configured below.
   trustHeader: false
 
+# Optional capacity-aware routing across Tyr replicas. Every replica uses the
+# same secret, keeps a short-lived cache of protected peer capacity snapshots,
+# and forwards at most once to the peer with the best request-specific
+# concurrency and token headroom. Peer membership is static in this release.
+# routing:
+#   capacityAware:
+#     instanceId: tyr-r1
+#     sharedSecretEnv: TYR_ROUTING_SECRET
+#     pollIntervalMs: 100
+#     staleAfterMs: 1000
+#     probeTimeoutMs: 250
+#     forwardTimeoutMs: 30000
+#     peers:
+#       - id: tyr-r2
+#         baseUrl: http://tyr-r2:8787
+#       - id: tyr-r3
+#         baseUrl: http://tyr-r3:8787
+
 # Optional first-class request identity. When configured, provider requests
 # must present `Bearer <JWT>` in this header and are authenticated before Tyr
 # reads the request body. The provider Authorization header remains untouched.

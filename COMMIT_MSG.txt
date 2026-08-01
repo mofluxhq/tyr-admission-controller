@@ -1,6 +1,6 @@
-Release Tyr 0.15.1 with authenticated request identity
+Release Tyr 0.17.0 with capacity-aware replica routing
 
-Add JWT/JWKS authentication before request-body buffering, immutable request
-identity, role authorization for provider and operator routes, verified
-role-based high priority, and identity attribution in admission audit v2.
-Include configuration schema, documentation, and regression coverage.
+Add protected peer capacity snapshots, request-specific replica scoring, and
+authenticated single-hop forwarding while keeping destination admission
+authoritative. Include static routing configuration, strict validation,
+documentation, and routing regression coverage. Latchflo remains unchanged.

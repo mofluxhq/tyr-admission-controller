@@ -465,6 +465,126 @@ function providerBaseUrl(
   );
 }
 
+function normalizeCapacityRouting(
+  value: unknown,
+  env: NodeJS.ProcessEnv,
+): GatewayOptions["capacityRouting"] | undefined {
+  if (value === undefined) return undefined;
+  const routing = objectValue(value, "routing");
+  assertKnownKeys(routing, ["capacityAware"], "routing");
+  const capacityAware = optionalObjectValue(
+    routing,
+    "capacityAware",
+    "routing.capacityAware",
+  );
+  if (capacityAware === undefined) return undefined;
+  assertKnownKeys(
+    capacityAware,
+    [
+      "instanceId",
+      "sharedSecretEnv",
+      "peers",
+      "pollIntervalMs",
+      "staleAfterMs",
+      "probeTimeoutMs",
+      "forwardTimeoutMs",
+    ],
+    "routing.capacityAware",
+  );
+
+  const instanceId = requiredString(
+    capacityAware["instanceId"],
+    "routing.capacityAware.instanceId",
+  );
+  const secretEnvName = requiredString(
+    capacityAware["sharedSecretEnv"],
+    "routing.capacityAware.sharedSecretEnv",
+  );
+  const sharedSecret = envString(env, secretEnvName);
+  if (sharedSecret === undefined) {
+    throw new Error(
+      `routing.capacityAware.sharedSecretEnv references unset environment variable ${secretEnvName}`,
+    );
+  }
+  if (sharedSecret.length < 16) {
+    throw new Error(
+      `routing capacity secret from ${secretEnvName} must be at least 16 characters`,
+    );
+  }
+
+  const rawPeers = capacityAware["peers"];
+  if (!Array.isArray(rawPeers)) {
+    throw new Error("routing.capacityAware.peers must be an array");
+  }
+  const peers = rawPeers.map((rawPeer, index) => {
+    const field = `routing.capacityAware.peers[${index}]`;
+    const peer = objectValue(rawPeer, field);
+    assertKnownKeys(peer, ["id", "baseUrl"], field);
+    const id = requiredString(peer["id"], `${field}.id`);
+    const baseUrl = absoluteHttpUrl(peer["baseUrl"], `${field}.baseUrl`);
+    const parsed = new URL(baseUrl);
+    if (parsed.username || parsed.password) {
+      throw new Error(`${field}.baseUrl must not contain credentials`);
+    }
+    if (parsed.pathname !== "/" && parsed.pathname !== "") {
+      throw new Error(`${field}.baseUrl must not contain a path`);
+    }
+    return { id, baseUrl: parsed.origin };
+  });
+  const peerIds = new Set<string>();
+  for (const peer of peers) {
+    if (peer.id === instanceId) {
+      throw new Error(
+        "routing.capacityAware.peers must not include the local instanceId",
+      );
+    }
+    if (peerIds.has(peer.id)) {
+      throw new Error(`duplicate capacity routing peer id: ${peer.id}`);
+    }
+    peerIds.add(peer.id);
+  }
+
+  const pollIntervalMs = optionalInteger(
+    capacityAware,
+    "pollIntervalMs",
+    "routing.capacityAware.pollIntervalMs",
+    { min: 1 },
+  );
+  const staleAfterMs = optionalInteger(
+    capacityAware,
+    "staleAfterMs",
+    "routing.capacityAware.staleAfterMs",
+    { min: 1 },
+  );
+  const probeTimeoutMs = optionalInteger(
+    capacityAware,
+    "probeTimeoutMs",
+    "routing.capacityAware.probeTimeoutMs",
+    { min: 1 },
+  );
+  const forwardTimeoutMs = optionalInteger(
+    capacityAware,
+    "forwardTimeoutMs",
+    "routing.capacityAware.forwardTimeoutMs",
+    { min: 1 },
+  );
+  if ((staleAfterMs ?? 1_000) < (pollIntervalMs ?? 100)) {
+    throw new Error(
+      "routing.capacityAware.staleAfterMs must be >= pollIntervalMs",
+    );
+  }
+
+  return {
+    instanceId,
+    sharedSecret,
+    peers,
+    ...(pollIntervalMs === undefined ? {} : { pollIntervalMs }),
+    ...(staleAfterMs === undefined ? {} : { staleAfterMs }),
+    ...(probeTimeoutMs === undefined ? {} : { probeTimeoutMs }),
+    ...(forwardTimeoutMs === undefined ? {} : { forwardTimeoutMs }),
+  };
+}
+
 
 function optionalString(
   parent: ObjectValue,
@@ -1045,6 +1165,7 @@ function normalizeFileConfiguration(
       "shutdown",
       "priority",
       "identity",
+      "routing",
       "telemetry",
       "retryHint",
       "pools",
@@ -1132,6 +1253,7 @@ function normalizeFileConfiguration(
   const trustPriorityHeader =
     optionalBoolean(priority, "trustHeader", "priority.trustHeader") ?? false;
   const identity = normalizeIdentity(root["identity"]);
+  const capacityRouting = normalizeCapacityRouting(root["routing"], env);
 
   const telemetry = optionalObjectValue(root, "telemetry", "telemetry") ?? {};
   assertKnownKeys(telemetry, ["metrics", "audit"], "telemetry");
@@ -1216,6 +1338,7 @@ function normalizeFileConfiguration(
         : {}),
       trustPriorityHeader,
       ...(identity === undefined ? {} : { identity }),
+      ...(capacityRouting === undefined ? {} : { capacityRouting }),
       telemetry: { metricsEnabled, auditEnabled },
       retryHint,
       ...(operatorBearerToken === undefined ? {} : { operatorBearerToken }),

@@ -38,6 +38,12 @@ import {
   type TyrRequestOutcome,
   type TyrTelemetryOptions,
 } from "./telemetry.js";
+import {
+  CapacityAwareRouter,
+  TYR_ROUTING_CAPACITY_PATH,
+  type CapacityRoutingOptions,
+  type InternalRouteClassification,
+} from "./routing.js";
 
 export type GatewayOptions = {
   /**
@@ -137,6 +143,8 @@ export type GatewayOptions = {
   retryHint?: RetryHintOptions;
   /** Optional bearer token protecting /stats and /metrics. */
   operatorBearerToken?: string;
+  /** Optional static Tyr-to-Tyr capacity-aware request routing. */
+  capacityRouting?: CapacityRoutingOptions;
   pools: PoolConfig[];
 };
 
@@ -523,6 +531,16 @@ export function createGateway(opts: GatewayOptions) {
   const shutdownDrainTimeoutMs = opts.shutdownDrainTimeoutMs;
   const resolvePriority = opts.resolvePriority;
   const trustPriorityHeader = opts.trustPriorityHeader ?? false;
+  const isReady = opts.isReady ?? (() => true);
+  const capacityRouter =
+    opts.capacityRouting === undefined
+      ? undefined
+      : new CapacityAwareRouter({
+          options: opts.capacityRouting,
+          pools,
+          ready: isReady,
+        });
+  capacityRouter?.start();
 
   async function authenticateIdentity(
     req: IncomingMessage,
@@ -541,12 +559,100 @@ export function createGateway(opts: GatewayOptions) {
     }
   }
 
+  async function proxyToCapacityPeer(input: {
+    req: IncomingMessage;
+    res: ServerResponse;
+    raw: Buffer;
+    adapter: Adapter;
+    baseUrl: string;
+    targetInstanceId: string;
+    priority: LLMPriority;
+  }): Promise<void> {
+    if (capacityRouter === undefined) {
+      throw new Error("capacity router is not configured");
+    }
+
+    const abort = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abort.abort();
+    }, capacityRouter.forwardTimeoutMs);
+    const onClose = () => {
+      if (!input.res.writableEnded) abort.abort();
+    };
+    input.res.once("close", onClose);
+    input.res.setHeader("x-tyr-routed-by", capacityRouter.instanceId);
+    input.res.setHeader("x-tyr-routed-to", input.targetInstanceId);
+
+    try {
+      const response = await fetch(`${input.baseUrl}${input.adapter.path}`, {
+        method: "POST",
+        headers: capacityRouter.forwardedHeaders(
+          input.req.headers,
+          input.priority,
+        ),
+        body: input.raw,
+        redirect: "error",
+        signal: abort.signal,
+      });
+      clearTimeout(timer);
+
+      for (const [name, value] of response.headers) {
+        const lower = name.toLowerCase();
+        if (
+          lower === "connection" ||
+          lower === "keep-alive" ||
+          lower === "transfer-encoding"
+        ) {
+          continue;
+        }
+        input.res.setHeader(name, value);
+      }
+      input.res.writeHead(response.status);
+
+      if (response.body === null) {
+        input.res.end();
+        return;
+      }
+      for await (const chunk of response.body) {
+        if (!input.res.write(chunk)) {
+          await waitForDrain(input.res, clientStallTimeoutMs);
+        }
+      }
+      input.res.end();
+    } catch (error) {
+      if (input.res.destroyed || input.res.headersSent) {
+        input.res.destroy();
+        return;
+      }
+      sendJson(input.res, timedOut ? 504 : 502, {
+        error: {
+          type: timedOut ? "routing_peer_timeout" : "routing_peer_unavailable",
+          peer: input.targetInstanceId,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
+    } finally {
+      clearTimeout(timer);
+      input.res.removeListener("close", onClose);
+    }
+  }
+
   function makeHandler(adapter: Adapter, upstream: string) {
     return async function handle(
       req: IncomingMessage,
       res: ServerResponse,
     ): Promise<void> {
       const requestStartedAt = performance.now();
+      const routeClassification: InternalRouteClassification =
+        capacityRouter?.classify(req) ?? { kind: "external" };
+      if (routeClassification.kind === "invalid") {
+        req.resume();
+        res.setHeader("connection", "close");
+        sendJson(res, 401, { error: { type: "routing_unauthorized" } });
+        return;
+      }
       let requestIdentity: TyrRequestIdentity | undefined;
       if (identityOptions !== undefined) {
         try {
@@ -612,7 +718,9 @@ export function createGateway(opts: GatewayOptions) {
       const llmRequest = adapter.toAdmissionRequest(body);
 
       let priority: LLMPriority = "normal";
-      if (resolvePriority !== undefined) {
+      if (routeClassification.kind === "internal") {
+        priority = routeClassification.priority;
+      } else if (resolvePriority !== undefined) {
         priority = await resolvePriority(req, requestIdentity);
         if (priority !== "normal" && priority !== "high") {
           throw new Error(
@@ -632,6 +740,30 @@ export function createGateway(opts: GatewayOptions) {
             ? req.headers["x-priority"]
             : undefined,
         );
+      }
+
+      if (
+        capacityRouter !== undefined &&
+        routeClassification.kind === "external"
+      ) {
+        const reservation = pool.estimate(llmRequest);
+        const route = capacityRouter.select({
+          poolName: pool.name,
+          priority,
+          reservation,
+        });
+        if (!route.local && route.baseUrl !== undefined) {
+          await proxyToCapacityPeer({
+            req,
+            res,
+            raw,
+            adapter,
+            baseUrl: route.baseUrl,
+            targetInstanceId: route.instanceId,
+            priority,
+          });
+          return;
+        }
       }
 
       // Calculate one immutable reservation and pass it verbatim to both the
@@ -1058,6 +1190,20 @@ export function createGateway(opts: GatewayOptions) {
     // 404 any request carrying a query string.
     const pathname = new URL(req.url ?? "/", "http://internal").pathname;
 
+    if (req.method === "GET" && pathname === TYR_ROUTING_CAPACITY_PATH) {
+      if (capacityRouter === undefined) {
+        sendJson(res, 404, { error: { type: "routing_not_configured" } });
+        return;
+      }
+      if (!capacityRouter.authorizedCapacityRequest(req)) {
+        sendJson(res, 401, { error: { type: "routing_unauthorized" } });
+        return;
+      }
+      res.setHeader("cache-control", "no-store");
+      sendJson(res, 200, capacityRouter.snapshot());
+      return;
+    }
+
     if (req.method === "POST" && pathname === anthropicAdapter.path) {
       if (!handleAnthropic) {
         sendJson(res, 404, { error: { type: "route_not_configured" } });
@@ -1092,7 +1238,7 @@ export function createGateway(opts: GatewayOptions) {
       return;
     }
     if (req.method === "GET" && pathname === "/readyz") {
-      const ready = opts.isReady?.() ?? true;
+      const ready = isReady();
       sendJson(
         res,
         ready ? 200 : 503,
@@ -1116,6 +1262,7 @@ export function createGateway(opts: GatewayOptions) {
   function shutdown(): Promise<PoolsDrainResult> {
     if (shuttingDown) return shuttingDown;
 
+    capacityRouter?.stop();
     pools.close();
     const serverClosed = new Promise<void>((resolve, reject) => {
       server.close((error?: Error) => {

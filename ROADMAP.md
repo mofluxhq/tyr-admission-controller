@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.15.1` identity release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.17.0` capacity-aware routing release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.15.1
+## Current baseline: v0.17.0
 
 The current release provides:
 
@@ -33,7 +33,7 @@ The current release provides:
   revision protection and shrink-by-attrition semantics.
 - First-class Latchflo-managed operation with registration, persisted credentials,
   readiness, expiring grants, and fail-closed zero-capacity startup.
-- Admission-linearized revisions and a bounded per-pool Korrx provenance ledger
+- Admission-linearized revisions and a bounded per-pool Latchflo provenance ledger
   containing grant ID, controller epoch, and expiration.
 - Exact grant-attribution response headers for admissions, bypasses, and
   rejections.
@@ -48,6 +48,10 @@ The current release provides:
   audit events, operator-token protection, and a provisioned Grafana demo.
 - First-class JWT/JWKS request identity, role authorization for provider and
   operator routes, role-based high priority, and identity-attributed audit events.
+- Optional request-specific capacity-aware routing across statically configured
+  Tyr replicas, with protected short-lived capacity snapshots, one-hop forwarding,
+  local tie preference, and authoritative destination admission.
+- Observed-completion-based retry hints for capacity rejection responses.
 
 Known commercial limitations include a single-controller SQLite control plane, no OTLP exporter or durable audit store, direct-JWKS-only identity configuration, limited protocol coverage, and no hardened multi-region deployment package.
 
@@ -263,45 +267,29 @@ Deferred from this release:
 - Per-tenant bulkhead instances.
 - A bundled audit search UI.
 
-### v0.16.0 — Ecosystem and modern OpenAI support
+### v0.16.0 — Capacity retry guidance
 
-**Target duration:** 2–3 weeks
-**Goal:** Reduce adoption friction and support the most commercially important
-modern OpenAI workload.
+**Status:** Released 2026-07-31
 
-Planned work:
+- Added precise `x-admission-retry-after-ms` hints derived from observed pool
+  completion intervals.
+- Added standards-compatible `Retry-After` for waits of at least one second.
+- Added bounded, configurable hint sampling and deliberately omitted guesses
+  before sufficient evidence exists.
 
-- Add an OpenAI Responses API adapter with streaming usage accounting.
-- Account for instructions, input items, tool definitions, tool calls, images,
-  files, and response output limits.
-- Add direct OpenAI and Anthropic SDK integration examples and automated smoke
-  tests.
-- Add tested vLLM/OpenAI-compatible endpoint support and deployment guidance.
-- Add a tested LiteLLM chaining configuration and identity-header propagation
-  contract.
-- Document a generic reverse-proxy integration contract for existing internal
-  gateways.
-- Publish an error and admission-reason compatibility reference.
-- Add bounded non-streaming upstream response buffering.
-- Forward a documented allowlist of provider diagnostic headers, including
-  request identifiers where available.
+### v0.17.0 — Capacity-aware Tyr replica routing
 
-Exit criteria:
+**Status:** Released 2026-08-01
 
-- OpenAI Responses non-streaming and streaming requests pass admission,
-  usage-correction, disconnect, timeout, and malformed-input tests.
-- Direct SDK, vLLM, and LiteLLM examples run in CI against deterministic test
-  services.
-- An existing gateway can propagate authenticated tenant and application
-  identity without exposing trusted priority headers to clients.
+- Added protected, short-lived per-replica capacity snapshots.
+- Added request-specific selection using exact reservation, concurrency headroom,
+  and priority-adjusted token headroom.
+- Added authenticated single-hop forwarding with local tie preference and no
+  automatic replay after dispatch.
+- Kept the destination Tyr authoritative, preserving Latchflo's bounded grants.
+- Kept peer membership static; Latchflo topology distribution is deferred.
 
-Deferred from this release:
-
-- Bedrock support.
-- Generic MCP session accounting.
-- Native Kong or Envoy extensions.
-
-### v0.17.0 — Fleet coordination hardening
+### v0.18.0 — Fleet coordination hardening
 
 **Target duration:** 4–6 weeks
 **Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas
@@ -313,8 +301,10 @@ Planned work:
 - Preserve monotonic controller epochs, revisions, and grant expiration across
   failover.
 - Add allocator conflict, stale-leader, clock-skew, and network-partition tests.
-- Expose controller health, grant age, expiration, conflict, and degraded-mode
-  metrics.
+- Let Latchflo distribute and update the capacity-routing topology without putting
+  Latchflo on the per-request path.
+- Expose controller health, grant age, expiration, routing-snapshot age, conflict,
+  and degraded-mode metrics.
 - Add multi-process Tyr and control-plane fault-injection tests.
 - Publish conservative fail-closed deployment and recovery guidance.
 
@@ -323,7 +313,9 @@ Exit criteria:
 - Multiple Tyr replicas cannot collectively exceed the capacity assigned by the
   active Latchflo controller.
 - Controller failover cannot revive stale grants or create capacity.
-- Operators can identify stale, expiring, and conflicted grants from telemetry.
+- Routing membership can change without restarting Tyr and without routing loops.
+- Operators can identify stale, expiring, conflicted, and unroutable grants from
+  telemetry.
 
 Non-goals:
 
@@ -331,7 +323,7 @@ Non-goals:
 - Automatically discovering provider quotas.
 - Making Kubernetes the source of admission correctness.
 
-### v0.18.0 — Tenant policy and fairness
+### v0.19.0 — Tenant policy and fairness
 
 **Target duration:** 2–4 weeks
 **Goal:** Support paid multi-tenant deployments without creating unbounded gateway
@@ -363,7 +355,7 @@ Exit criteria:
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.18.0
+**Target duration:** 3–5 weeks after v0.19.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:

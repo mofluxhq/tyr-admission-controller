@@ -8,6 +8,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-01
+
+### Added
+
+- Added optional request-specific capacity-aware routing across statically
+  configured Tyr replicas. The ingress replica ranks fresh, ready candidates
+  by the concurrency and priority-adjusted token headroom that would remain
+  after admitting the exact immutable reservation.
+- Added the shared-secret-protected `GET /_tyr/capacity` endpoint and
+  asynchronous peer snapshot polling with bounded probe deadlines, stale-peer
+  exclusion, single-flight refreshes, and strict snapshot validation.
+- Added authenticated one-hop Tyr-to-Tyr forwarding. Routed requests cannot be
+  routed again, and successful responses identify the ingress and serving
+  replica through `x-tyr-routed-by` and `x-tyr-routed-to`.
+- Added `routing.capacityAware` YAML and JSON Schema configuration, with the
+  shared secret loaded from an environment variable instead of stored in the
+  configuration file.
+- Added unit, configuration, gateway, and executable integration regression
+  coverage for request-specific selection, high-priority token reserves, local
+  tie preference, protected snapshots, remote admission, and spoofed routing
+  headers.
+
+### Changed
+
+- External provider requests may now be forwarded before local admission when a
+  fresh peer snapshot predicts more usable capacity. The destination Tyr still
+  performs the authoritative reservation and admission decision, so stale
+  routing information cannot create capacity or bypass a Latchflo grant.
+- Observe-mode pools stay local and cannot be selected as remote destinations.
+  Tyr also refuses to route between token-aware and token-unaware definitions
+  of the same pool name.
+- A request is never retried automatically after it has been dispatched to a
+  peer. A peer timeout or transport failure returns a bounded `502` or `504`
+  response instead of risking a duplicate provider invocation.
+
+### Security
+
+- Requests carrying incomplete or unauthenticated internal-routing headers are
+  rejected before Tyr buffers the body. Capacity snapshots and forwarding use
+  a constant-time shared-secret check, refuse peer redirects, and must be
+  deployed on a trusted private network or over TLS.
+
+### Notes
+
+- Peer membership is static startup configuration in this release. Latchflo is
+  unchanged in v0.17.0 and may distribute routing topology in a later release.
+- Capacity snapshots are advisory and intentionally short-lived. Concurrent
+  arrivals can consume capacity after selection; the destination's normal
+  fail-fast admission response remains authoritative.
+
 ## [0.16.0] - 2026-07-31
 
 ### Added
@@ -614,14 +664,15 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.16.0...HEAD
-[0.16.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.15.1...v0.16.0
-[0.7.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.6.1...v0.7.0
-[0.6.1]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.6.0...v0.6.1
-[0.6.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.4.1...v0.5.0
-[0.4.1]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/janbalangue/tyr-admission-controller/compare/v0.2.0...v0.3.0
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.15.1...v0.16.0
+[0.7.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.6.1...v0.7.0
+[0.6.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/janbalangue/tyr-admission-controller/releases/tag/v0.2.0
-[0.1.0]: https://github.com/janbalangue/tyr-admission-controller/compare/72236af...96e0097
+[0.1.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/72236af...96e0097

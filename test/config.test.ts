@@ -173,6 +173,118 @@ pools:
     ]);
   });
 
+  it("loads static capacity-aware Tyr peer routing from a secret environment variable", () => {
+    const path = tempConfig(`
+version: 1
+routing:
+  capacityAware:
+    instanceId: tyr-r1
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    pollIntervalMs: 100
+    staleAfterMs: 1000
+    probeTimeoutMs: 250
+    forwardTimeoutMs: 30000
+    peers:
+      - id: tyr-r2
+        baseUrl: http://tyr-r2:8787
+upstreams:
+  openai:
+    baseUrl: http://localhost:8000
+pools:
+  - name: local
+    modelPrefixes: [local-]
+    estimatorModel: gpt-4o
+    maxConcurrent: 2
+`);
+    const config = loadRuntimeConfigFile(path, {
+      TYR_ROUTING_SECRET: "a-test-secret-with-32-characters",
+    });
+    expect(config.gateway.capacityRouting).toEqual({
+      instanceId: "tyr-r1",
+      sharedSecret: "a-test-secret-with-32-characters",
+      pollIntervalMs: 100,
+      staleAfterMs: 1000,
+      probeTimeoutMs: 250,
+      forwardTimeoutMs: 30000,
+      peers: [{ id: "tyr-r2", baseUrl: "http://tyr-r2:8787" }],
+    });
+  });
+
+  it("rejects unsafe or ambiguous capacity-routing topology", () => {
+    const path = tempConfig(`
+version: 1
+routing:
+  capacityAware:
+    instanceId: tyr-r1
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    staleAfterMs: 50
+    peers:
+      - id: tyr-r1
+        baseUrl: http://tyr-r1:8787
+upstreams:
+  openai:
+    baseUrl: http://localhost:8000
+pools:
+  - name: local
+    modelPrefixes: [local-]
+    estimatorModel: gpt-4o
+    maxConcurrent: 2
+`);
+    expect(() =>
+      loadRuntimeConfigFile(path, {
+        TYR_ROUTING_SECRET: "a-test-secret-with-32-characters",
+      }),
+    ).toThrow(/must not include the local instanceId|staleAfterMs/);
+  });
+
+  it("rejects capacity-routing peer URLs with credentials or paths", () => {
+    const path = tempConfig(`
+version: 1
+routing:
+  capacityAware:
+    instanceId: tyr-r1
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    peers:
+      - id: tyr-r2
+        baseUrl: http://user:pass@tyr-r2:8787/private
+upstreams:
+  openai:
+    baseUrl: http://localhost:8000
+pools:
+  - name: local
+    modelPrefixes: [local-]
+    estimatorModel: gpt-4o
+    maxConcurrent: 2
+`);
+    expect(() =>
+      loadRuntimeConfigFile(path, {
+        TYR_ROUTING_SECRET: "a-test-secret-with-32-characters",
+      }),
+    ).toThrow(/must not contain credentials|must not contain a path/);
+  });
+
+  it("fails offline validation when the routing secret is unavailable", () => {
+    const path = tempConfig(`
+version: 1
+routing:
+  capacityAware:
+    instanceId: tyr-r1
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    peers: []
+upstreams:
+  openai:
+    baseUrl: http://localhost:8000
+pools:
+  - name: local
+    modelPrefixes: [local-]
+    estimatorModel: gpt-4o
+    maxConcurrent: 2
+`);
+    expect(() => loadRuntimeConfigFile(path, {})).toThrow(
+      /references unset environment variable TYR_ROUTING_SECRET/,
+    );
+  });
+
   it("rejects an identity header that conflicts with provider credentials", () => {
     const path = tempConfig(`
 version: 1
