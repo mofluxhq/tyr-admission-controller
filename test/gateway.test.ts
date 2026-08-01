@@ -1235,7 +1235,7 @@ describe("admission-gateway", () => {
         "text/plain; version=0.0.4",
       );
       const metrics = await metricsResponse.text();
-      expect(metrics).toContain('tyr_build_info{version="0.15.1"} 1');
+      expect(metrics).toContain('tyr_build_info{version="0.18.0"} 1');
       expect(metrics).toContain(
         'tyr_admission_decisions_total{outcome="admitted",pool="test-pool",priority="normal"} 1',
       );

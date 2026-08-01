@@ -8,6 +8,7 @@ import {
 import { dirname } from "node:path";
 import type { LLMAdmissionLimits } from "async-bulkhead-llm";
 import type { PoolLimitsUpdate } from "./pools.js";
+import { TyrDemandReporter, type PoolDemandSnapshot } from "./demand.js";
 import type { TyrControlPlane } from "./server.js";
 import type {
   LatchfloFailureOperation,
@@ -180,6 +181,12 @@ export type LatchfloTyrAgentOptions = {
   readonly fetch?: typeof globalThis.fetch;
   readonly onAgentToken?: (token: string) => void | Promise<void>;
   readonly onReadyChange?: (ready: boolean) => void;
+  /** Optional demand snapshots included in Latchflo 0.6+ heartbeats. */
+  readonly demandProvider?: () =>
+    | readonly PoolDemandSnapshot[]
+    | Promise<readonly PoolDemandSnapshot[]>;
+  /** Called only after Latchflo accepts the heartbeat carrying demand. */
+  readonly onDemandAccepted?: () => void;
   readonly onFailure?: (event: {
     operation: LatchfloFailureOperation;
     reason: LatchfloFailureReason;
@@ -481,9 +488,9 @@ export class LatchfloTyrAgent {
       await this.#poll();
       this.#heartbeatFailures = 0;
       this.#pollFailures = 0;
-      this.#scheduleHeartbeat(
-        jitteredInterval(this.#heartbeatIntervalMs, this.#random),
-      );
+      // Publish the first demand snapshot immediately after the initial grant
+      // poll. Subsequent heartbeats use the control-plane cadence and jitter.
+      this.#scheduleHeartbeat(1);
       this.#schedulePoll(jitteredInterval(this.#pollIntervalMs, this.#random));
     } catch (error) {
       this.#running = false;
@@ -505,6 +512,11 @@ export class LatchfloTyrAgent {
   async pollNow(): Promise<void> {
     await this.#ensureRegistered();
     await this.#poll();
+  }
+
+  async heartbeatNow(): Promise<void> {
+    await this.#ensureRegistered();
+    await this.#heartbeat();
   }
 
   async #ensureRegistered(): Promise<void> {
@@ -563,11 +575,21 @@ export class LatchfloTyrAgent {
   }
 
   async #heartbeat(): Promise<void> {
+    const demand = await this.options.demandProvider?.();
     const response = await this.#authorizedFetch(
       `/v1/agents/${encodeURIComponent(this.options.instanceId)}/heartbeat`,
-      { method: "POST" },
+      {
+        method: "POST",
+        ...(demand === undefined
+          ? {}
+          : {
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ demand }),
+            }),
+      },
     );
     if (!response.ok) throw await responseError("heartbeat", response);
+    this.options.onDemandAccepted?.();
   }
 
   async #poll(): Promise<void> {
@@ -970,6 +992,10 @@ export function createLatchfloManagedMode(options: {
   const env = options.env ?? process.env;
   const persistedToken = readPersistedAgentToken(options.config.agentTokenFile);
   const bootstrapToken = env[options.config.bootstrapTokenEnv]?.trim() || undefined;
+  const demandReporter = new TyrDemandReporter(
+    options.control,
+    options.config.pools,
+  );
   const agent = new LatchfloTyrAgent({
     controlPlaneUrl: options.config.url,
     instanceId: options.config.instanceId,
@@ -980,6 +1006,8 @@ export function createLatchfloManagedMode(options: {
     ...(bootstrapToken === undefined ? {} : { bootstrapToken }),
     ...(persistedToken === undefined ? {} : { agentToken: persistedToken }),
     control: options.control,
+    demandProvider: () => demandReporter.capture(),
+    onDemandAccepted: () => demandReporter.commit(),
     requestTimeoutMs: options.config.requestTimeoutMs,
     retryIntervalMs: options.config.retryIntervalMs,
     retryMaxIntervalMs: options.config.retryMaxIntervalMs,

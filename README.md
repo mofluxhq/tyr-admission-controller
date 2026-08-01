@@ -5,17 +5,32 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.17.0 is built on
+Tyr 0.18.0 is built on
 [`async-bulkhead-llm@3.12.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.17.0, distributed-capable data plane, proprietary software. See
+> **Status:** v0.18.0, demand-reporting distributed data plane, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr now includes first-class Latchflo managed
 > mode with configuration-driven registration, expiring grants, readiness,
 > persisted agent credentials, and fail-closed expiration behavior.
+
+## What shipped in v0.18.0
+
+- Added automatic per-pool demand snapshots to Latchflo heartbeats. Managed Tyr
+  replicas report current in-flight and pending work, interval admissions and
+  rejections, budget-versus-concurrency rejection pressure, and live token
+  usage and headroom.
+- Demand deltas advance only after an accepted heartbeat, so transient
+  control-plane failures cannot erase unsent demand.
+- The first heartbeat is scheduled immediately after the initial grant poll,
+  allowing Latchflo 0.6 demand-aware groups to identify idle floors promptly.
+- Latchflo remains the sole allocator. Tyr reports local observations but does
+  not lend, revoke, or resize fleet grants itself.
+- Tyr 0.18 remains compatible with Latchflo 0.5.x, whose heartbeat endpoint
+  ignores the optional body.
 
 ## What shipped in v0.17.0
 
@@ -163,6 +178,12 @@ controlPlane:
 pools hold valid grants and returns to `503` when a grant expires. The listener
 may therefore remain observable while admission remains safely closed.
 
+With Latchflo 0.6 or newer, the same authenticated heartbeat also carries a
+bounded demand snapshot for every managed pool. No additional endpoint or
+request-path callback is required. Latchflo can use these observations for
+work-conserving capacity groups while continuing to fence all allocations with
+expiring grants.
+
 ## Request lifecycle
 
 For each provider request, Tyr:
@@ -245,8 +266,9 @@ This does not replace Latchflo. Latchflo still owns bounded fleet-wide grants;
 capacity-aware routing only chooses which current grant partition should
 evaluate a request. Replicas sharing a pool name must use compatible request
 projection and estimator policy. Tyr refuses to route between token-aware and token-unaware definitions of the
-same pool. Peer membership is static startup configuration in this release and
-can be distributed by Latchflo later.
+same pool. Peer membership remains static startup configuration. Latchflo 0.6 consumes
+demand snapshots for allocation but does not distribute Tyr routing topology or
+shared secrets.
 
 ```yaml
 routing:
@@ -685,7 +707,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.15.1
+    version: 0.18.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -703,6 +725,43 @@ bounded exponential backoff with jitter; `429` and `503` `Retry-After` values ar
 honored as a minimum delay. Permanent configuration, authentication, and
 protocol failures are not retried continuously. Every control-plane request is
 bounded by `requestTimeoutMs`.
+
+
+### Demand-aware Latchflo heartbeats
+
+Tyr 0.18 automatically derives one snapshot per managed pool from its existing
+statistics and includes it in the heartbeat accepted by Latchflo 0.6:
+
+```json
+{
+  "demand": [
+    {
+      "pool": "interactive-claude",
+      "observedAt": "2026-08-01T20:00:00.000Z",
+      "inFlight": 12,
+      "pending": 0,
+      "recentAdmissions": 31,
+      "recentRejections": 4,
+      "recentBudgetRejections": 3,
+      "recentConcurrencyRejections": 1,
+      "inFlightTokens": 9200,
+      "availableTokens": 800,
+      "lastRequestAt": "2026-08-01T19:59:59.900Z"
+    }
+  ]
+}
+```
+
+`recent*` values are deltas since the last heartbeat accepted by Latchflo, not
+process-lifetime totals. Current in-flight work keeps a pool demanding even when
+no new arrivals occurred during the interval. A failed heartbeat does not
+advance the checkpoint, so its activity is retried rather than lost.
+
+Tyr omits token fields for concurrency-only pools and currently omits
+`oldestPendingMs` because the underlying queue statistics do not expose waiter
+age. Latchflo can still age continuous demand from successive reports. Missing
+or stale telemetry remains protected by Latchflo; it cannot cause a floor to be
+lent early.
 
 `/readyz` remains `503` until every managed pool has a complete unexpired grant.
 A transient poll failure does not discard a still-valid lease. When a grant
@@ -817,7 +876,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.15.1 .
+docker build -t tyr-admission-controller:0.18.0 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -828,7 +887,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.15.1
+  tyr-admission-controller:0.18.0
 ```
 
 Or use the included Compose example:
@@ -971,7 +1030,8 @@ src/
   config.ts         YAML and legacy environment configuration loading
   identity.ts       JWT/JWKS authentication, immutable identity, and role policy
   index.ts          validated process entrypoint and managed-mode lifecycle
-  latchflo.ts        built-in Latchflo agent, retry, readiness, and token persistence
+  latchflo.ts        built-in Latchflo agent, retry, readiness, demand heartbeat, and token persistence
+  demand.ts          accepted-heartbeat demand deltas derived from live pool statistics
   pools.ts          v3.12 policy runtime, versioned limits, observe mode, and drain
   routing.ts        protected peer snapshots and request-specific replica selection
   server.ts         HTTP proxy, routing, admission, telemetry, timeouts, and shutdown
@@ -984,6 +1044,7 @@ test/
   config.test.ts    file-schema and environment compatibility tests
   gateway.test.ts   gateway end-to-end tests
   routing.test.ts   request-specific replica-scoring regression tests
+  demand.test.ts    Latchflo 0.6 demand snapshot and checkpoint regression tests
   routing-gateway.test.ts authenticated one-hop routing integration tests
   latchflo.test.ts  managed-agent, readiness, persistence, and expiration tests
   pools-v311.test.ts v3.11 preview, provenance, observe, reconfiguration, and drain tests
@@ -1002,6 +1063,7 @@ npm test
 npm run build
 npm run smoke
 npm run verify:routing
+npm run verify:demand
 npm run release:check
 
 # Zero-cost metrics demonstration

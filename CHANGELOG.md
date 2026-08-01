@@ -8,6 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-01
+
+### Added
+
+- Added automatic Latchflo 0.6 demand snapshots to the existing authenticated
+  agent heartbeat. Every managed pool now reports live in-flight and pending
+  work, recent admissions and rejections, budget-versus-concurrency rejection
+  pressure, and live token usage/headroom when a token budget is configured.
+- Added `TyrDemandReporter`, which derives bounded heartbeat deltas from Tyr's
+  existing pool statistics without adding work to the provider request path.
+- Added executable and unit regression coverage for live demand, token pressure,
+  accepted-heartbeat checkpoints, transient heartbeat failures, and automatic
+  managed-mode wiring.
+
+### Changed
+
+- The first managed heartbeat is now scheduled immediately after the initial
+  desired-state poll. Later heartbeats continue using Latchflo's advertised
+  cadence with jitter, reducing the time before an idle pool can safely lend
+  its protected floor.
+- Demand counters advance only after Latchflo accepts the heartbeat. A failed
+  or timed-out heartbeat therefore cannot erase admission or rejection pressure;
+  the next successful attempt includes all activity since the last accepted
+  report.
+- Updated the Prometheus build-info version and managed-mode examples to 0.18.0.
+
+### Compatibility
+
+- Tyr 0.18.0 remains compatible with Latchflo 0.5.x. Older control planes ignore
+  the heartbeat body and continue lease management normally.
+- Latchflo 0.6.0 consumes the new snapshots to support demand-aware,
+  work-conserving capacity groups, idle-floor lending, starvation prevention,
+  and lease-safe floor restoration. Latchflo still owns all grant allocation
+  and fencing decisions; Tyr only reports local demand.
+- `oldestPendingMs` is intentionally omitted because Tyr's current bulkhead
+  statistics expose queue depth but not waiter age. Latchflo's continuous-demand
+  state still provides starvation aging across heartbeats.
+
 ## [0.17.0] - 2026-08-01
 
 ### Added
@@ -664,7 +702,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.15.1...v0.16.0
 [0.7.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.6.1...v0.7.0

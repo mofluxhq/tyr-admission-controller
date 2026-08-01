@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.17.0` capacity-aware routing release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.18.0` demand-reporting release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.17.0
+## Current baseline: v0.18.0
 
 The current release provides:
 
@@ -33,6 +33,8 @@ The current release provides:
   revision protection and shrink-by-attrition semantics.
 - First-class Latchflo-managed operation with registration, persisted credentials,
   readiness, expiring grants, and fail-closed zero-capacity startup.
+- Automatic per-pool demand snapshots on authenticated Latchflo heartbeats,
+  including accepted-heartbeat admission/rejection deltas and live token pressure.
 - Admission-linearized revisions and a bounded per-pool Latchflo provenance ledger
   containing grant ID, controller epoch, and expiration.
 - Exact grant-attribution response headers for admissions, bypasses, and
@@ -276,6 +278,18 @@ Deferred from this release:
 - Added standards-compatible `Retry-After` for waits of at least one second.
 - Added bounded, configurable hint sampling and deliberately omitted guesses
   before sufficient evidence exists.
+
+### v0.18.0 — Automatic Latchflo demand reporting
+
+**Status:** Released 2026-08-01
+
+- Added per-managed-pool demand snapshots to authenticated Latchflo heartbeats.
+- Reported live concurrency and token pressure plus interval admission and
+  rejection deltas without adding work to the provider request path.
+- Advanced demand checkpoints only after accepted heartbeats so transient
+  control-plane failures cannot lose demand.
+- Enabled Latchflo 0.6 demand-aware capacity groups while preserving
+  compatibility with Latchflo 0.5.x.
 
 ### v0.17.0 — Capacity-aware Tyr replica routing
 

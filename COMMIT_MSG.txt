@@ -1,6 +1,0 @@
-Release Tyr 0.17.0 with capacity-aware replica routing
-
-Add protected peer capacity snapshots, request-specific replica scoring, and
-authenticated single-hop forwarding while keeping destination admission
-authoritative. Include static routing configuration, strict validation,
-documentation, and routing regression coverage. Latchflo remains unchanged.

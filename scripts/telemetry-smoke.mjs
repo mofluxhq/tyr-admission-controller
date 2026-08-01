@@ -110,7 +110,7 @@ try {
   });
   assert.equal(metricsResponse.status, 200);
   const metrics = await metricsResponse.text();
-  assert.match(metrics, /tyr_build_info\{version="0\.14\.0"\} 1/);
+  assert.match(metrics, /tyr_build_info\{version="0\.18\.0"\} 1/);
   assert.match(
     metrics,
     /tyr_admission_decisions_total\{outcome="admitted",pool="smoke",priority="normal"\} 2/,

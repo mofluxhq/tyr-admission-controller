@@ -305,7 +305,7 @@ export class TyrTelemetry {
     const lines: string[] = [];
 
     addMetricHeader(lines, "tyr_build_info", "gauge", "Tyr build information.");
-    addSample(lines, "tyr_build_info", 1, { version: "0.15.1" });
+    addSample(lines, "tyr_build_info", 1, { version: "0.18.0" });
 
     addMetricHeader(lines, "tyr_ready", "gauge", "Whether Tyr is ready to accept managed traffic.");
     addSample(lines, "tyr_ready", ready ? 1 : 0);
