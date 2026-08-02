@@ -71,6 +71,15 @@ function poolStats(input: {
         totalOutputTokens: 0,
       },
       adaptiveEstimation: { enabled: false, corrections: [] },
+      progressiveReconciliation: {
+        enabled: false,
+        updateStepTokens: 256,
+        outputSafetyMarginTokens: 256,
+        reports: 0,
+        updates: 0,
+        coalesced: 0,
+        earlyReleasedTokens: 0,
+      },
       provenance: { retainedRevisions: 0 },
     },
   };

@@ -5,19 +5,19 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.18.0 is built on
-[`async-bulkhead-llm@3.12.0`](https://www.npmjs.com/package/async-bulkhead-llm).
+Tyr 0.19.0 is built on
+[`async-bulkhead-llm@3.13.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, and bounded
 drain results.
 
-> **Status:** v0.18.0, demand-reporting distributed data plane, proprietary software. See
+> **Status:** v0.19.0, demand-reporting distributed data plane, proprietary software. See
 > [`LICENSE.txt`](LICENSE.txt). Tyr now includes first-class Latchflo managed
 > mode with configuration-driven registration, expiring grants, readiness,
 > persisted agent credentials, and fail-closed expiration behavior.
 
-## What shipped in v0.18.0
+## What shipped in v0.19.0
 
 - Added automatic per-pool demand snapshots to Latchflo heartbeats. Managed Tyr
   replicas report current in-flight and pending work, interval admissions and
@@ -197,10 +197,11 @@ For each provider request, Tyr:
 5. When capacity-aware routing is enabled, compares the local grant partition
    with fresh peer snapshots and may forward the request once to a roomier Tyr.
 6. The serving Tyr captures its complete versioned limit snapshot, computes its
-   own authoritative reservation, and calls the native v3.12 `run()` path in
+   own authoritative reservation, and calls the native v3.13 `run()` path in
    the configured `enforce` or `observe` mode.
-7. Reconciles live and final provider usage. Native observe bypass releases also
-   feed adaptive estimation when provider usage is available.
+7. Reconciles live and final provider usage. Budgeted streams progressively
+   return processed capacity when cumulative usage is available; native observe
+   bypass releases also feed adaptive estimation.
 8. Releases remaining capacity when the request completes, fails, or the client
    disconnects.
 
@@ -510,6 +511,34 @@ effective policy deterministic and reviewable.
 When `TYR_CONFIG_FILE` is absent, Tyr uses the legacy single-pool environment
 configuration documented in [`.env.example`](.env.example).
 
+## Progressive streaming reconciliation
+
+Tyr 0.19 uses `async-bulkhead-llm@3.13.0` to account for the work still ahead
+instead of retaining tokens the provider has already processed. For a
+streaming request, the first cumulative input report returns the completed
+input reservation. Later cumulative output reports shrink the remaining
+future-output hold. Updates are coalesced so every token does not create an
+accounting write, and a configurable safety floor remains until final release.
+
+```yaml
+pools:
+  - name: interactive-claude
+    inFlightTokenBudget: 400000
+    progressiveReconciliation:
+      enabled: true                 # default for budgeted pools
+      updateStepTokens: 256         # apply after this much additional release
+      outputSafetyMarginTokens: 256 # retained until completion
+```
+
+`GET /stats` exposes `tyr.progressiveReconciliation` with report, update,
+coalescing, and early-release counters. Disable the block explicitly to retain
+the conservative 3.12 hold behavior. Streams without cumulative provider usage
+remain conservative automatically. The repository lockfile resolves the bundled
+`vendor/async-bulkhead-llm-3.13.0.tgz` and
+`vendor/async-bulkhead-ts-1.0.1.tgz`, so the release can be built before those
+artifacts are fetched from a public registry.
+
+
 ## Configuration schema
 
 Every configuration file must declare the current schema version:
@@ -707,7 +736,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.18.0
+    version: 0.19.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -876,7 +905,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.18.0 .
+docker build -t tyr-admission-controller:0.19.0 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -887,7 +916,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.18.0
+  tyr-admission-controller:0.19.0
 ```
 
 Or use the included Compose example:
@@ -1001,7 +1030,7 @@ counted by `tyr_audit_write_failures_total`.
   unavailable peers are ignored, and a routed rejection is returned without a
   second automatic attempt.
 - Routing, upstream, estimator, timeout, and admission-mode configuration is
-  loaded only at startup. Only the v3.12 admission-limit snapshot is remotely
+  loaded only at startup. Only the v3.13 admission-limit snapshot is remotely
   replaceable at runtime.
 - Adaptive calibration is local, learned only from live observations, and is not
   persisted across restarts.
@@ -1032,7 +1061,7 @@ src/
   index.ts          validated process entrypoint and managed-mode lifecycle
   latchflo.ts        built-in Latchflo agent, retry, readiness, demand heartbeat, and token persistence
   demand.ts          accepted-heartbeat demand deltas derived from live pool statistics
-  pools.ts          v3.12 policy runtime, versioned limits, observe mode, and drain
+  pools.ts          v3.13 policy runtime, progressive reconciliation, versioned limits, observe mode, and drain
   routing.ts        protected peer snapshots and request-specific replica selection
   server.ts         HTTP proxy, routing, admission, telemetry, timeouts, and shutdown
   telemetry.ts      Prometheus metrics and structured admission audit events

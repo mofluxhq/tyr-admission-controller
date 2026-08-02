@@ -8,6 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-08-01
+
+### Added
+
+- Added progressive streaming reconciliation through
+  `async-bulkhead-llm@3.13.0` and its `ProgressiveUsageReconciler`. Once a
+  provider reports cumulative usage, Tyr returns already-processed input and
+  output capacity while retaining a bounded future-output hold.
+- Added per-pool `progressiveReconciliation` configuration with
+  `enabled`, `updateStepTokens`, and `outputSafetyMarginTokens`. Budgeted pools
+  enable the feature by default with a 256-token update step and 256-token
+  safety floor.
+- Added pool statistics for raw usage reports, applied hold updates, coalesced
+  updates, and tokens released before request completion.
+- Added focused unit and executable regression coverage for first-input
+  release, stepped output release, safety-margin retention, coalescing, final
+  release, and the explicit compatibility opt-out.
+
+### Changed
+
+- Updated the exact runtime dependency from `async-bulkhead-llm@3.12.0` to
+  `3.13.0`. The vendored release artifact uses `async-bulkhead-ts@1.0.1`.
+- Anthropic streaming requests no longer retain tokens that the provider has
+  already processed. OpenAI streams gain the same behavior when cumulative
+  usage is present in streamed chunks.
+
+### Compatibility
+
+- Set `progressiveReconciliation.enabled: false` on a pool to retain the
+  conservative 3.12 behavior: actual input plus the full output ceiling stays
+  held until final release.
+- Non-streaming requests and streams that never report cumulative usage retain
+  their original admission reservation until completion.
+
 ## [0.18.0] - 2026-08-01
 
 ### Added
@@ -702,7 +736,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.15.1...v0.16.0

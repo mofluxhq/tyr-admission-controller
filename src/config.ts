@@ -968,6 +968,7 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       "opaqueMediaInputTokenReservation",
       "admissionMode",
       "adaptiveEstimation",
+      "progressiveReconciliation",
     ],
     field,
   );
@@ -1119,6 +1120,44 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     };
   }
 
+  const progressiveValue = optionalObjectValue(
+    pool,
+    "progressiveReconciliation",
+    `${field}.progressiveReconciliation`,
+  );
+  let progressiveReconciliation: PoolConfig["progressiveReconciliation"];
+  if (progressiveValue !== undefined) {
+    assertKnownKeys(
+      progressiveValue,
+      ["enabled", "updateStepTokens", "outputSafetyMarginTokens"],
+      `${field}.progressiveReconciliation`,
+    );
+    const enabled = optionalBoolean(
+      progressiveValue,
+      "enabled",
+      `${field}.progressiveReconciliation.enabled`,
+    );
+    const updateStepTokens = optionalInteger(
+      progressiveValue,
+      "updateStepTokens",
+      `${field}.progressiveReconciliation.updateStepTokens`,
+      { min: 1 },
+    );
+    const outputSafetyMarginTokens = optionalInteger(
+      progressiveValue,
+      "outputSafetyMarginTokens",
+      `${field}.progressiveReconciliation.outputSafetyMarginTokens`,
+      { min: 0 },
+    );
+    progressiveReconciliation = {
+      ...(enabled !== undefined ? { enabled } : {}),
+      ...(updateStepTokens !== undefined ? { updateStepTokens } : {}),
+      ...(outputSafetyMarginTokens !== undefined
+        ? { outputSafetyMarginTokens }
+        : {}),
+    };
+  }
+
   if (reserve !== undefined && budget === undefined) {
     throw new Error(
       `${field}.highPriorityTokenReserve requires ${field}.inFlightTokenBudget`,
@@ -1146,6 +1185,9 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       : {}),
     ...(admissionMode !== undefined ? { admissionMode } : {}),
     ...(adaptiveEstimation !== undefined ? { adaptiveEstimation } : {}),
+    ...(progressiveReconciliation !== undefined
+      ? { progressiveReconciliation }
+      : {}),
   };
 }
 

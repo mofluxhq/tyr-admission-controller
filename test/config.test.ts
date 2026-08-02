@@ -61,6 +61,10 @@ pools:
     defaultOutputReservation: 8192
     opaqueMediaInputTokenReservation: 3072
     admissionMode: observe
+    progressiveReconciliation:
+      enabled: true
+      updateStepTokens: 128
+      outputSafetyMarginTokens: 384
     adaptiveEstimation:
       enabled: true
       smoothing: 0.3
@@ -104,6 +108,11 @@ describe("file configuration", () => {
         outputCap: 8192,
         opaqueMediaInputTokens: 3072,
         admissionMode: "observe",
+        progressiveReconciliation: {
+          enabled: true,
+          updateStepTokens: 128,
+          outputSafetyMarginTokens: 384,
+        },
         adaptiveEstimation: {
           enabled: true,
           smoothing: 0.3,

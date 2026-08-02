@@ -110,12 +110,14 @@ try {
   });
   assert.equal(metricsResponse.status, 200);
   const metrics = await metricsResponse.text();
-  assert.match(metrics, /tyr_build_info\{version="0\.18\.0"\} 1/);
+  assert.match(metrics, /tyr_build_info\{version="0\.19\.0"\} 1/);
   assert.match(
     metrics,
     /tyr_admission_decisions_total\{outcome="admitted",pool="smoke",priority="normal"\} 2/,
   );
   assert.match(metrics, /tyr_pool_tokens_consumed_total\{pool="smoke"\} 50/);
+  assert.match(metrics, /tyr_pool_progressive_reconciliation_enabled\{pool="smoke"\} 1/);
+  assert.match(metrics, /tyr_pool_progressive_usage_reports_total\{pool="smoke"\} 0/);
   assert.match(
     metrics,
     /tyr_upstream_responses_total\{pool="smoke",provider="openai",status_class="5xx"\} 1/,

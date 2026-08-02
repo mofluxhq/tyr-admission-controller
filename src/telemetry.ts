@@ -305,7 +305,7 @@ export class TyrTelemetry {
     const lines: string[] = [];
 
     addMetricHeader(lines, "tyr_build_info", "gauge", "Tyr build information.");
-    addSample(lines, "tyr_build_info", 1, { version: "0.18.0" });
+    addSample(lines, "tyr_build_info", 1, { version: "0.19.0" });
 
     addMetricHeader(lines, "tyr_ready", "gauge", "Whether Tyr is ready to accept managed traffic.");
     addSample(lines, "tyr_ready", ready ? 1 : 0);
@@ -412,6 +412,52 @@ export class TyrTelemetry {
         type: "gauge",
         help: "Number of bounded adaptive-estimation model corrections retained.",
         value: (snapshot) => snapshot.tyr.adaptiveEstimation.corrections.length,
+      },
+      {
+        name: "tyr_pool_progressive_reconciliation_enabled",
+        type: "gauge",
+        help: "Whether progressive streaming reconciliation is enabled.",
+        value: (snapshot) =>
+          snapshot.tyr.progressiveReconciliation.enabled ? 1 : 0,
+      },
+      {
+        name: "tyr_pool_progressive_usage_reports_total",
+        type: "counter",
+        help: "Cumulative streaming usage reports offered to progressive reconciliation.",
+        value: (snapshot) => snapshot.tyr.progressiveReconciliation.reports,
+      },
+      {
+        name: "tyr_pool_progressive_updates_total",
+        type: "counter",
+        help: "Cumulative progressive future-work hold updates applied.",
+        value: (snapshot) => snapshot.tyr.progressiveReconciliation.updates,
+      },
+      {
+        name: "tyr_pool_progressive_coalesced_total",
+        type: "counter",
+        help: "Cumulative progressive usage reports coalesced below the configured token step.",
+        value: (snapshot) => snapshot.tyr.progressiveReconciliation.coalesced,
+      },
+      {
+        name: "tyr_pool_progressive_tokens_released_total",
+        type: "counter",
+        help: "Cumulative tokens returned before request completion by progressive reconciliation.",
+        value: (snapshot) =>
+          snapshot.tyr.progressiveReconciliation.earlyReleasedTokens,
+      },
+      {
+        name: "tyr_pool_progressive_update_step_tokens",
+        type: "gauge",
+        help: "Configured minimum token decrease between progressive hold updates.",
+        value: (snapshot) =>
+          snapshot.tyr.progressiveReconciliation.updateStepTokens,
+      },
+      {
+        name: "tyr_pool_progressive_safety_margin_tokens",
+        type: "gauge",
+        help: "Configured future-output safety floor retained until final release.",
+        value: (snapshot) =>
+          snapshot.tyr.progressiveReconciliation.outputSafetyMarginTokens,
       },
     ];
 

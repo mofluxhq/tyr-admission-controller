@@ -545,6 +545,27 @@
               "default": 64
             }
           }
+        },
+        "progressiveReconciliation": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Releases already-processed streaming token reservations while retaining a bounded future-output hold.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "updateStepTokens": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 256
+            },
+            "outputSafetyMarginTokens": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 256
+            }
+          }
         }
       }
     }

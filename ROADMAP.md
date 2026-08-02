@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.18.0` demand-reporting release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.19.0` progressive-reconciliation release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,13 +21,13 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.18.0
+## Current baseline: v0.19.0
 
 The current release provides:
 
 - Anthropic Messages and OpenAI Chat Completions proxy routes.
 - Model-prefix routing to independently configured local pools.
-- A v3.12 pool policy runtime using exact reservation previews, native observe
+- A v3.13 pool policy runtime using exact reservation previews, native observe
   mode, and complete versioned admission-limit snapshots.
 - Tyr-local all-or-nothing runtime updates across named pools, with stale
   revision protection and shrink-by-attrition semantics.
@@ -40,6 +40,7 @@ The current release provides:
 - Exact grant-attribution response headers for admissions, bypasses, and
   rejections.
 - Adaptive per-model input estimates learned from provider-reported usage.
+- Progressive streaming reconciliation that returns completed input/output capacity in bounded steps while retaining a future-output safety floor.
 - Fail-fast concurrent-request and token-budget admission with priority reserves.
 - Stable admission IDs, streaming usage correction, transport backpressure, and
   response, idle, and client-stall timeouts.
@@ -458,3 +459,11 @@ A milestone may ship only when:
 - The release notes distinguish admission-time guarantees from post-admission usage overruns.
 
 Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.11.0, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.
+
+
+## Shipped in v0.19.0
+
+- Progressive streaming reconciliation using
+  `async-bulkhead-llm@3.13.0` `ProgressiveUsageReconciler`.
+- Coalesced future-output hold updates with a configurable safety floor.
+- Per-pool early-release telemetry and compatibility opt-out.

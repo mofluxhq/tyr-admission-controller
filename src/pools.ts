@@ -1,6 +1,9 @@
 import {
   createAdaptiveTokenEstimator,
   createLLMBulkhead,
+  DEFAULT_OUTPUT_SAFETY_MARGIN_TOKENS,
+  DEFAULT_UPDATE_STEP_TOKENS,
+  ProgressiveUsageReconciler,
   type AdaptiveModelCorrection,
   type LLMAdmissionLimits,
   type LLMAdmissionMode,
@@ -67,6 +70,15 @@ export type AdaptiveEstimationConfig = {
   maxModels?: number;
 };
 
+export type ProgressiveReconciliationConfig = {
+  /** Enabled by default for token-budgeted pools. */
+  enabled?: boolean;
+  /** Minimum decrease before another hold update is applied. Default: 256. */
+  updateStepTokens?: number;
+  /** Future-output floor retained until final release. Default: 256. */
+  outputSafetyMarginTokens?: number;
+};
+
 export type PoolConfig = {
   /** Pool name for stats, control-plane updates, and logs. */
   name: string;
@@ -97,6 +109,8 @@ export type PoolConfig = {
   admissionMode?: AdmissionMode;
   /** Per-model adaptive input-estimation calibration. */
   adaptiveEstimation?: AdaptiveEstimationConfig;
+  /** Streaming future-work token release powered by async-bulkhead-llm 3.13. */
+  progressiveReconciliation?: ProgressiveReconciliationConfig;
 };
 
 export type AdmissionPreparation = {
@@ -112,11 +126,11 @@ export type AdmissionPreparation = {
 export type AdmissionRunContext = {
   readonly admissionId: string;
   readonly reservation: LLMReservationEstimate | null;
-  /** Whether this callback holds capacity or is a native v3.11 observe bypass. */
+  /** Whether this callback holds capacity or is a native observe bypass. */
   readonly admission: LLMRunAdmission;
   /** Limit revision in effect when the callback began. */
   readonly limitRevision: number;
-  /** Exact external grant associated with `limitRevision`, when managed by Korrx. */
+  /** Exact external grant associated with `limitRevision`, when managed by Latchflo. */
   readonly provenance?: AdmissionProvenance;
   readonly bypassReason?: LLMShadowableRejectReason;
   readonly bypassDetail?: LLMRejectDetail;
@@ -139,6 +153,15 @@ export type TyrPoolStats = LLMStats & {
     adaptiveEstimation: {
       enabled: boolean;
       corrections: AdaptiveModelCorrection[];
+    };
+    progressiveReconciliation: {
+      enabled: boolean;
+      updateStepTokens: number;
+      outputSafetyMarginTokens: number;
+      reports: number;
+      updates: number;
+      coalesced: number;
+      earlyReleasedTokens: number;
     };
     provenance: {
       retainedRevisions: number;
@@ -273,7 +296,7 @@ function validatePoolConfigs(configs: PoolConfig[]): void {
     names.add(config.name);
 
     assertNonEmptyString(config.model, `${base}.model`);
-    // async-bulkhead-llm 3.12 allows a fail-closed zero-capacity start.
+    // async-bulkhead-llm 3.13 allows a fail-closed zero-capacity start.
     assertInteger(config.maxConcurrent, `${base}.maxConcurrent`, { min: 0 });
     if (config.maxQueue !== undefined) {
       assertInteger(config.maxQueue, `${base}.maxQueue`, { min: 0 });
@@ -319,6 +342,34 @@ function validatePoolConfigs(configs: PoolConfig[]): void {
       config.admissionMode !== "observe"
     ) {
       throw new Error(`${base}.admissionMode must be "enforce" or "observe"`);
+    }
+
+    const progressive = config.progressiveReconciliation;
+    if (
+      config.budget === undefined &&
+      progressive !== undefined &&
+      (progressive.enabled ?? true)
+    ) {
+      throw new Error(`${base}.progressiveReconciliation requires ${base}.budget`);
+    }
+    if (progressive !== undefined) {
+      if (progressive.enabled !== undefined && typeof progressive.enabled !== "boolean") {
+        throw new Error(`${base}.progressiveReconciliation.enabled must be a boolean`);
+      }
+      if (progressive.updateStepTokens !== undefined) {
+        assertInteger(
+          progressive.updateStepTokens,
+          `${base}.progressiveReconciliation.updateStepTokens`,
+          { min: 1 },
+        );
+      }
+      if (progressive.outputSafetyMarginTokens !== undefined) {
+        assertInteger(
+          progressive.outputSafetyMarginTokens,
+          `${base}.progressiveReconciliation.outputSafetyMarginTokens`,
+          { min: 0 },
+        );
+      }
     }
 
     const adaptive = config.adaptiveEstimation;
@@ -438,6 +489,15 @@ function createPool(config: PoolConfig): Pool {
   const mode = config.admissionMode ?? "enforce";
   const adaptiveEnabled =
     config.budget !== undefined && (config.adaptiveEstimation?.enabled ?? true);
+  const progressiveEnabled =
+    config.budget !== undefined &&
+    (config.progressiveReconciliation?.enabled ?? true);
+  const progressiveUpdateStepTokens =
+    config.progressiveReconciliation?.updateStepTokens ??
+    DEFAULT_UPDATE_STEP_TOKENS;
+  const progressiveOutputSafetyMarginTokens =
+    config.progressiveReconciliation?.outputSafetyMarginTokens ??
+    DEFAULT_OUTPUT_SAFETY_MARGIN_TOKENS;
 
   const adaptive = adaptiveEnabled
     ? createAdaptiveTokenEstimator({
@@ -523,6 +583,12 @@ function createPool(config: PoolConfig): Pool {
     wouldReject: 0,
     rejectedByReason: {},
   };
+  const progressiveStats = {
+    reports: 0,
+    updates: 0,
+    coalesced: 0,
+    earlyReleasedTokens: 0,
+  };
 
   function prepare(request: LLMRequest, priority: LLMPriority): AdmissionPreparation {
     const reservation = bulkhead.estimate(request);
@@ -559,6 +625,17 @@ function createPool(config: PoolConfig): Pool {
       (signal, context) => {
         if (context === undefined) return fn(signal);
         const provenance = provenanceByRevision.get(context.limitRevision);
+        const reconciler =
+          progressiveEnabled && context.admission === "admitted"
+            ? new ProgressiveUsageReconciler({
+                reservation: context.reservation,
+                reportUsage: (usage, options) =>
+                  context.reportUsage(usage, options),
+                updateStepTokens: progressiveUpdateStepTokens,
+                outputSafetyMarginTokens:
+                  progressiveOutputSafetyMarginTokens,
+              })
+            : undefined;
         return fn(signal, {
           admissionId: context.admissionId,
           reservation: context.reservation,
@@ -572,7 +649,13 @@ function createPool(config: PoolConfig): Pool {
             ? { bypassDetail: context.bypassDetail }
             : {}),
           reportUsage(usage) {
-            return context.reportUsage(usage);
+            if (reconciler === undefined) return context.reportUsage(usage);
+            progressiveStats.reports += 1;
+            const report = reconciler.reportUsage(usage);
+            if (report.applied) progressiveStats.updates += 1;
+            else progressiveStats.coalesced += 1;
+            progressiveStats.earlyReleasedTokens += report.releasedTokens;
+            return report;
           },
         });
       },
@@ -610,6 +693,13 @@ function createPool(config: PoolConfig): Pool {
         adaptiveEstimation: {
           enabled: adaptive !== undefined,
           corrections: adaptive?.corrections() ?? [],
+        },
+        progressiveReconciliation: {
+          enabled: progressiveEnabled,
+          updateStepTokens: progressiveUpdateStepTokens,
+          outputSafetyMarginTokens:
+            progressiveOutputSafetyMarginTokens,
+          ...progressiveStats,
         },
         provenance: {
           retainedRevisions: provenanceByRevision.size,

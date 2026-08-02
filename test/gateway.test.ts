@@ -992,16 +992,33 @@ describe("admission-gateway", () => {
       });
 
       // Mid-stream (message_start arrived at ~5ms, message_delta pending
-      // ~500ms): message_start reports input=20, so the hold shrinks to
-      // 20 + max(1000, 0) = 1020, refunding (reserved − 1020) > 0 NOW.
+      // ~500ms): message_start confirms the input phase is complete, so
+      // progressive reconciliation retains only the 1000-token future-output
+      // ceiling and returns the entire input reservation immediately.
       await new Promise((r) => setTimeout(r, 250));
       const mid = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
         string,
-        { tokenBudget: { inFlightTokens: number; totalRefunded: number } }
+        {
+          tokenBudget: { inFlightTokens: number; totalRefunded: number };
+          tyr: {
+            progressiveReconciliation: {
+              reports: number;
+              updates: number;
+              earlyReleasedTokens: number;
+            };
+          };
+        }
       >;
       const midTb = mid["test-pool"]!.tokenBudget;
-      expect(midTb.inFlightTokens).toBe(1020);
+      expect(midTb.inFlightTokens).toBe(1000);
       expect(midTb.totalRefunded).toBeGreaterThan(0);
+      expect(
+        mid["test-pool"]!.tyr.progressiveReconciliation,
+      ).toMatchObject({ reports: 1, updates: 1 });
+      expect(
+        mid["test-pool"]!.tyr.progressiveReconciliation
+          .earlyReleasedTokens,
+      ).toBeGreaterThan(0);
 
       const res = await resPromise;
       expect(res.status).toBe(200);
@@ -1235,11 +1252,17 @@ describe("admission-gateway", () => {
         "text/plain; version=0.0.4",
       );
       const metrics = await metricsResponse.text();
-      expect(metrics).toContain('tyr_build_info{version="0.18.0"} 1');
+      expect(metrics).toContain('tyr_build_info{version="0.19.0"} 1');
       expect(metrics).toContain(
         'tyr_admission_decisions_total{outcome="admitted",pool="test-pool",priority="normal"} 1',
       );
       expect(metrics).toContain('tyr_pool_tokens_consumed_total{pool="test-pool"} 50');
+      expect(metrics).toContain(
+        'tyr_pool_progressive_reconciliation_enabled{pool="test-pool"} 1',
+      );
+      expect(metrics).toContain(
+        'tyr_pool_progressive_tokens_released_total{pool="test-pool"} 0',
+      );
       expect(metrics).toContain(
         'tyr_upstream_responses_total{pool="test-pool",provider="anthropic",status_class="2xx"} 1',
       );
