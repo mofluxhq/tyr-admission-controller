@@ -32,6 +32,10 @@ describe("progressive streaming reconciliation", () => {
       await gate;
       return { usage: { input: 80, output: 900 } };
     }, { priority: "normal", getUsage: (value) => value.usage });
+    // Admission (bulkhead.acquire) resolves over multiple microtask ticks
+    // before the pool callback runs, so flush the microtask queue rather
+    // than assuming a single `await` suffices.
+    await Promise.resolve();
     await Promise.resolve();
     const stats = pool.stats().tyr.progressiveReconciliation;
     expect(stats).toMatchObject({ enabled: true, reports: 4, updates: 3, coalesced: 1 });
