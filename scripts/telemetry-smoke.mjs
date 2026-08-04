@@ -110,10 +110,10 @@ try {
   });
   assert.equal(metricsResponse.status, 200);
   const metrics = await metricsResponse.text();
-  assert.match(metrics, /tyr_build_info\{version="0\.19\.0"\} 1/);
+  assert.match(metrics, /tyr_build_info\{version="0\.20\.0"\} 1/);
   assert.match(
     metrics,
-    /tyr_admission_decisions_total\{outcome="admitted",pool="smoke",priority="normal"\} 2/,
+    /tyr_admission_decisions_total\{admission_class="none",outcome="admitted",pool="smoke",priority="normal"\} 2/,
   );
   assert.match(metrics, /tyr_pool_tokens_consumed_total\{pool="smoke"\} 50/);
   assert.match(metrics, /tyr_pool_progressive_reconciliation_enabled\{pool="smoke"\} 1/);
@@ -199,7 +199,7 @@ try {
   const metrics = await (await fetch(`${observedUrl}/metrics`)).text();
   assert.match(
     metrics,
-    /tyr_admission_decisions_total\{outcome="bypassed",pool="observe",priority="normal"\} 1/,
+    /tyr_admission_decisions_total\{admission_class="none",outcome="bypassed",pool="observe",priority="normal"\} 1/,
   );
   assert.equal(observeAudits.length, 1);
   assert.equal(observeAudits[0].outcome, "bypassed");

@@ -566,7 +566,145 @@
               "default": 256
             }
           }
+        },
+        "admissionClasses": {
+          "$ref": "#/$defs/admissionClasses"
         }
+      }
+    },
+    "admissionClassLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxConcurrent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxInFlightTokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "admissionClassRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "admissionClass"
+      ],
+      "properties": {
+        "admissionClass": {
+          "$ref": "#/$defs/admissionClassId"
+        },
+        "subjects": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "tenantIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "applicationIds": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "subjects"
+          ]
+        },
+        {
+          "required": [
+            "tenantIds"
+          ]
+        },
+        {
+          "required": [
+            "applicationIds"
+          ]
+        },
+        {
+          "required": [
+            "roles"
+          ]
+        }
+      ]
+    },
+    "admissionClasses": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "defaultClass",
+        "classes"
+      ],
+      "properties": {
+        "defaultClass": {
+          "$ref": "#/$defs/admissionClassId"
+        },
+        "classes": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 64,
+          "propertyNames": {
+            "$ref": "#/$defs/admissionClassId"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/admissionClassLimits"
+          }
+        },
+        "rules": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/admissionClassRule"
+          }
+        }
+      }
+    },
+    "admissionClassId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "not": {
+        "enum": [
+          "__proto__",
+          "constructor",
+          "prototype"
+        ]
       }
     }
   }

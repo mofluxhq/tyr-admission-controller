@@ -122,7 +122,7 @@ describe("capacity-aware Tyr-to-Tyr routing", () => {
       );
       expect(snapshot.status).toBe(200);
       expect((await snapshot.json()) as object).toMatchObject({
-        schemaVersion: 1,
+        schemaVersion: 2,
         instanceId: "tyr-b",
         ready: true,
       });

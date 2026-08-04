@@ -1,14 +1,14 @@
-# Tyr 0.19.0 verification
+# Tyr 0.20.0 verification
 
-Date: 2026-08-01
+Date: 2026-08-04
 
 ## Version alignment
 
-- Tyr package version: `0.19.0`
-- Runtime dependency: `async-bulkhead-llm@3.13.0`
+- Tyr package version: `0.20.0`
+- Runtime dependency: `async-bulkhead-llm@3.14.0`
 - Transitive bulkhead dependency: `async-bulkhead-ts@1.0.1`
 - Bundled runtime artifacts:
-  - `vendor/async-bulkhead-llm-3.13.0.tgz`
+  - `vendor/async-bulkhead-llm-3.14.0.tgz`
   - `vendor/async-bulkhead-ts-1.0.1.tgz`
   - `vendor/yaml-2.9.0.tgz`
 - The lockfile resolves all three runtime packages from the bundled artifacts.
@@ -29,9 +29,12 @@ Date: 2026-08-01
   - final settlement to zero in-flight tokens;
   - final provider usage recorded as 20 input plus 40 output tokens.
 - ESM smoke imports
-- Prometheus telemetry smoke verification
-- npm package dry run for `tyr-admission-controller@0.19.0`
-- Clean production-only `npm ci --offline` from the bundled runtime artifacts
+- Prometheus telemetry smoke verification, including bounded live per-class
+  gauges and counters
+- npm package dry run for `tyr-admission-controller@0.20.0`
+- Clean production-only `npm ci --offline` from the source archive's bundled
+  runtime artifacts
+- Runtime import verification after the production-only install
 - `git diff --check`
 
 ## Full test-suite limitation
@@ -41,6 +44,8 @@ contained the macOS Rolldown native optional dependency, while the verification
 host requires `@rolldown/binding-linux-x64-gnu`. Vitest exited during startup
 before loading any test file.
 
-This is not recorded as a passing test run. The returned repository archive
-omits `node_modules`; run `npm ci` on the target platform and then
-`npm run release:check` before tagging or publishing `v0.19.0`.
+This is not recorded as a passing test run. The returned repository archive omits `node_modules`; run `npm ci` on the
+target platform and then `npm run release:check` before tagging or publishing
+`v0.20.0`. Publish `async-bulkhead-llm@3.14.0` first: Tyr's npm package uses
+that exact registry dependency, while the source archive retains a vendored
+copy for reproducible offline production installs.

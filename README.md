@@ -5,32 +5,37 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.19.0 is built on
-[`async-bulkhead-llm@3.13.0`](https://www.npmjs.com/package/async-bulkhead-llm).
+Tyr 0.20.0 is built on
+[`async-bulkhead-llm@3.14.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
-identities, streaming usage reconciliation, priority reserves, and bounded
-drain results.
+identities, streaming usage reconciliation, priority reserves, bounded
+identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.19.0, demand-reporting distributed data plane, proprietary software. See
-> [`LICENSE.txt`](LICENSE.txt). Tyr now includes first-class Latchflo managed
-> mode with configuration-driven registration, expiring grants, readiness,
-> persisted agent credentials, and fail-closed expiration behavior.
+> **Status:** v0.20.0, identity-aware distributed admission data plane,
+> proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
+> first-class Latchflo managed mode with configuration-driven registration,
+> expiring grants, readiness, persisted agent credentials, demand reporting,
+> and fail-closed expiration behavior.
 
-## What shipped in v0.19.0
+## What shipped in v0.20.0
 
-- Added automatic per-pool demand snapshots to Latchflo heartbeats. Managed Tyr
-  replicas report current in-flight and pending work, interval admissions and
-  rejections, budget-versus-concurrency rejection pressure, and live token
-  usage and headroom.
-- Demand deltas advance only after an accepted heartbeat, so transient
-  control-plane failures cannot erase unsent demand.
-- The first heartbeat is scheduled immediately after the initial grant poll,
-  allowing Latchflo 0.6 demand-aware groups to identify idle floors promptly.
-- Latchflo remains the sole allocator. Tyr reports local observations but does
-  not lend, revoke, or resize fleet grants itself.
-- Tyr 0.18 remains compatible with Latchflo 0.5.x, whose heartbeat endpoint
-  ignores the optional body.
+- Added bounded per-pool admission classes with independent concurrency and
+  in-flight token ceilings. The fixed class table is validated at startup and
+  cannot grow from tenant churn.
+- Added ordered rules that map trusted JWT subject, tenant, application, and
+  role claims to configured class IDs. First matching rule wins; selector
+  categories within one rule are ANDed and values within one category are ORed.
+- Added `x-admission-class`, class attribution in structured audit events,
+  bounded `admission_class` decision labels, and live per-class capacity
+  gauges/counters. Raw identity values remain excluded from metrics.
+- Added class-aware capacity routing. A request is not forwarded to a replica
+  whose selected class is unavailable or exhausted, even when the physical pool
+  still has global headroom.
+- Added atomic runtime updates for class ceilings with fixed-key validation and
+  shrink-by-attrition behavior through `async-bulkhead-llm@3.14.0`.
+- Latchflo continues to own the physical fleet grant. Tyr preserves its local
+  class table across grant updates and grant-expiration kill-switch revisions.
 
 ## What shipped in v0.17.0
 
@@ -197,7 +202,7 @@ For each provider request, Tyr:
 5. When capacity-aware routing is enabled, compares the local grant partition
    with fresh peer snapshots and may forward the request once to a roomier Tyr.
 6. The serving Tyr captures its complete versioned limit snapshot, computes its
-   own authoritative reservation, and calls the native v3.13 `run()` path in
+   own authoritative reservation, and calls the native v3.14 `run()` path in
    the configured `enforce` or `observe` mode.
 7. Reconciles live and final provider usage. Budgeted streams progressively
    return processed capacity when cumulative usage is available; native observe
@@ -242,6 +247,63 @@ per-model EWMA correction after the configured minimum sample count. Output
 reservations are never adapted. Calibration is local, in-memory, and reset when
 the process restarts.
 
+## Identity-aware admission classes
+
+Admission classes partition a physical pool into a bounded set of service
+classes. They are intended for noisy-neighbor isolation, not provider RPM/TPM
+rate limiting or cumulative spend policy.
+
+```yaml
+pools:
+  - name: openai-primary
+    modelPrefixes: [gpt, o1, o3, o4]
+    estimatorModel: gpt-4o
+    maxConcurrent: 40
+    inFlightTokenBudget: 400000
+    admissionClasses:
+      defaultClass: standard
+      classes:
+        standard:
+          maxConcurrent: 24
+          maxInFlightTokens: 240000
+        premium:
+          maxConcurrent: 16
+          maxInFlightTokens: 160000
+      rules:
+        - admissionClass: premium
+          tenantIds: [tenant-paid]
+        - admissionClass: premium
+          applicationIds: [latency-sensitive-app]
+          roles: [tier.premium]
+```
+
+The class table is fixed at startup and capped at 64 entries. Rules are capped
+at 256 entries, each selector list is capped at 256 values, and only configured
+class IDs appear in runtime state or metrics. A request with no matching rule
+uses `defaultClass`. When multiple selector categories appear in one rule they
+must all match; the first matching rule wins.
+
+Class limits are additional hard ceilings beneath the physical pool limit. A
+request must fit both the pool and its selected class. Idle capacity in one
+class remains available to other classes only within their own configured
+ceilings; Tyr 0.20 does not dynamically lend or revoke class floors. Shrinking a
+class limit never cancels running work: new admissions wait until usage falls
+below the new ceiling.
+
+Class selection uses authenticated identity produced by Tyr's identity layer.
+Without identity, all requests use the configured default class. Programmatic
+embedders may supply `resolveAdmissionClass`, but the returned value must still
+name a configured class. Never map arbitrary tenant IDs directly to class IDs.
+
+Prometheus exposes bounded per-class in-flight, configured-ceiling, admission,
+release, and rejection series using only the configured class ID. `/stats`
+contains the corresponding class snapshots and token-accounting totals.
+
+Latchflo grants continue to update the physical pool envelope. In 0.20,
+admission-class definitions are local Tyr configuration and are preserved
+across Latchflo revisions; distributing and versioning policy through Latchflo
+is future work.
+
 ## Capacity-aware replica routing
 
 Tyr can optionally route an external request to another Tyr replica before
@@ -250,15 +312,18 @@ and polls its configured peers outside the request path. For each validated
 request, the ingress replica computes the exact local reservation and ranks
 fresh, ready replicas by the capacity that would remain after admitting it:
 
-- immediate concurrency headroom;
-- priority-adjusted token headroom when the pool has a token budget; and
-- the tighter normalized constraint, so a token-rich but concurrency-full
-  replica does not outrank an immediately admissible peer.
+- immediate physical-pool concurrency headroom;
+- priority-adjusted physical-pool token headroom when configured;
+- selected admission-class concurrency and token headroom; and
+- the tightest normalized constraint, so global capacity cannot hide a full
+  tenant service class.
 
 Equal candidates prefer the local replica to avoid an unnecessary hop.
 Observe-mode pools stay local and are never selected as remote destinations, so
 shadow evaluation cannot silently change the request topology or bypass an
-enforce-mode ingress decision. A forwarded request carries an authenticated one-hop marker and can never be
+enforce-mode ingress decision. A forwarded request carries an authenticated one-hop marker and the selected
+bounded admission-class ID under the same shared secret. The class cannot be
+reclassified by a drifting destination policy, and the request can never be
 forwarded again, preventing routing loops. The destination Tyr remains the
 authoritative admission controller and may still reject if capacity changed
 after the last snapshot. Tyr never retries a request after forwarding it.
@@ -338,6 +403,7 @@ Every validated, pool-routed request includes an advisory snapshot:
 | Header | Meaning |
 |---|---|
 | `x-admission-mode` | `enforce` or `observe` |
+| `x-admission-class` | Bounded configured class selected for the request, when admission classes are enabled |
 | `x-admission-preview` | Advisory `admit` or `reject` result at request arrival |
 | `x-admission-preview-revision` | Limit revision used for the advisory preview |
 | `x-admission-preview-reason` | Present when the advisory result rejects |
@@ -513,7 +579,7 @@ configuration documented in [`.env.example`](.env.example).
 
 ## Progressive streaming reconciliation
 
-Tyr 0.19 uses `async-bulkhead-llm@3.13.0` to account for the work still ahead
+Tyr 0.20 uses `async-bulkhead-llm@3.14.0` to account for the work still ahead
 instead of retaining tokens the provider has already processed. For a
 streaming request, the first cumulative input report returns the completed
 input reservation. Later cumulative output reports shrink the remaining
@@ -534,7 +600,7 @@ pools:
 coalescing, and early-release counters. Disable the block explicitly to retain
 the conservative 3.12 hold behavior. Streams without cumulative provider usage
 remain conservative automatically. The repository lockfile resolves the bundled
-`vendor/async-bulkhead-llm-3.13.0.tgz` and
+`vendor/async-bulkhead-llm-3.14.0.tgz` and
 `vendor/async-bulkhead-ts-1.0.1.tgz`, so the release can be built before those
 artifacts are fetched from a public registry.
 
@@ -688,6 +754,9 @@ pools:
 | `pools[].adaptiveEstimation.minCorrection` | No | Lower factor clamp; default `0.5` |
 | `pools[].adaptiveEstimation.maxCorrection` | No | Upper factor clamp; default `2` |
 | `pools[].adaptiveEstimation.maxModels` | No | Maximum tracked model keys; default `64` |
+| `pools[].admissionClasses.defaultClass` | Classes only | Configured class used when no ordered identity rule matches |
+| `pools[].admissionClasses.classes` | Classes only | Fixed map of at most 64 class IDs to optional concurrency and in-flight token ceilings |
+| `pools[].admissionClasses.rules` | No | Up to 256 ordered mappings from trusted subject, tenant, application, or role claims to fixed class IDs |
 
 Identity verification remains fail closed when no usable key is cached. A fresh
 cached key remains usable until `identity.jwt.cacheTtlMs` expires, allowing Tyr to
@@ -736,7 +805,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.19.0
+    version: 0.20.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -905,7 +974,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.19.0 .
+docker build -t tyr-admission-controller:0.20.0 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -916,7 +985,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.19.0
+  tyr-admission-controller:0.20.0
 ```
 
 Or use the included Compose example:
@@ -1003,12 +1072,14 @@ the bounded v3.12 drain snapshot reports outstanding work.
 
 `/stats` exposes the live bulkhead statistics plus a `tyr` object for each pool.
 That object contains admission mode, advisory admit/reject counts, observe-mode
-bypass counts, adaptive correction snapshots, and current Latchflo provenance.
+bypass counts, adaptive correction snapshots, progressive-reconciliation
+statistics, and current Latchflo provenance. When configured, the underlying
+snapshot also contains bounded per-class limits and live usage.
 
 `/metrics` exposes Prometheus text format with only bounded dimensions: configured
-pool name, provider shape, priority, status class, outcome, and enumerated reason.
-Model strings, request IDs, admission IDs, grant IDs, and tenant-supplied values
-never become metric labels. Set `TYR_OPERATOR_BEARER_TOKEN` to require
+pool name, configured admission-class ID, provider shape, priority, status
+class, outcome, and enumerated reason. Model strings, request IDs, admission
+IDs, grant IDs, and tenant-supplied identity values never become metric labels. Set `TYR_OPERATOR_BEARER_TOKEN` to require
 `Authorization: Bearer <token>` for both `/stats` and `/metrics`. Leave it unset
 for the local demo or protect the endpoints at the network layer.
 
@@ -1030,7 +1101,7 @@ counted by `tyr_audit_write_failures_total`.
   unavailable peers are ignored, and a routed rejection is returned without a
   second automatic attempt.
 - Routing, upstream, estimator, timeout, and admission-mode configuration is
-  loaded only at startup. Only the v3.13 admission-limit snapshot is remotely
+  loaded only at startup. Only the v3.14 admission-limit snapshot is remotely
   replaceable at runtime.
 - Adaptive calibration is local, learned only from live observations, and is not
   persisted across restarts.
@@ -1061,7 +1132,7 @@ src/
   index.ts          validated process entrypoint and managed-mode lifecycle
   latchflo.ts        built-in Latchflo agent, retry, readiness, demand heartbeat, and token persistence
   demand.ts          accepted-heartbeat demand deltas derived from live pool statistics
-  pools.ts          v3.13 policy runtime, progressive reconciliation, versioned limits, observe mode, and drain
+  pools.ts          v3.14 policy runtime, progressive reconciliation, versioned limits, observe mode, and drain
   routing.ts        protected peer snapshots and request-specific replica selection
   server.ts         HTTP proxy, routing, admission, telemetry, timeouts, and shutdown
   telemetry.ts      Prometheus metrics and structured admission audit events

@@ -10,6 +10,14 @@ import {
   type TyrIdentityOptions,
 } from "./identity.js";
 import type { PoolConfig } from "./pools.js";
+import {
+  MAX_ADMISSION_CLASSES,
+  MAX_ADMISSION_CLASS_RULES,
+  MAX_ADMISSION_IDENTIFIER_LENGTH,
+  MAX_ADMISSION_RULE_VALUES,
+  normalizeAdmissionClassId,
+  type AdmissionClassesConfig,
+} from "./admission-policy.js";
 import type { GatewayOptions } from "./server.js";
 
 export type RuntimeConfigSource =
@@ -949,6 +957,148 @@ function normalizeControlPlane(
   };
 }
 
+function normalizeAdmissionClasses(
+  value: unknown,
+  field: string,
+  tokenBudgetEnabled: boolean,
+): AdmissionClassesConfig | undefined {
+  if (value === undefined) return undefined;
+  const policy = objectValue(value, field);
+  assertKnownKeys(policy, ["defaultClass", "classes", "rules"], field);
+  const defaultClass = normalizeAdmissionClassId(
+    policy["defaultClass"],
+    `${field}.defaultClass`,
+  );
+  const rawClasses = objectValue(policy["classes"], `${field}.classes`);
+  const classEntries = Object.entries(rawClasses);
+  if (classEntries.length === 0) {
+    throw new Error(`${field}.classes must contain at least one class`);
+  }
+  if (classEntries.length > MAX_ADMISSION_CLASSES) {
+    throw new Error(
+      `${field}.classes must contain at most ${MAX_ADMISSION_CLASSES} classes`,
+    );
+  }
+  const classes: Record<
+    string,
+    { maxConcurrent?: number; maxInFlightTokens?: number }
+  > = {};
+  for (const [rawClassId, rawLimits] of classEntries) {
+    const classId = normalizeAdmissionClassId(rawClassId, `${field} class id`);
+    if (Object.hasOwn(classes, classId)) {
+      throw new Error(
+        `${field}.classes contains duplicate normalized class ID ${JSON.stringify(classId)}`,
+      );
+    }
+    const limits = objectValue(
+      rawLimits,
+      `${field}.classes[${JSON.stringify(classId)}]`,
+    );
+    assertKnownKeys(
+      limits,
+      ["maxConcurrent", "maxInFlightTokens"],
+      `${field}.classes[${JSON.stringify(classId)}]`,
+    );
+    const maxConcurrent = optionalInteger(
+      limits,
+      "maxConcurrent",
+      `${field}.classes[${JSON.stringify(classId)}].maxConcurrent`,
+      { min: 0 },
+    );
+    const maxInFlightTokens = optionalInteger(
+      limits,
+      "maxInFlightTokens",
+      `${field}.classes[${JSON.stringify(classId)}].maxInFlightTokens`,
+      { min: 0 },
+    );
+    if (!tokenBudgetEnabled && maxInFlightTokens !== undefined) {
+      throw new Error(
+        `${field}.classes[${JSON.stringify(classId)}].maxInFlightTokens requires inFlightTokenBudget`,
+      );
+    }
+    classes[classId] = {
+      ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
+      ...(maxInFlightTokens === undefined ? {} : { maxInFlightTokens }),
+    };
+  }
+  if (!Object.hasOwn(classes, defaultClass)) {
+    throw new Error(`${field}.defaultClass must reference a configured class`);
+  }
+
+  const rawRules = policy["rules"];
+  let rules: AdmissionClassesConfig["rules"];
+  if (rawRules !== undefined) {
+    if (!Array.isArray(rawRules)) {
+      throw new Error(`${field}.rules must be an array`);
+    }
+    if (rawRules.length > MAX_ADMISSION_CLASS_RULES) {
+      throw new Error(
+        `${field}.rules must contain at most ${MAX_ADMISSION_CLASS_RULES} rules`,
+      );
+    }
+    rules = rawRules.map((rawRule, index) => {
+      const ruleField = `${field}.rules[${index}]`;
+      const rule = objectValue(rawRule, ruleField);
+      assertKnownKeys(
+        rule,
+        ["admissionClass", "subjects", "tenantIds", "applicationIds", "roles"],
+        ruleField,
+      );
+      const admissionClass = normalizeAdmissionClassId(
+        rule["admissionClass"],
+        `${ruleField}.admissionClass`,
+      );
+      if (!Object.hasOwn(classes, admissionClass)) {
+        throw new Error(
+          `${ruleField}.admissionClass references unknown class ${JSON.stringify(admissionClass)}`,
+        );
+      }
+      const selectors: Record<string, string[]> = {};
+      for (const key of ["subjects", "tenantIds", "applicationIds", "roles"] as const) {
+        const raw = rule[key];
+        if (raw !== undefined) {
+          const values = stringArray(raw, `${ruleField}.${key}`, { minItems: 1 });
+          for (const [valueIndex, selector] of values.entries()) {
+            if (selector.length > MAX_ADMISSION_IDENTIFIER_LENGTH) {
+              throw new Error(
+                `${ruleField}.${key}[${valueIndex}] must be at most ${MAX_ADMISSION_IDENTIFIER_LENGTH} characters`,
+              );
+            }
+          }
+          if (values.length > MAX_ADMISSION_RULE_VALUES) {
+            throw new Error(
+              `${ruleField}.${key} must contain at most ${MAX_ADMISSION_RULE_VALUES} values`,
+            );
+          }
+          selectors[key] = values;
+        }
+      }
+      if (Object.keys(selectors).length === 0) {
+        throw new Error(`${ruleField} must define at least one selector`);
+      }
+      return {
+        admissionClass,
+        ...(selectors["subjects"] === undefined
+          ? {}
+          : { subjects: selectors["subjects"] }),
+        ...(selectors["tenantIds"] === undefined
+          ? {}
+          : { tenantIds: selectors["tenantIds"] }),
+        ...(selectors["applicationIds"] === undefined
+          ? {}
+          : { applicationIds: selectors["applicationIds"] }),
+        ...(selectors["roles"] === undefined ? {} : { roles: selectors["roles"] }),
+      };
+    });
+  }
+
+  return {
+    defaultClass,
+    classes,
+    ...(rules === undefined || rules.length === 0 ? {} : { rules }),
+  };
+}
+
 function normalizePool(value: unknown, index: number): PoolConfig {
   const field = `pools[${index}]`;
   const pool = objectValue(value, field);
@@ -969,6 +1119,7 @@ function normalizePool(value: unknown, index: number): PoolConfig {
       "admissionMode",
       "adaptiveEstimation",
       "progressiveReconciliation",
+      "admissionClasses",
     ],
     field,
   );
@@ -1158,6 +1309,12 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     };
   }
 
+  const admissionClasses = normalizeAdmissionClasses(
+    pool["admissionClasses"],
+    `${field}.admissionClasses`,
+    budget !== undefined,
+  );
+
   if (reserve !== undefined && budget === undefined) {
     throw new Error(
       `${field}.highPriorityTokenReserve requires ${field}.inFlightTokenBudget`,
@@ -1188,6 +1345,7 @@ function normalizePool(value: unknown, index: number): PoolConfig {
     ...(progressiveReconciliation !== undefined
       ? { progressiveReconciliation }
       : {}),
+    ...(admissionClasses === undefined ? {} : { admissionClasses }),
   };
 }
 

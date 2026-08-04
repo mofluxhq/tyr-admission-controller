@@ -1,10 +1,8 @@
 import {
   createAdaptiveTokenEstimator,
   createLLMBulkhead,
-  DEFAULT_OUTPUT_SAFETY_MARGIN_TOKENS,
-  DEFAULT_UPDATE_STEP_TOKENS,
-  ProgressiveUsageReconciler,
   type AdaptiveModelCorrection,
+  type LLMAdmissionClassLimits,
   type LLMAdmissionLimits,
   type LLMAdmissionMode,
   type LLMApplyLimitsResult,
@@ -26,6 +24,17 @@ import {
   admissionEstimatorOptions,
   createAdmissionTokenEstimator,
 } from "./admission.js";
+import {
+  createProgressiveUsageReconciler,
+  DEFAULT_OUTPUT_SAFETY_MARGIN_TOKENS,
+  DEFAULT_UPDATE_STEP_TOKENS,
+} from "./progressive-reconciliation.js";
+import {
+  normalizeAdmissionClassesConfig,
+  resolveAdmissionClass,
+  type AdmissionClassesConfig,
+} from "./admission-policy.js";
+import type { TyrRequestIdentity } from "./identity.js";
 
 export type AdmissionMode = LLMAdmissionMode;
 
@@ -109,8 +118,10 @@ export type PoolConfig = {
   admissionMode?: AdmissionMode;
   /** Per-model adaptive input-estimation calibration. */
   adaptiveEstimation?: AdaptiveEstimationConfig;
-  /** Streaming future-work token release powered by async-bulkhead-llm 3.13. */
+  /** Streaming future-work token release powered by async-bulkhead-llm. */
   progressiveReconciliation?: ProgressiveReconciliationConfig;
+  /** Bounded identity-aware capacity classes within this physical pool. */
+  admissionClasses?: AdmissionClassesConfig;
 };
 
 export type AdmissionPreparation = {
@@ -120,6 +131,8 @@ export type AdmissionPreparation = {
   /** Exact revision captured by the advisory capacity decision. */
   limitRevision: number;
   reservation: LLMReservationEstimate | null;
+  /** Bounded policy class selected for this request, when configured. */
+  admissionClass?: string;
   advisory: LLMWouldAdmitResult;
 };
 
@@ -130,6 +143,7 @@ export type AdmissionRunContext = {
   readonly admission: LLMRunAdmission;
   /** Limit revision in effect when the callback began. */
   readonly limitRevision: number;
+  readonly admissionClass?: string;
   /** Exact external grant associated with `limitRevision`, when managed by Latchflo. */
   readonly provenance?: AdmissionProvenance;
   readonly bypassReason?: LLMShadowableRejectReason;
@@ -186,13 +200,19 @@ export type Pool = {
   controller: PoolController;
   /** Exact immutable reservation preview used by capacity-aware routing. */
   estimate(request: LLMRequest): LLMReservationEstimate | null;
-  prepare(request: LLMRequest, priority: LLMPriority): AdmissionPreparation;
+  resolveAdmissionClass(identity?: TyrRequestIdentity): string | undefined;
+  prepare(
+    request: LLMRequest,
+    priority: LLMPriority,
+    admissionClass?: string,
+  ): AdmissionPreparation;
   run<T>(
     request: LLMRequest,
     preparation: AdmissionPreparation,
     fn: (signal?: AbortSignal, ctx?: AdmissionRunContext) => Promise<T>,
     opts: {
       priority: LLMPriority;
+      admissionClass?: string;
       signal?: AbortSignal;
       getUsage?: (result: T) => TokenUsage | undefined;
     },
@@ -414,6 +434,14 @@ function validatePoolConfigs(configs: PoolConfig[]): void {
         assertInteger(adaptive.maxModels, `${base}.adaptiveEstimation.maxModels`, { min: 1 });
       }
     }
+
+    if (config.admissionClasses !== undefined) {
+      normalizeAdmissionClassesConfig(
+        config.admissionClasses,
+        `${base}.admissionClasses`,
+        config.budget !== undefined,
+      );
+    }
   });
 }
 
@@ -498,6 +526,14 @@ function createPool(config: PoolConfig): Pool {
   const progressiveOutputSafetyMarginTokens =
     config.progressiveReconciliation?.outputSafetyMarginTokens ??
     DEFAULT_OUTPUT_SAFETY_MARGIN_TOKENS;
+  const admissionClasses =
+    config.admissionClasses === undefined
+      ? undefined
+      : normalizeAdmissionClassesConfig(
+          config.admissionClasses,
+          `${config.name}.admissionClasses`,
+          config.budget !== undefined,
+        );
 
   const adaptive = adaptiveEnabled
     ? createAdaptiveTokenEstimator({
@@ -552,6 +588,14 @@ function createPool(config: PoolConfig): Pool {
           },
         }
       : {}),
+    ...(admissionClasses === undefined
+      ? {}
+      : {
+          admissionClasses: {
+            defaultClass: admissionClasses.defaultClass,
+            classes: admissionClasses.classes,
+          },
+        }),
   });
   const provenanceByRevision = new Map<number, AdmissionProvenance>();
 
@@ -590,10 +634,19 @@ function createPool(config: PoolConfig): Pool {
     earlyReleasedTokens: 0,
   };
 
-  function prepare(request: LLMRequest, priority: LLMPriority): AdmissionPreparation {
+  function prepare(
+    request: LLMRequest,
+    priority: LLMPriority,
+    admissionClass?: string,
+  ): AdmissionPreparation {
+    const effectiveAdmissionClass =
+      admissionClass ?? admissionClasses?.defaultClass;
     const reservation = bulkhead.estimate(request);
     const decision = bulkhead.wouldAdmit(request, {
       priority,
+      ...(effectiveAdmissionClass === undefined
+        ? {}
+        : { admissionClass: effectiveAdmissionClass }),
       ...(reservation !== null ? { reservation } : {}),
       detail: true,
     });
@@ -607,7 +660,16 @@ function createPool(config: PoolConfig): Pool {
       if (decision.reason !== undefined) noteReason(advisory.rejectedByReason, decision.reason);
     }
 
-    return { mode, limits, limitRevision, reservation, advisory: decision };
+    return {
+      mode,
+      limits,
+      limitRevision,
+      reservation,
+      ...(effectiveAdmissionClass === undefined
+        ? {}
+        : { admissionClass: effectiveAdmissionClass }),
+      advisory: decision,
+    };
   }
 
   async function run<T>(
@@ -616,10 +678,18 @@ function createPool(config: PoolConfig): Pool {
     fn: (signal?: AbortSignal, ctx?: AdmissionRunContext) => Promise<T>,
     opts: {
       priority: LLMPriority;
+      admissionClass?: string;
       signal?: AbortSignal;
       getUsage?: (result: T) => TokenUsage | undefined;
     },
   ): Promise<T> {
+    const effectiveAdmissionClass =
+      opts.admissionClass ?? preparation.admissionClass;
+    if (effectiveAdmissionClass !== preparation.admissionClass) {
+      throw new Error(
+        `${config.name} admission class changed between prepare() and run()`,
+      );
+    }
     return bulkhead.run(
       request,
       (signal, context) => {
@@ -627,7 +697,7 @@ function createPool(config: PoolConfig): Pool {
         const provenance = provenanceByRevision.get(context.limitRevision);
         const reconciler =
           progressiveEnabled && context.admission === "admitted"
-            ? new ProgressiveUsageReconciler({
+            ? createProgressiveUsageReconciler({
                 reservation: context.reservation,
                 reportUsage: (usage, options) =>
                   context.reportUsage(usage, options),
@@ -641,6 +711,9 @@ function createPool(config: PoolConfig): Pool {
           reservation: context.reservation,
           admission: context.admission,
           limitRevision: context.limitRevision,
+          ...(context.admissionClass === undefined
+            ? {}
+            : { admissionClass: context.admissionClass }),
           ...(provenance !== undefined ? { provenance } : {}),
           ...(context.bypassReason !== undefined
             ? { bypassReason: context.bypassReason }
@@ -662,6 +735,9 @@ function createPool(config: PoolConfig): Pool {
       {
         mode,
         priority: opts.priority,
+        ...(effectiveAdmissionClass === undefined
+          ? {}
+          : { admissionClass: effectiveAdmissionClass }),
         ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
         ...(preparation.reservation !== null
           ? { reservation: preparation.reservation }
@@ -745,6 +821,8 @@ function createPool(config: PoolConfig): Pool {
     mode,
     controller,
     estimate: (request) => bulkhead.estimate(request),
+    resolveAdmissionClass: (identity) =>
+      resolveAdmissionClass(admissionClasses, identity),
     prepare,
     run,
     stats,
@@ -766,6 +844,7 @@ function validateLimitSnapshot(
   const maxConcurrent = next.maxConcurrent;
   const maxQueue = next.maxQueue;
   const suppliedTokenBudget = next.tokenBudget;
+  const suppliedAdmissionClasses = next.admissionClasses;
 
   if (!Number.isSafeInteger(revision) || revision < 0) {
     throw new Error(`${poolName}.limits.revision must be a non-negative safe integer`);
@@ -773,33 +852,92 @@ function validateLimitSnapshot(
   assertInteger(maxConcurrent, `${poolName}.limits.maxConcurrent`, { min: 0 });
   assertInteger(maxQueue, `${poolName}.limits.maxQueue`, { min: 0 });
 
+  let tokenBudget: LLMAdmissionLimits["tokenBudget"];
   if (current.tokenBudget !== undefined) {
     if (suppliedTokenBudget === undefined) {
       throw new Error(`${poolName}.limits.tokenBudget is required`);
     }
     const budget = suppliedTokenBudget.budget;
     const highPriorityReserve = suppliedTokenBudget.highPriorityReserve;
-    assertInteger(budget, `${poolName}.limits.tokenBudget.budget`, {
-      min: 0,
-    });
+    assertInteger(budget, `${poolName}.limits.tokenBudget.budget`, { min: 0 });
     assertInteger(
       highPriorityReserve,
       `${poolName}.limits.tokenBudget.highPriorityReserve`,
       { min: 0 },
     );
-    return Object.freeze({
-      revision,
-      maxConcurrent,
-      maxQueue,
-      tokenBudget: Object.freeze({ budget, highPriorityReserve }),
-    });
-  }
-
-  if (suppliedTokenBudget !== undefined) {
+    if (highPriorityReserve > budget) {
+      throw new Error(
+        `${poolName}.limits.tokenBudget.highPriorityReserve must not exceed budget`,
+      );
+    }
+    tokenBudget = Object.freeze({ budget, highPriorityReserve });
+  } else if (suppliedTokenBudget !== undefined) {
     throw new Error(`${poolName}.limits.tokenBudget must be omitted`);
   }
 
-  return Object.freeze({ revision, maxConcurrent, maxQueue });
+  let admissionClasses: Readonly<Record<string, LLMAdmissionClassLimits>> | undefined;
+  if (current.admissionClasses !== undefined) {
+    if (suppliedAdmissionClasses === undefined) {
+      throw new Error(`${poolName}.limits.admissionClasses is required`);
+    }
+    const currentKeys = Object.keys(current.admissionClasses).sort();
+    const suppliedKeys = Object.keys(suppliedAdmissionClasses).sort();
+    if (
+      currentKeys.length !== suppliedKeys.length ||
+      currentKeys.some((key, index) => key !== suppliedKeys[index])
+    ) {
+      throw new Error(
+        `${poolName}.limits.admissionClasses must preserve the configured class keys`,
+      );
+    }
+    const normalized: Record<string, LLMAdmissionClassLimits> = {};
+    for (const key of currentKeys) {
+      const value = suppliedAdmissionClasses[key];
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        throw new Error(
+          `${poolName}.limits.admissionClasses[${JSON.stringify(key)}] must be an object`,
+        );
+      }
+      const classMaxConcurrent = value.maxConcurrent;
+      const classMaxInFlightTokens = value.maxInFlightTokens;
+      if (classMaxConcurrent !== undefined) {
+        assertInteger(
+          classMaxConcurrent,
+          `${poolName}.limits.admissionClasses[${JSON.stringify(key)}].maxConcurrent`,
+          { min: 0 },
+        );
+      }
+      if (classMaxInFlightTokens !== undefined) {
+        if (tokenBudget === undefined) {
+          throw new Error(
+            `${poolName}.limits.admissionClasses[${JSON.stringify(key)}].maxInFlightTokens requires tokenBudget`,
+          );
+        }
+        assertInteger(
+          classMaxInFlightTokens,
+          `${poolName}.limits.admissionClasses[${JSON.stringify(key)}].maxInFlightTokens`,
+          { min: 0 },
+        );
+      }
+      normalized[key] = Object.freeze({
+        ...(classMaxConcurrent === undefined ? {} : { maxConcurrent: classMaxConcurrent }),
+        ...(classMaxInFlightTokens === undefined
+          ? {}
+          : { maxInFlightTokens: classMaxInFlightTokens }),
+      });
+    }
+    admissionClasses = Object.freeze(normalized);
+  } else if (suppliedAdmissionClasses !== undefined) {
+    throw new Error(`${poolName}.limits.admissionClasses must be omitted`);
+  }
+
+  return Object.freeze({
+    revision,
+    maxConcurrent,
+    maxQueue,
+    ...(tokenBudget === undefined ? {} : { tokenBudget }),
+    ...(admissionClasses === undefined ? {} : { admissionClasses }),
+  });
 }
 
 export function createPools(configs: PoolConfig[]): Pools {

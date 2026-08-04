@@ -34,6 +34,7 @@ export type TyrAdmissionAuditEvent = {
   readonly pool: string;
   readonly provider: ApiShape;
   readonly priority: LLMPriority;
+  readonly admissionClass?: string;
   readonly model: string;
   readonly limitRevision: number;
   readonly admissionId?: string;
@@ -203,11 +204,13 @@ export class TyrTelemetry {
   recordAdmissionStart(input: {
     readonly pool: string;
     readonly priority: LLMPriority;
+    readonly admissionClass?: string;
     readonly outcome: Exclude<TyrAdmissionOutcome, "rejected">;
   }): void {
     this.#increment(this.#admissionDecisions, {
       pool: input.pool,
       priority: input.priority,
+      admission_class: input.admissionClass ?? "none",
       outcome: input.outcome,
     });
   }
@@ -215,16 +218,19 @@ export class TyrTelemetry {
   recordRejection(input: {
     readonly pool: string;
     readonly priority: LLMPriority;
+    readonly admissionClass?: string;
     readonly reason: LLMRejectReason;
   }): void {
     this.#increment(this.#admissionDecisions, {
       pool: input.pool,
       priority: input.priority,
+      admission_class: input.admissionClass ?? "none",
       outcome: "rejected",
     });
     this.#increment(this.#rejections, {
       pool: input.pool,
       priority: input.priority,
+      admission_class: input.admissionClass ?? "none",
       reason: input.reason,
     });
   }
@@ -305,15 +311,25 @@ export class TyrTelemetry {
     const lines: string[] = [];
 
     addMetricHeader(lines, "tyr_build_info", "gauge", "Tyr build information.");
-    addSample(lines, "tyr_build_info", 1, { version: "0.19.0" });
+    addSample(lines, "tyr_build_info", 1, { version: "0.20.0" });
 
     addMetricHeader(lines, "tyr_ready", "gauge", "Whether Tyr is ready to accept managed traffic.");
     addSample(lines, "tyr_ready", ready ? 1 : 0);
 
-    addMetricHeader(lines, "tyr_admission_decisions_total", "counter", "Admission decisions by pool, priority, and outcome.");
+    addMetricHeader(
+      lines,
+      "tyr_admission_decisions_total",
+      "counter",
+      "Admission decisions by pool, bounded admission class, priority, and outcome.",
+    );
     addCounterSeries(lines, "tyr_admission_decisions_total", this.#admissionDecisions);
 
-    addMetricHeader(lines, "tyr_admission_rejections_total", "counter", "Admission rejections by bounded reason.");
+    addMetricHeader(
+      lines,
+      "tyr_admission_rejections_total",
+      "counter",
+      "Admission rejections by pool, bounded admission class, priority, and reason.",
+    );
     addCounterSeries(lines, "tyr_admission_rejections_total", this.#rejections);
 
     addMetricHeader(lines, "tyr_requests_total", "counter", "Completed gateway requests by bounded outcome.");
@@ -467,6 +483,76 @@ export class TyrTelemetry {
         const snapshot = stats[pool];
         if (snapshot !== undefined) {
           addSample(lines, metric.name, metric.value(snapshot), { pool });
+        }
+      }
+    }
+
+    const admissionClassMetrics: Array<{
+      name: string;
+      type: "counter" | "gauge";
+      help: string;
+      value: (snapshot: NonNullable<TyrPoolStats["admissionClasses"]>["classes"][string]) =>
+        number | undefined;
+    }> = [
+      {
+        name: "tyr_pool_admission_class_in_flight",
+        type: "gauge",
+        help: "Requests currently holding capacity in a bounded admission class.",
+        value: (snapshot) => snapshot.inFlight,
+      },
+      {
+        name: "tyr_pool_admission_class_max_concurrent",
+        type: "gauge",
+        help: "Configured class-specific concurrency ceiling; absent when the physical pool alone governs concurrency.",
+        value: (snapshot) => snapshot.limits.maxConcurrent,
+      },
+      {
+        name: "tyr_pool_admission_class_in_flight_tokens",
+        type: "gauge",
+        help: "Tokens currently held in flight by a bounded admission class.",
+        value: (snapshot) => snapshot.inFlightTokens,
+      },
+      {
+        name: "tyr_pool_admission_class_max_in_flight_tokens",
+        type: "gauge",
+        help: "Configured class-specific in-flight token ceiling; absent when the physical pool alone governs tokens.",
+        value: (snapshot) => snapshot.limits.maxInFlightTokens,
+      },
+      {
+        name: "tyr_pool_admission_class_admitted_total",
+        type: "counter",
+        help: "Successful admissions attributed to a bounded admission class.",
+        value: (snapshot) => snapshot.admitted,
+      },
+      {
+        name: "tyr_pool_admission_class_released_total",
+        type: "counter",
+        help: "Released admissions attributed to a bounded admission class.",
+        value: (snapshot) => snapshot.released,
+      },
+      {
+        name: "tyr_pool_admission_class_rejected_total",
+        type: "counter",
+        help: "Rejected admissions attributed to a bounded admission class.",
+        value: (snapshot) => snapshot.rejected,
+      },
+    ];
+
+    for (const metric of admissionClassMetrics) {
+      addMetricHeader(lines, metric.name, metric.type, metric.help);
+      for (const pool of poolNames) {
+        const classes = stats[pool]?.admissionClasses?.classes;
+        if (classes === undefined) continue;
+        for (const admissionClass of Object.keys(classes).sort()) {
+          const snapshot = classes[admissionClass];
+          if (snapshot === undefined) continue;
+          const value = metric.value(snapshot);
+          if (value !== undefined) {
+            addSample(lines, metric.name, value, {
+              pool,
+              admission_class: admissionClass,
+            });
+          }
         }
       }
     }

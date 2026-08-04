@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-08-04
+
+### Added
+
+- Added bounded per-pool admission classes backed by
+  `async-bulkhead-llm@3.14.0`. Each configured class can independently cap
+  active requests and in-flight tokens while remaining subordinate to the
+  physical pool envelope.
+- Added ordered identity-to-class rules over trusted subject, tenant,
+  application, and role claims. First matching rule wins; selector categories
+  within one rule are ANDed and values within a category are ORed.
+- Added `x-admission-class`, admission-class attribution in structured audit
+  events, bounded `admission_class` decision labels, and live per-class
+  capacity/admission/rejection Prometheus series.
+- Added class-aware capacity snapshots and routing. Tyr now excludes replicas
+  where the selected class is missing or immediately unable to fit the request.
+  The selected class is carried across the private hop under the existing
+  routing shared secret, preventing destination-side policy drift from
+  reclassifying the request.
+- Added `scripts/verify-admission-classes.mjs` and focused unit coverage for
+  bounded policy validation, first-match evaluation, class isolation,
+  class-aware routing, atomic class-limit updates, and Latchflo preservation.
+
+### Changed
+
+- Updated the exact runtime dependency from `async-bulkhead-llm@3.13.0` to
+  `3.14.0` while retaining the progressive-reconciliation API used by Tyr.
+- Capacity snapshot schema version is now `2`. Tyr accepts schema versions 1
+  and 2, but a class-aware request treats a schema-1 peer without class data as
+  ineligible rather than assuming capacity.
+- Complete admission-limit updates now include the fixed admission-class table
+  when classes are configured. Runtime revisions may resize existing classes
+  but cannot add, remove, or rename class IDs.
+- Latchflo grant updates and expiration kill switches preserve local
+  admission-class limits while continuing to own only the physical pool grant.
+- Packaged artifacts now include the vendored async-bulkhead tarball required
+  by the exact file dependency.
+
+### Compatibility
+
+- Existing configurations without `admissionClasses` retain 0.19 behavior.
+- Admission classes are startup configuration in 0.20. Latchflo does not yet
+  distribute identity rules or class limits.
+- Class-limit reductions use shrink-by-attrition and never cancel running work.
+- Raw tenant, application, subject, and role values remain excluded from
+  Prometheus labels and runtime bulkhead keys.
+
 ## [0.19.0] - 2026-08-01
 
 ### Added
@@ -736,7 +783,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.16.0...v0.17.0

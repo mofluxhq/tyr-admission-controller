@@ -1,4 +1,4 @@
-# Tyr 0.19 Latchflo managed-mode example.
+# Tyr 0.20 Latchflo managed-mode example.
 version: 1
 
 server:
@@ -35,6 +35,18 @@ pools:
     limitsRevision: 0
     admissionMode: enforce
     defaultOutputReservation: 4096
+    # Latchflo owns the physical pool grant. Tyr preserves these bounded local
+    # class ceilings across grant updates and expiration kill-switch revisions.
+    admissionClasses:
+      defaultClass: standard
+      classes:
+        standard:
+          maxConcurrent: 16
+        premium:
+          maxConcurrent: 8
+      rules:
+        - admissionClass: premium
+          roles: [tier.premium]
 
 controlPlane:
   type: latchflo
@@ -50,7 +62,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.19.0
+    version: 0.20.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo

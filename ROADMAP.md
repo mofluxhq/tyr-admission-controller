@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.19.0` progressive-reconciliation release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.20.0` identity-aware admission release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,13 +21,13 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.19.0
+## Current baseline: v0.20.0
 
 The current release provides:
 
 - Anthropic Messages and OpenAI Chat Completions proxy routes.
 - Model-prefix routing to independently configured local pools.
-- A v3.13 pool policy runtime using exact reservation previews, native observe
+- A v3.14 pool policy runtime using exact reservation previews, native observe
   mode, and complete versioned admission-limit snapshots.
 - Tyr-local all-or-nothing runtime updates across named pools, with stale
   revision protection and shrink-by-attrition semantics.
@@ -239,37 +239,6 @@ Outcome:
 - Operators can trace each decision to the exact versioned, expiring capacity
   grant that governed it.
 
-### v0.15.0 — Authenticated identity and telemetry export
-
-**Target duration:** 2–3 weeks
-**Goal:** Make Tyr safe for authenticated design-partner pilots and integrate its
-telemetry with existing observability pipelines.
-
-Planned work:
-
-- Add JWT verification using configurable issuers, audiences, and JWKS endpoints.
-- Derive a request context containing `tenantId`, `applicationId`, `subject`, and
-  roles from verified claims.
-- Authorize operator endpoints by role while retaining the simple bearer-token
-  option for local deployments.
-- Add OTLP/OpenTelemetry export without removing the built-in Prometheus endpoint.
-- Add a documented durable audit-sink interface and identity fields to structured
-  audit events.
-- Add cardinality and authentication regression coverage.
-
-Exit criteria:
-
-- No unauthenticated request can obtain high priority or access protected
-  operational data.
-- Identity fields never become unbounded default metric labels.
-- The same admission signals can be exported through Prometheus or OTLP.
-
-Deferred from this release:
-
-- Managed API-key issuance and rotation.
-- Per-tenant bulkhead instances.
-- A bundled audit search UI.
-
 ### v0.16.0 — Capacity retry guidance
 
 **Status:** Released 2026-07-31
@@ -279,18 +248,6 @@ Deferred from this release:
 - Added standards-compatible `Retry-After` for waits of at least one second.
 - Added bounded, configurable hint sampling and deliberately omitted guesses
   before sufficient evidence exists.
-
-### v0.18.0 — Automatic Latchflo demand reporting
-
-**Status:** Released 2026-08-01
-
-- Added per-managed-pool demand snapshots to authenticated Latchflo heartbeats.
-- Reported live concurrency and token pressure plus interval admission and
-  rejection deltas without adding work to the provider request path.
-- Advanced demand checkpoints only after accepted heartbeats so transient
-  control-plane failures cannot lose demand.
-- Enabled Latchflo 0.6 demand-aware capacity groups while preserving
-  compatibility with Latchflo 0.5.x.
 
 ### v0.17.0 — Capacity-aware Tyr replica routing
 
@@ -304,7 +261,75 @@ Deferred from this release:
 - Kept the destination Tyr authoritative, preserving Latchflo's bounded grants.
 - Kept peer membership static; Latchflo topology distribution is deferred.
 
-### v0.18.0 — Fleet coordination hardening
+### v0.18.0 — Automatic Latchflo demand reporting
+
+**Status:** Released 2026-08-01
+
+- Added per-managed-pool demand snapshots to authenticated Latchflo heartbeats.
+- Reported live concurrency and token pressure plus interval admission and
+  rejection deltas without adding work to the provider request path.
+- Advanced demand checkpoints only after accepted heartbeats so transient
+  control-plane failures cannot lose demand.
+- Enabled Latchflo 0.6 demand-aware capacity groups while preserving
+  compatibility with Latchflo 0.5.x.
+
+### v0.20.0 — Identity-aware admission classes — shipped 2026-08-04
+
+Shipped:
+
+- Added bounded, statically configured service classes beneath each physical
+  pool, with independent concurrency and in-flight token ceilings.
+- Added deterministic first-match rules over trusted subject, tenant,
+  application, and role claims.
+- Added class-aware routing, response headers, structured audit attribution,
+  bounded Prometheus labels, versioned class-limit updates, and Latchflo grant
+  preservation.
+- Kept tenant churn out of runtime bulkhead keys, timers, and metric series by
+  limiting policy to at most 64 configured classes.
+
+Deferred to the next policy milestone:
+
+- Model allow/deny policy by tenant and application.
+- Dynamic weighted lending or reserved-capacity restoration between classes.
+- Atomic policy reload and Latchflo-distributed policy versions.
+- Durable audit export and external policy-management APIs.
+
+Exit evidence:
+
+- A full premium class does not consume the standard class's configured
+  capacity.
+- Class-aware routing avoids replicas where the selected class is exhausted.
+- Latchflo grant updates and expiration revisions retain the local class table.
+- Raw tenant and application values do not become metric labels or bulkhead
+  keys.
+
+### v0.21.0 — Distributed policy and model authorization
+
+**Target duration:** 2–4 weeks
+**Goal:** Move identity-aware policy from static local configuration to a
+versioned, auditable fleet policy without introducing unbounded state.
+
+Planned work:
+
+- Add model-access allow and deny policies by tenant and application.
+- Define deterministic precedence across global, pool, class, tenant, and
+  application scopes.
+- Add policy versioning, validation, dry-run evaluation, atomic reload, and
+  Latchflo distribution.
+- Add optional work-conserving lending with protected floor restoration between
+  configured classes.
+- Include policy identifiers and versions in audit events.
+- Add fairness, noisy-neighbor, rollout, rollback, and stale-policy tests.
+
+Exit criteria:
+
+- A tenant cannot access a disallowed model or consume another class's protected
+  floor.
+- Invalid or stale policy revisions cannot partially apply.
+- Policy rollout and rollback are observable and deterministic across replicas.
+- Tenant churn remains bounded independently of fleet size.
+
+### v0.22.0 — Fleet coordination hardening
 
 **Target duration:** 4–6 weeks
 **Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas
@@ -338,39 +363,10 @@ Non-goals:
 - Automatically discovering provider quotas.
 - Making Kubernetes the source of admission correctness.
 
-### v0.19.0 — Tenant policy and fairness
-
-**Target duration:** 2–4 weeks
-**Goal:** Support paid multi-tenant deployments without creating unbounded gateway
-state.
-
-Planned work:
-
-- Add model-access allow and deny policies by tenant and application.
-- Add bounded per-tenant token, concurrency, and priority policies within shared
-  physical pools.
-- Add weighted or reserved capacity for selected service classes.
-- Define deterministic policy precedence across global, pool, tenant, and
-  application scopes.
-- Add policy versioning, validation, dry-run evaluation, and atomic reload.
-- Include policy identifiers and versions in audit events.
-- Add fairness and noisy-neighbor tests across multiple tenants and priorities.
-- Add optional durable audit export through OpenTelemetry logs or a documented
-  sink interface.
-
-Exit criteria:
-
-- A tenant cannot access a disallowed model or consume another tenant's reserved
-  capacity.
-- Policy reload cannot partially apply an invalid configuration.
-- Tenant churn does not create unbounded timers, metric series, or bulkhead
-  objects.
-- Saturation tests demonstrate that interactive traffic remains available while
-  lower-priority batch work is shed.
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.19.0
+**Target duration:** 3–5 weeks after v0.22.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:
@@ -461,9 +457,10 @@ A milestone may ship only when:
 Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.11.0, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.
 
 
-## Shipped in v0.19.0
+## Shipped in v0.20.0
 
-- Progressive streaming reconciliation using
-  `async-bulkhead-llm@3.13.0` `ProgressiveUsageReconciler`.
-- Coalesced future-output hold updates with a configurable safety floor.
-- Per-pool early-release telemetry and compatibility opt-out.
+- Bounded identity-aware admission classes using
+  `async-bulkhead-llm@3.14.0`.
+- First-match claim rules, class-aware routing, bounded telemetry, and fixed-key
+  runtime class-limit updates.
+- Latchflo grant preservation for local class limits.

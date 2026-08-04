@@ -389,6 +389,7 @@ function limitsEqual(
 function grantUpdate(
   grant: CapacityGrant,
   revision = grant.revision,
+  admissionClasses?: LLMAdmissionLimits["admissionClasses"],
 ): PoolLimitsUpdate {
   return {
     pool: grant.pool,
@@ -399,6 +400,7 @@ function grantUpdate(
       ...(grant.limits.tokenBudget === undefined
         ? {}
         : { tokenBudget: grant.limits.tokenBudget }),
+      ...(admissionClasses === undefined ? {} : { admissionClasses }),
     },
     provenance: Object.freeze({
       source: "latchflo",
@@ -674,7 +676,7 @@ export class LatchfloTyrAgent {
         }
         continue;
       }
-      updates.push(grantUpdate(grant));
+      updates.push(grantUpdate(grant, grant.revision, applied.admissionClasses));
     }
 
     if (updates.length > 0) {
@@ -862,8 +864,13 @@ export class LatchfloTyrAgent {
       this.#scheduleExpiration();
       return;
     }
+    const current = this.options.control.limits();
     const updates: PoolLimitsUpdate[] = expired.map((grant) => {
-      const update = grantUpdate(grant, grant.revision + 1);
+      const update = grantUpdate(
+        grant,
+        grant.revision + 1,
+        current[grant.pool]?.admissionClasses,
+      );
       return {
         ...update,
         limits: {
@@ -873,6 +880,9 @@ export class LatchfloTyrAgent {
           ...(grant.limits.tokenBudget === undefined
             ? {}
             : { tokenBudget: { budget: 0, highPriorityReserve: 0 } }),
+          ...(update.limits.admissionClasses === undefined
+            ? {}
+            : { admissionClasses: update.limits.admissionClasses }),
         },
       };
     });

@@ -182,6 +182,7 @@ const upstream = await listen(upstreamServer);
 
 const peer = createGateway({
   openaiUpstreamUrl: upstream,
+  resolveAdmissionClass: () => "standard",
   capacityRouting: {
     instanceId: "tyr-b",
     sharedSecret: SECRET,
@@ -198,6 +199,13 @@ const peer = createGateway({
       model: "gpt-4o",
       maxConcurrent: 4,
       budget: 10_000,
+      admissionClasses: {
+        defaultClass: "standard",
+        classes: {
+          standard: { maxConcurrent: 4, maxInFlightTokens: 10_000 },
+          premium: { maxConcurrent: 4, maxInFlightTokens: 10_000 },
+        },
+      },
     },
   ],
 });
@@ -205,6 +213,7 @@ const peerUrl = await listen(peer.server);
 
 const ingress = createGateway({
   openaiUpstreamUrl: upstream,
+  resolveAdmissionClass: () => "premium",
   capacityRouting: {
     instanceId: "tyr-a",
     sharedSecret: SECRET,
@@ -221,6 +230,13 @@ const ingress = createGateway({
       model: "gpt-4o",
       maxConcurrent: 1,
       budget: 1_500,
+      admissionClasses: {
+        defaultClass: "standard",
+        classes: {
+          standard: { maxConcurrent: 1, maxInFlightTokens: 1_500 },
+          premium: { maxConcurrent: 1, maxInFlightTokens: 1_500 },
+        },
+      },
     },
   ],
 });
@@ -254,6 +270,7 @@ try {
   assert.equal(response.status, 200, responseText);
   assert.equal(response.headers.get("x-tyr-routed-by"), "tyr-a");
   assert.equal(response.headers.get("x-tyr-routed-to"), "tyr-b");
+  assert.equal(response.headers.get("x-admission-class"), "premium");
   assert.equal(ingress.control.stats().interactive.llm.admitted, 0);
   assert.equal(peer.control.stats().interactive.llm.admitted, 1);
 

@@ -6,6 +6,7 @@ import {
   type LLMPriority,
   type TokenUsage,
 } from "async-bulkhead-llm";
+import { normalizeAdmissionClassId } from "./admission-policy.js";
 import {
   createPools,
   parsePriority,
@@ -119,6 +120,15 @@ export type GatewayOptions = {
     req: IncomingMessage,
     identity?: TyrRequestIdentity,
   ) => LLMPriority | Promise<LLMPriority>;
+  /**
+   * Override per-pool identity rules with a trusted bounded admission-class ID.
+   * Return undefined to use the pool's configured default class.
+   */
+  resolveAdmissionClass?: (
+    req: IncomingMessage,
+    identity: TyrRequestIdentity | undefined,
+    pool: string,
+  ) => string | undefined | Promise<string | undefined>;
   /**
    * Trust the raw client-supplied `x-priority` header. Disabled by default
    * because an unauthenticated caller could otherwise self-assign the
@@ -530,6 +540,7 @@ export function createGateway(opts: GatewayOptions) {
   const maxOutputTokens = opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
   const shutdownDrainTimeoutMs = opts.shutdownDrainTimeoutMs;
   const resolvePriority = opts.resolvePriority;
+  const resolveAdmissionClass = opts.resolveAdmissionClass;
   const trustPriorityHeader = opts.trustPriorityHeader ?? false;
   const isReady = opts.isReady ?? (() => true);
   const capacityRouter =
@@ -567,6 +578,7 @@ export function createGateway(opts: GatewayOptions) {
     baseUrl: string;
     targetInstanceId: string;
     priority: LLMPriority;
+    admissionClass?: string;
   }): Promise<void> {
     if (capacityRouter === undefined) {
       throw new Error("capacity router is not configured");
@@ -591,6 +603,7 @@ export function createGateway(opts: GatewayOptions) {
         headers: capacityRouter.forwardedHeaders(
           input.req.headers,
           input.priority,
+          input.admissionClass,
         ),
         body: input.raw,
         redirect: "error",
@@ -742,6 +755,40 @@ export function createGateway(opts: GatewayOptions) {
         );
       }
 
+      let admissionClass =
+        routeClassification.kind === "internal" &&
+        routeClassification.admissionClass !== undefined
+          ? routeClassification.admissionClass
+          : pool.resolveAdmissionClass(requestIdentity);
+      if (
+        routeClassification.kind === "external" &&
+        resolveAdmissionClass !== undefined
+      ) {
+        const resolved = await resolveAdmissionClass(
+          req,
+          requestIdentity,
+          pool.name,
+        );
+        if (resolved !== undefined) {
+          admissionClass = normalizeAdmissionClassId(
+            resolved,
+            "resolveAdmissionClass result",
+          );
+        }
+      }
+
+      const configuredAdmissionClasses =
+        pool.controller.limits().admissionClasses;
+      if (
+        admissionClass !== undefined &&
+        (configuredAdmissionClasses === undefined ||
+          !Object.hasOwn(configuredAdmissionClasses, admissionClass))
+      ) {
+        throw new Error(
+          `admission class ${JSON.stringify(admissionClass)} is not configured for pool ${JSON.stringify(pool.name)}`,
+        );
+      }
+
       if (
         capacityRouter !== undefined &&
         routeClassification.kind === "external"
@@ -750,6 +797,7 @@ export function createGateway(opts: GatewayOptions) {
         const route = capacityRouter.select({
           poolName: pool.name,
           priority,
+          ...(admissionClass === undefined ? {} : { admissionClass }),
           reservation,
         });
         if (!route.local && route.baseUrl !== undefined) {
@@ -761,6 +809,7 @@ export function createGateway(opts: GatewayOptions) {
             baseUrl: route.baseUrl,
             targetInstanceId: route.instanceId,
             priority,
+            ...(admissionClass === undefined ? {} : { admissionClass }),
           });
           return;
         }
@@ -768,7 +817,7 @@ export function createGateway(opts: GatewayOptions) {
 
       // Calculate one immutable reservation and pass it verbatim to both the
       // detailed advisory check and the authoritative admission path.
-      const preparation = pool.prepare(llmRequest, priority);
+      const preparation = pool.prepare(llmRequest, priority, admissionClass);
       res.setHeader("x-admission-mode", preparation.mode);
       res.setHeader(
         "x-admission-preview-revision",
@@ -779,6 +828,9 @@ export function createGateway(opts: GatewayOptions) {
       // overwrite it in the callback if a newer snapshot is active when they
       // actually begin execution.
       res.setHeader("x-admission-revision", String(preparation.limitRevision));
+      if (preparation.admissionClass !== undefined) {
+        res.setHeader("x-admission-class", preparation.admissionClass);
+      }
       res.setHeader(
         "x-admission-preview",
         preparation.advisory.admit ? "admit" : "reject",
@@ -861,6 +913,9 @@ export function createGateway(opts: GatewayOptions) {
               res.setHeader("x-admission-id", ctx.admissionId);
               res.setHeader("x-admission-outcome", ctx.admission);
               res.setHeader("x-admission-revision", String(ctx.limitRevision));
+              if (ctx.admissionClass !== undefined) {
+                res.setHeader("x-admission-class", ctx.admissionClass);
+              }
               setGrantProvenanceHeaders(res, ctx.provenance);
               if (ctx.bypassReason !== undefined) {
                 res.setHeader("x-admission-bypass-reason", ctx.bypassReason);
@@ -869,6 +924,9 @@ export function createGateway(opts: GatewayOptions) {
               telemetry.recordAdmissionStart({
                 pool: pool.name,
                 priority,
+                ...(ctx.admissionClass === undefined
+                  ? {}
+                  : { admissionClass: ctx.admissionClass }),
                 outcome: ctx.admission,
               });
               admissionAudit = {
@@ -876,6 +934,9 @@ export function createGateway(opts: GatewayOptions) {
                 pool: pool.name,
                 provider: adapter.shape,
                 priority,
+                ...(ctx.admissionClass === undefined
+                  ? {}
+                  : { admissionClass: ctx.admissionClass }),
                 ...(requestIdentity === undefined
                   ? {}
                   : { identity: requestIdentity }),
@@ -1009,6 +1070,7 @@ export function createGateway(opts: GatewayOptions) {
           },
           {
             priority,
+            ...(admissionClass === undefined ? {} : { admissionClass }),
             signal: admissionSignal,
             getUsage: (value) => value.usage,
           },
@@ -1025,6 +1087,9 @@ export function createGateway(opts: GatewayOptions) {
           telemetry.recordRejection({
             pool: pool.name,
             priority,
+            ...(preparation.admissionClass === undefined
+              ? {}
+              : { admissionClass: preparation.admissionClass }),
             reason: err.reason,
           });
           telemetry.emitAdmissionAudit({
@@ -1033,6 +1098,9 @@ export function createGateway(opts: GatewayOptions) {
             pool: pool.name,
             provider: adapter.shape,
             priority,
+            ...(preparation.admissionClass === undefined
+              ? {}
+              : { admissionClass: preparation.admissionClass }),
             ...(requestIdentity === undefined
               ? {}
               : { identity: requestIdentity }),
@@ -1051,6 +1119,9 @@ export function createGateway(opts: GatewayOptions) {
             return;
           }
           res.setHeader("x-admission-revision", String(rejectionRevision));
+          if (preparation.admissionClass !== undefined) {
+            res.setHeader("x-admission-class", preparation.admissionClass);
+          }
           setGrantProvenanceHeaders(res, provenance);
           res.setHeader("x-admission-reason", err.reason);
           const retryAfterMs = retryHints.hintMs(

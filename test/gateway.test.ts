@@ -1252,9 +1252,9 @@ describe("admission-gateway", () => {
         "text/plain; version=0.0.4",
       );
       const metrics = await metricsResponse.text();
-      expect(metrics).toContain('tyr_build_info{version="0.19.0"} 1');
+      expect(metrics).toContain('tyr_build_info{version="0.20.0"} 1');
       expect(metrics).toContain(
-        'tyr_admission_decisions_total{outcome="admitted",pool="test-pool",priority="normal"} 1',
+        'tyr_admission_decisions_total{admission_class="none",outcome="admitted",pool="test-pool",priority="normal"} 1',
       );
       expect(metrics).toContain('tyr_pool_tokens_consumed_total{pool="test-pool"} 50');
       expect(metrics).toContain(
@@ -1311,10 +1311,10 @@ describe("admission-gateway", () => {
 
       const metrics = await (await fetch(`${gw.url}/metrics`)).text();
       expect(metrics).toContain(
-        'tyr_admission_decisions_total{outcome="rejected",pool="test-pool",priority="normal"} 1',
+        'tyr_admission_decisions_total{admission_class="none",outcome="rejected",pool="test-pool",priority="normal"} 1',
       );
       expect(metrics).toContain(
-        'tyr_admission_rejections_total{pool="test-pool",priority="normal",reason="budget_limit"} 1',
+        'tyr_admission_rejections_total{admission_class="none",pool="test-pool",priority="normal",reason="budget_limit"} 1',
       );
       expect(auditEvents).toHaveLength(1);
       expect(auditEvents[0]).toMatchObject({
