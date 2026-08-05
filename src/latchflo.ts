@@ -562,12 +562,30 @@ export class LatchfloTyrAgent {
     } catch (error) {
       throw protocolError(error, "agent registration response");
     }
-    await this.options.onAgentToken?.(registration.agentToken);
+
+    // The token Latchflo just issued is usable in memory regardless of
+    // whether it can be durably persisted. A local disk failure below must
+    // not be treated like a failed registration: that would discard a
+    // valid credential and force a fresh registration call to Latchflo on
+    // every retry purely because of a filesystem problem.
     this.#agentToken = registration.agentToken;
     this.#controllerEpoch = registration.controllerEpoch;
     this.#logger.info(
       `registered Tyr instance ${this.options.instanceId} with Latchflo controller epoch ${registration.controllerEpoch}`,
     );
+
+    try {
+      await this.options.onAgentToken?.(registration.agentToken);
+    } catch (error) {
+      reportFailure(this.options.onFailure, {
+        operation: "persist",
+        reason: "persist_error",
+      });
+      this.#logger.error(
+        "failed to persist the rotated Latchflo agent token; it remains valid for this process, but a restart will require the bootstrap token again",
+        error,
+      );
+    }
   }
 
   async #refreshAuthorization(staleToken: string): Promise<void> {
@@ -758,13 +776,6 @@ export class LatchfloTyrAgent {
         operation: "heartbeat",
         reason: requestError.retryable ? "retryable" : "permanent",
       });
-      if (!requestError.retryable) {
-        this.#logger.error(
-          "Latchflo heartbeat stopped after a permanent failure",
-          requestError,
-        );
-        return;
-      }
       const delayMs = backoffDelay({
         baseMs: this.#retryIntervalMs,
         maxMs: this.#retryMaxIntervalMs,
@@ -775,10 +786,20 @@ export class LatchfloTyrAgent {
           : { retryAfterMs: requestError.retryAfterMs }),
       });
       this.#heartbeatFailures += 1;
-      this.#logger.warn(
-        `Latchflo heartbeat failed; retry=${this.#heartbeatFailures} delayMs=${delayMs}`,
-        requestError,
-      );
+      // A non-retryable status is retried too: the control plane can become
+      // reachable again without a Tyr restart, and giving up forever would
+      // strand readiness on a stale in-process decision.
+      if (requestError.retryable) {
+        this.#logger.warn(
+          `Latchflo heartbeat failed; retry=${this.#heartbeatFailures} delayMs=${delayMs}`,
+          requestError,
+        );
+      } else {
+        this.#logger.error(
+          `Latchflo heartbeat failed with a non-retryable status; retrying anyway with backoff; retry=${this.#heartbeatFailures} delayMs=${delayMs}`,
+          requestError,
+        );
+      }
       this.#scheduleHeartbeat(delayMs);
     }
   }
@@ -807,13 +828,6 @@ export class LatchfloTyrAgent {
         operation: "poll",
         reason: requestError.retryable ? "retryable" : "permanent",
       });
-      if (!requestError.retryable) {
-        this.#logger.error(
-          "Latchflo desired-state polling stopped after a permanent failure; existing grants remain enforced until expiration",
-          requestError,
-        );
-        return;
-      }
       const delayMs = backoffDelay({
         baseMs: this.#retryIntervalMs,
         maxMs: this.#retryMaxIntervalMs,
@@ -824,10 +838,20 @@ export class LatchfloTyrAgent {
           : { retryAfterMs: requestError.retryAfterMs }),
       });
       this.#pollFailures += 1;
-      this.#logger.warn(
-        `Latchflo desired-state poll failed; retry=${this.#pollFailures} delayMs=${delayMs}`,
-        requestError,
-      );
+      // A non-retryable status is retried too: existing grants remain
+      // enforced until they expire, and the control plane can become
+      // reachable again without a Tyr restart.
+      if (requestError.retryable) {
+        this.#logger.warn(
+          `Latchflo desired-state poll failed; retry=${this.#pollFailures} delayMs=${delayMs}`,
+          requestError,
+        );
+      } else {
+        this.#logger.error(
+          `Latchflo desired-state poll failed with a non-retryable status; retrying anyway with backoff; retry=${this.#pollFailures} delayMs=${delayMs}`,
+          requestError,
+        );
+      }
       this.#schedulePoll(delayMs);
     }
   }
@@ -943,11 +967,20 @@ export class LatchfloTyrAgent {
     };
 
     let response = await request(token);
-    if (response.status === 401 && this.options.bootstrapToken !== undefined) {
-      await this.#refreshAuthorization(token);
-      const refreshed = this.#agentToken;
-      if (refreshed !== undefined && refreshed !== token) {
-        response = await request(refreshed);
+    if (response.status === 401) {
+      if (this.options.bootstrapToken !== undefined) {
+        await this.#refreshAuthorization(token);
+        const refreshed = this.#agentToken;
+        if (refreshed !== undefined && refreshed !== token) {
+          response = await request(refreshed);
+        }
+      } else if (this.#agentToken === token) {
+        // Latchflo rejected the persisted token and there is no bootstrap
+        // token to re-register with. Discard the known-bad token so the
+        // next attempt fails fast with the clear "bootstrap token is
+        // required" message instead of repeating the same doomed request
+        // against Latchflo forever.
+        this.#agentToken = undefined;
       }
     }
     return response;
@@ -1057,10 +1090,21 @@ export function createLatchfloManagedMode(options: {
     if (stopped || started) return;
     const delayMs = retryDelay(error);
     retryAttempt += 1;
-    logger.warn(
-      `Latchflo managed mode is not connected; retry=${retryAttempt} delayMs=${delayMs}`,
-      error,
-    );
+    // A non-retryable status is retried too: Tyr remains healthy but
+    // unready and managed pools remain closed while it keeps trying,
+    // rather than requiring a manual restart once the control plane
+    // recovers.
+    if (error.retryable) {
+      logger.warn(
+        `Latchflo managed mode is not connected; retry=${retryAttempt} delayMs=${delayMs}`,
+        error,
+      );
+    } else {
+      logger.error(
+        `Latchflo managed mode is not connected (non-retryable status; retrying anyway with backoff); retry=${retryAttempt} delayMs=${delayMs}`,
+        error,
+      );
+    }
     retryTimer = setTimeout(() => attemptStart(), delayMs);
     retryTimer.unref?.();
   }
@@ -1080,14 +1124,7 @@ export function createLatchfloManagedMode(options: {
           operation: "startup",
           reason: requestError.retryable ? "retryable" : "permanent",
         });
-        if (requestError.retryable) {
-          scheduleRetry(requestError);
-        } else {
-          logger.error(
-            "Latchflo managed mode startup failed permanently; Tyr remains healthy but unready and managed pools remain closed",
-            requestError,
-          );
-        }
+        scheduleRetry(requestError);
       })
       .finally(() => {
         starting = false;

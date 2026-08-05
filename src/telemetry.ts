@@ -50,14 +50,16 @@ export type LatchfloFailureOperation =
   | "heartbeat"
   | "poll"
   | "ack"
-  | "expiration";
+  | "expiration"
+  | "persist";
 
 export type LatchfloFailureReason =
   | "retryable"
   | "permanent"
   | "http_error"
   | "transport_error"
-  | "apply_error";
+  | "apply_error"
+  | "persist_error";
 
 export type TyrTelemetryOptions = {
   /** Expose Prometheus text format at GET /metrics. Default: true. */

@@ -249,6 +249,61 @@ describe("Latchflo managed mode", () => {
     mode.stop();
   });
 
+  it("keeps a freshly issued token in memory when persisting it fails", async () => {
+    const { control } = createControl({
+      revision: 0,
+      maxConcurrent: 0,
+      maxQueue: 0,
+    });
+    let registrations = 0;
+    const fetchStub: typeof globalThis.fetch = (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents/register")) {
+        registrations += 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ agentToken: "fresh-token", controllerEpoch: 7 }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      if (url.endsWith("/desired-state")) {
+        return Promise.resolve(
+          new Response(desiredState(new Date(Date.now() + 10_000).toISOString()), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    };
+    const failures: Array<{ operation: string; reason: string }> = [];
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      bootstrapToken: "bootstrap-token",
+      control,
+      fetch: fetchStub,
+      onAgentToken: () => {
+        throw new Error("EACCES: permission denied, open '/var/lib/tyr/latchflo-agent.token'");
+      },
+      onFailure: (event) => failures.push(event),
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    expect(agent.ready()).toBe(true);
+    expect(registrations).toBe(1);
+    expect(failures).toContainEqual({ operation: "persist", reason: "persist_error" });
+
+    // A second cycle must reuse the in-memory token instead of registering
+    // again just because it could not be durably persisted.
+    await agent.pollNow();
+    expect(registrations).toBe(1);
+    agent.stop();
+  });
+
   it("keeps a valid grant ready through a transient poll failure", async () => {
     const { control } = createControl({
       revision: 0,
@@ -337,6 +392,37 @@ describe("Latchflo managed mode", () => {
     expect(agent.ready()).toBe(true);
     expect(authorizations.some((value) => value.endsWith(":Bearer fresh-token"))).toBe(true);
     agent.stop();
+  });
+
+  it("discards a persisted token rejected with 401 when no bootstrap token is available", async () => {
+    const { control } = createControl({
+      revision: 0,
+      maxConcurrent: 0,
+      maxQueue: 0,
+    });
+    let fetches = 0;
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "revoked-token",
+      control,
+      fetch: () => {
+        fetches += 1;
+        return Promise.resolve(new Response("revoked", { status: 401 }));
+      },
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await expect(agent.pollNow()).rejects.toThrow(/revoked/);
+    expect(fetches).toBe(1);
+
+    // The persisted token is now known-bad and there is no bootstrap token
+    // to re-register with: the next attempt must fail fast locally with a
+    // clear, actionable message instead of repeating the same doomed
+    // request against Latchflo forever.
+    await expect(agent.pollNow()).rejects.toThrow(/bootstrap token is required/);
+    expect(fetches).toBe(1);
   });
 
   it("rejects malformed desired state before applying limits", async () => {
@@ -484,7 +570,7 @@ describe("Latchflo managed mode", () => {
     mode.stop();
   });
 
-  it("does not retry a permanent startup configuration failure", async () => {
+  it("keeps retrying a non-retryable startup failure instead of giving up forever", async () => {
     const { control } = createControl({
       revision: 0,
       maxConcurrent: 0,
@@ -519,12 +605,17 @@ describe("Latchflo managed mode", () => {
     });
 
     mode.start();
-    await waitFor(() => permanentErrors === 1);
-    await sleep(80);
+    // A missing bootstrap token fails locally without an HTTP call, but the
+    // agent must keep retrying with backoff rather than stopping after the
+    // first attempt: only a restart could previously recover from this.
+    await waitFor(() => permanentErrors >= 3);
     expect(fetches).toBe(0);
-    expect(permanentErrors).toBe(1);
     expect(mode.ready()).toBe(false);
+
     mode.stop();
+    const errorsAtStop = permanentErrors;
+    await sleep(100);
+    expect(permanentErrors).toBe(errorsAtStop);
   });
 
   it("keeps expiration enforcement active when acknowledgements fail", async () => {

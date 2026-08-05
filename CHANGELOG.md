@@ -8,6 +8,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-08-04
+
+### Fixed
+
+- Fixed the Latchflo agent's heartbeat, desired-state poll, and startup
+  registration loops giving up permanently after a non-retryable response
+  (`400`/`401`/`403`/`404`/`409`/`422`, or a malformed response body). All
+  three now keep retrying with the existing bounded exponential backoff, so
+  a transient control-plane blip that happens to return one of those
+  statuses no longer strands Tyr unready until a manual restart.
+- Fixed steady-state agent-token recovery: a persisted token rejected with
+  `401` when no bootstrap token is configured now discards the known-bad
+  token so the next attempt fails fast locally with the existing "bootstrap
+  token is required" message, instead of resending the same doomed request
+  to Latchflo forever.
+- Fixed a local agent-token persistence failure (for example a read-only or
+  full `agentTokenFile` volume) being misclassified as an ordinary
+  retryable connectivity failure. A freshly issued token now stays valid in
+  memory even when it cannot be durably persisted, so Tyr no longer
+  re-registers with Latchflo on every retry solely because of a local
+  filesystem problem. The failure is now reported through a new
+  `tyr_latchflo_failures_total{operation="persist",reason="persist_error"}`
+  counter instead of the generic retryable/permanent reasons.
+- Added focused regression coverage for all three fixes in
+  `test/latchflo.test.ts`.
+
 ## [0.20.0] - 2026-08-04
 
 ### Added
@@ -783,7 +809,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.17.0...v0.18.0
