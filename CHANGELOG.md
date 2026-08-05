@@ -8,6 +8,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-08-05
+
+### Added
+
+- Tyr now declares `capabilities.admissionClasses: true` when registering
+  with Latchflo. Latchflo 0.7.0 and newer refuse to enrol an agent into any
+  pool carrying `admissionClassLimits` unless the agent declares this, so
+  every replica in a class-configured fleet previously failed registration
+  with `400` and never appeared in `GET /v1/agents`. Combined with the
+  0.20.1 retry-forever change, the symptom was a healthy-looking but
+  permanently unready fleet that the control plane could not see. Older
+  control planes ignore the field.
+- Tyr now consumes the per-replica admission-class partition Latchflo ships
+  on each capacity grant. `limits.admissionClasses` is parsed, validated
+  (bounded class count, known properties only, non-negative integers,
+  reserved class IDs rejected), and applied as part of the same atomic
+  limits transaction as concurrency and token budget. Fleet-wide class
+  ceilings configured in Latchflo now take effect instead of being silently
+  discarded in favour of the locally configured table.
+
+### Changed
+
+- Admission-class limits in a pool's static configuration are now bootstrap
+  values under control-plane management: a grant carrying
+  `admissionClasses` overrides them. A grant that omits the field leaves the
+  configured table in force, so control planes predating class-aware
+  allocation continue to work unchanged.
+- Same-revision grant comparison now includes admission-class limits. A
+  grant that reuses an applied revision with different class ceilings is
+  reported as `revision_content_conflict` rather than being accepted as
+  equivalent.
+
+### Fixed
+
+- A grant whose class keys do not match the pool's configured class table is
+  now rejected through the normal acknowledgement path
+  (`admission_class_key_mismatch`, or `admission_classes_not_configured`
+  when the pool has no class table at all). Previously the key-preservation
+  check inside `applyLimits` would throw, leaving the grant unacknowledged
+  until the expiration kill switch zeroed the pool.
+
+### Notes
+
+- No dependency changes. This release continues to build against
+  `async-bulkhead-llm@3.14.0` and the vendored `async-bulkhead-ts@1.0.1`.
+
 ## [0.20.1] - 2026-08-04
 
 ### Fixed

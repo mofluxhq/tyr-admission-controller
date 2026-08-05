@@ -7,6 +7,10 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import type { LLMAdmissionLimits } from "async-bulkhead-llm";
+import {
+  MAX_ADMISSION_CLASSES,
+  normalizeAdmissionClassId,
+} from "./admission-policy.js";
 import type { PoolLimitsUpdate } from "./pools.js";
 import { TyrDemandReporter, type PoolDemandSnapshot } from "./demand.js";
 import type { TyrControlPlane } from "./server.js";
@@ -43,11 +47,22 @@ type AdmissionTokenBudget = {
   readonly highPriorityReserve: number;
 };
 
+type TyrAdmissionClassLimits = {
+  readonly maxConcurrent?: number;
+  readonly maxInFlightTokens?: number;
+};
+
 type TyrAdmissionLimits = {
   readonly revision: number;
   readonly maxConcurrent: number;
   readonly maxQueue: number;
   readonly tokenBudget?: AdmissionTokenBudget;
+  /**
+   * Latchflo 0.7+ partitions each pool's fleet-wide admission-class ceilings
+   * across replicas and ships this replica's share on every grant. Absent when
+   * the control plane predates class-aware allocation.
+   */
+  readonly admissionClasses?: Readonly<Record<string, TyrAdmissionClassLimits>>;
 };
 
 type CapacityGrant = {
@@ -251,13 +266,75 @@ function parseTokenBudget(value: unknown, field: string): AdmissionTokenBudget {
   return { budget: total, highPriorityReserve: reserve };
 }
 
+function parseAdmissionClasses(
+  value: unknown,
+  field: string,
+): Readonly<Record<string, TyrAdmissionClassLimits>> {
+  const classes = objectValue(value, field);
+  const entries = Object.entries(classes);
+  if (entries.length === 0 || entries.length > MAX_ADMISSION_CLASSES) {
+    throw new Error(
+      `${field} must contain between 1 and ${MAX_ADMISSION_CLASSES} classes`,
+    );
+  }
+  // Null-prototype so a control plane cannot reach Object.prototype through a
+  // class ID. normalizeAdmissionClassId also rejects the reserved IDs.
+  const parsed = Object.create(null) as Record<string, TyrAdmissionClassLimits>;
+  for (const [rawId, rawLimits] of entries) {
+    const id = normalizeAdmissionClassId(rawId, `${field} class id`);
+    const classField = `${field}[${JSON.stringify(id)}]`;
+    if (Object.hasOwn(parsed, id)) {
+      throw new Error(`${field} contains duplicate class ID ${JSON.stringify(id)}`);
+    }
+    const limits = objectValue(rawLimits, classField);
+    for (const key of Object.keys(limits)) {
+      if (key !== "maxConcurrent" && key !== "maxInFlightTokens") {
+        throw new Error(
+          `${classField} contains unknown property ${JSON.stringify(key)}`,
+        );
+      }
+    }
+    const maxConcurrent = limits["maxConcurrent"];
+    const maxInFlightTokens = limits["maxInFlightTokens"];
+    parsed[id] = Object.freeze({
+      ...(maxConcurrent === undefined
+        ? {}
+        : {
+            maxConcurrent: integerValue(
+              maxConcurrent,
+              `${classField}.maxConcurrent`,
+              0,
+            ),
+          }),
+      ...(maxInFlightTokens === undefined
+        ? {}
+        : {
+            maxInFlightTokens: integerValue(
+              maxInFlightTokens,
+              `${classField}.maxInFlightTokens`,
+              0,
+            ),
+          }),
+    });
+  }
+  return Object.freeze(parsed);
+}
+
 function parseLimits(value: unknown, field: string): TyrAdmissionLimits {
   const limits = objectValue(value, field);
   const tokenBudget =
     limits["tokenBudget"] === undefined
       ? undefined
       : parseTokenBudget(limits["tokenBudget"], `${field}.tokenBudget`);
+  const admissionClasses =
+    limits["admissionClasses"] === undefined
+      ? undefined
+      : parseAdmissionClasses(
+          limits["admissionClasses"],
+          `${field}.admissionClasses`,
+        );
   return {
+    ...(admissionClasses === undefined ? {} : { admissionClasses }),
     revision: integerValue(limits["revision"], `${field}.revision`, 0),
     maxConcurrent: integerValue(
       limits["maxConcurrent"],
@@ -372,6 +449,29 @@ function parseDesiredState(
   };
 }
 
+function admissionClassesEqual(
+  left: LLMAdmissionLimits["admissionClasses"],
+  right: TyrAdmissionLimits["admissionClasses"],
+): boolean {
+  // A grant that omits classes carries no opinion about them, so it cannot
+  // conflict with what is applied locally. Only a present-and-different table
+  // is a content conflict.
+  if (right === undefined) return true;
+  if (left === undefined) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.length !== rightKeys.length) return false;
+  if (leftKeys.some((key, index) => key !== rightKeys[index])) return false;
+  return leftKeys.every((key) => {
+    const leftLimits = left[key];
+    const rightLimits = right[key];
+    return (
+      leftLimits?.maxConcurrent === rightLimits?.maxConcurrent &&
+      leftLimits?.maxInFlightTokens === rightLimits?.maxInFlightTokens
+    );
+  });
+}
+
 function limitsEqual(
   left: LLMAdmissionLimits,
   right: TyrAdmissionLimits,
@@ -382,8 +482,50 @@ function limitsEqual(
     left.maxQueue === right.maxQueue &&
     left.tokenBudget?.budget === right.tokenBudget?.budget &&
     left.tokenBudget?.highPriorityReserve ===
-      right.tokenBudget?.highPriorityReserve
+      right.tokenBudget?.highPriorityReserve &&
+    admissionClassesEqual(left.admissionClasses, right.admissionClasses)
   );
+}
+
+/**
+ * Decides which admission-class table to apply for one grant.
+ *
+ * `validateLimitSnapshot` throws rather than returning a rejection when the
+ * class keys do not line up, and a throw out of `applyLimits` would leave the
+ * grant unacked until the expiration kill switch zeroes the pool. So every
+ * mismatch is caught here and surfaced as an ordinary ack rejection instead.
+ */
+function resolveGrantAdmissionClasses(
+  applied: LLMAdmissionLimits,
+  grant: CapacityGrant,
+):
+  | { readonly ok: true; readonly admissionClasses?: LLMAdmissionLimits["admissionClasses"] }
+  | { readonly ok: false; readonly reason: string } {
+  const granted = grant.limits.admissionClasses;
+  const local = applied.admissionClasses;
+
+  // No classes anywhere: nothing to reconcile.
+  if (granted === undefined && local === undefined) return { ok: true };
+
+  // Control plane predates class-aware allocation, or simply has no class
+  // policy for this pool. Keep enforcing the locally configured table.
+  if (granted === undefined) return { ok: true, admissionClasses: local };
+
+  // The pool is not class-configured, so the bulkhead would reject the table
+  // outright. Applying it is impossible; say so rather than crashing.
+  if (local === undefined) {
+    return { ok: false, reason: "admission_classes_not_configured" };
+  }
+
+  const localKeys = Object.keys(local).sort();
+  const grantedKeys = Object.keys(granted).sort();
+  if (
+    localKeys.length !== grantedKeys.length ||
+    localKeys.some((key, index) => key !== grantedKeys[index])
+  ) {
+    return { ok: false, reason: "admission_class_key_mismatch" };
+  }
+  return { ok: true, admissionClasses: granted };
 }
 
 function grantUpdate(
@@ -550,6 +692,12 @@ export class LatchfloTyrAgent {
           instanceId: this.options.instanceId,
           pools: this.options.pools,
           metadata: this.options.metadata ?? {},
+          // Latchflo 0.7+ refuses to enrol an agent into a pool carrying
+          // admissionClassLimits unless it declares that it can apply the
+          // per-replica class partition. Tyr consumes grant-borne class
+          // limits (see resolveGrantAdmissionClasses), so this is truthful.
+          // Older control planes ignore the field.
+          capabilities: { admissionClasses: true },
         }),
       });
     } catch (error) {
@@ -694,7 +842,15 @@ export class LatchfloTyrAgent {
         }
         continue;
       }
-      updates.push(grantUpdate(grant, grant.revision, applied.admissionClasses));
+      const classes = resolveGrantAdmissionClasses(applied, grant);
+      if (!classes.ok) {
+        await this.#ack(grant, "rejected", classes.reason);
+        this.#setReady(false);
+        return;
+      }
+      updates.push(
+        grantUpdate(grant, grant.revision, classes.admissionClasses),
+      );
     }
 
     if (updates.length > 0) {

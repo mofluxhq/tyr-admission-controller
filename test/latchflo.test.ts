@@ -662,3 +662,303 @@ describe("Latchflo managed mode", () => {
   });
 
 });
+
+describe("Latchflo admission-class grants", () => {
+  const CLASS_POOL_LIMITS: LLMAdmissionLimits = {
+    revision: 0,
+    maxConcurrent: 0,
+    maxQueue: 0,
+    tokenBudget: { budget: 0, highPriorityReserve: 0 },
+    admissionClasses: {
+      premium: { maxConcurrent: 0, maxInFlightTokens: 0 },
+      noisy: { maxConcurrent: 0, maxInFlightTokens: 0 },
+    },
+  };
+
+  function classDesiredState(
+    admissionClasses: unknown,
+    revision = 11,
+  ): string {
+    return JSON.stringify({
+      controllerEpoch: 7,
+      serverTime: new Date().toISOString(),
+      heartbeatIntervalMs: 10_000,
+      pollIntervalMs: 10_000,
+      grants: [
+        {
+          grantId: "00000000-0000-4000-8000-000000000007",
+          instanceId: "tyr-a",
+          pool: "openai-primary",
+          controllerEpoch: 7,
+          revision,
+          issuedAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 10_000).toISOString(),
+          limits: {
+            revision,
+            maxConcurrent: 8,
+            maxQueue: 0,
+            tokenBudget: { budget: 16_000, highPriorityReserve: 0 },
+            ...(admissionClasses === undefined ? {} : { admissionClasses }),
+          },
+        },
+      ],
+    });
+  }
+
+  function collectingFetch(body: string): {
+    readonly fetch: typeof globalThis.fetch;
+    readonly registrations: unknown[];
+    readonly acks: unknown[];
+  } {
+    const registrations: unknown[] = [];
+    const acks: unknown[] = [];
+    const fetchImpl: typeof globalThis.fetch = (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/agents/register")) {
+        registrations.push(JSON.parse(String(init?.body ?? "{}")));
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ agentToken: "issued", controllerEpoch: 7 }),
+            { status: 201, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      if (url.endsWith("/desired-state")) {
+        return Promise.resolve(
+          new Response(body, {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      if (url.endsWith("/ack")) {
+        acks.push(JSON.parse(String(init?.body ?? "{}")));
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    };
+    return { fetch: fetchImpl, registrations, acks };
+  }
+
+  it("advertises the admissionClasses capability when registering", async () => {
+    const { control } = createControl({ ...CLASS_POOL_LIMITS });
+    const stub = collectingFetch(
+      classDesiredState({
+        premium: { maxConcurrent: 2, maxInFlightTokens: 4_000 },
+        noisy: { maxConcurrent: 6, maxInFlightTokens: 12_000 },
+      }),
+    );
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      bootstrapToken: "bootstrap",
+      control,
+      fetch: stub.fetch,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    expect(stub.registrations).toHaveLength(1);
+    expect(stub.registrations[0]).toMatchObject({
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      capabilities: { admissionClasses: true },
+    });
+    agent.stop();
+  });
+
+  it("applies the per-replica class partition carried on the grant", async () => {
+    const { control, applied } = createControl({ ...CLASS_POOL_LIMITS });
+    const stub = collectingFetch(
+      classDesiredState({
+        premium: { maxConcurrent: 2, maxInFlightTokens: 4_000 },
+        noisy: { maxConcurrent: 6, maxInFlightTokens: 12_000 },
+      }),
+    );
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: stub.fetch,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    expect(agent.ready()).toBe(true);
+    expect(applied).toHaveLength(1);
+    expect(applied[0]?.[0]?.limits.admissionClasses).toEqual({
+      premium: { maxConcurrent: 2, maxInFlightTokens: 4_000 },
+      noisy: { maxConcurrent: 6, maxInFlightTokens: 12_000 },
+    });
+    agent.stop();
+  });
+
+  it("keeps the locally configured class table when a grant omits classes", async () => {
+    const { control, applied } = createControl({
+      ...CLASS_POOL_LIMITS,
+      admissionClasses: {
+        premium: { maxConcurrent: 3, maxInFlightTokens: 5_000 },
+        noisy: { maxConcurrent: 5, maxInFlightTokens: 11_000 },
+      },
+    });
+    const stub = collectingFetch(classDesiredState(undefined));
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: stub.fetch,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    expect(agent.ready()).toBe(true);
+    expect(applied[0]?.[0]?.limits.admissionClasses).toEqual({
+      premium: { maxConcurrent: 3, maxInFlightTokens: 5_000 },
+      noisy: { maxConcurrent: 5, maxInFlightTokens: 11_000 },
+    });
+    agent.stop();
+  });
+
+  it("rejects the grant instead of throwing when class keys disagree", async () => {
+    const { control, applied } = createControl({ ...CLASS_POOL_LIMITS });
+    const stub = collectingFetch(
+      classDesiredState({
+        premium: { maxConcurrent: 2, maxInFlightTokens: 4_000 },
+        unexpected: { maxConcurrent: 6, maxInFlightTokens: 12_000 },
+      }),
+    );
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: stub.fetch,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    expect(agent.ready()).toBe(false);
+    expect(applied).toHaveLength(0);
+    expect(stub.acks).toHaveLength(1);
+    expect(stub.acks[0]).toMatchObject({
+      status: "rejected",
+      reason: "admission_class_key_mismatch",
+    });
+    agent.stop();
+  });
+
+  it("rejects class limits for a pool that has no class table", async () => {
+    const { control, applied } = createControl({
+      revision: 0,
+      maxConcurrent: 0,
+      maxQueue: 0,
+      tokenBudget: { budget: 0, highPriorityReserve: 0 },
+    });
+    const stub = collectingFetch(
+      classDesiredState({ premium: { maxConcurrent: 2 } }),
+    );
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: stub.fetch,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    expect(agent.ready()).toBe(false);
+    expect(applied).toHaveLength(0);
+    expect(stub.acks[0]).toMatchObject({
+      status: "rejected",
+      reason: "admission_classes_not_configured",
+    });
+    agent.stop();
+  });
+
+  it("treats a same-revision grant with different class limits as a conflict", async () => {
+    const { control, applied } = createControl({
+      ...CLASS_POOL_LIMITS,
+      revision: 11,
+      maxConcurrent: 8,
+      maxQueue: 0,
+      tokenBudget: { budget: 16_000, highPriorityReserve: 0 },
+      admissionClasses: {
+        premium: { maxConcurrent: 2, maxInFlightTokens: 4_000 },
+        noisy: { maxConcurrent: 6, maxInFlightTokens: 12_000 },
+      },
+    });
+    const stub = collectingFetch(
+      classDesiredState({
+        premium: { maxConcurrent: 4, maxInFlightTokens: 4_000 },
+        noisy: { maxConcurrent: 4, maxInFlightTokens: 12_000 },
+      }),
+    );
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: stub.fetch,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    expect(agent.ready()).toBe(false);
+    expect(applied).toHaveLength(0);
+    expect(stub.acks[0]).toMatchObject({
+      status: "rejected",
+      reason: "revision_content_conflict",
+    });
+    agent.stop();
+  });
+
+  it("rejects a malformed class table on the grant", async () => {
+    const { control } = createControl({ ...CLASS_POOL_LIMITS });
+    const stub = collectingFetch(
+      classDesiredState({ premium: { maxConcurrent: -1 } }),
+    );
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: stub.fetch,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await expect(agent.start()).rejects.toThrow(
+      /admissionClasses\["premium"\]\.maxConcurrent must be a safe integer >= 0/,
+    );
+    expect(agent.ready()).toBe(false);
+    agent.stop();
+  });
+
+  it("rejects a reserved class ID on the grant", async () => {
+    const { control } = createControl({ ...CLASS_POOL_LIMITS });
+    const stub = collectingFetch(
+      classDesiredState(JSON.parse('{"__proto__":{"maxConcurrent":1}}')),
+    );
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: stub.fetch,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await expect(agent.start()).rejects.toThrow(/reserved class ID/);
+    expect(agent.ready()).toBe(false);
+    agent.stop();
+  });
+});
