@@ -43,11 +43,30 @@ export type CapacityRoutingOptions = Readonly<{
 
 export type RoutingAdmissionClassCapacity = Readonly<{
   inFlight: number;
+  protectedConcurrent: number;
+  protectedConcurrentInUse: number;
+  borrowedConcurrent: number;
+  availableProtectedConcurrency: number;
   maxConcurrent: number | null;
   availableConcurrency: number | null;
   inFlightTokens: number;
+  protectedInFlightTokens: number;
+  protectedTokensInUse: number;
+  borrowedInFlightTokens: number;
+  availableProtectedTokens: number;
   maxInFlightTokens: number | null;
   availableTokens: number | null;
+}>;
+
+export type RoutingAdmissionClassSharedCapacity = Readonly<{
+  maxConcurrent: number;
+  inFlight: number;
+  availableConcurrency: number;
+  tokenBudget?: Readonly<{
+    budget: number;
+    inFlightTokens: number;
+    available: number;
+  }>;
 }>;
 
 export type RoutingPoolCapacity = Readonly<{
@@ -67,12 +86,13 @@ export type RoutingPoolCapacity = Readonly<{
   }>;
   admissionClasses?: Readonly<{
     defaultClass: string;
+    shared: RoutingAdmissionClassSharedCapacity;
     classes: Readonly<Record<string, RoutingAdmissionClassCapacity>>;
   }>;
 }>;
 
 export type RoutingCapacitySnapshot = Readonly<{
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   instanceId: string;
   generatedAt: string;
   ready: boolean;
@@ -90,6 +110,8 @@ export type CapacityCandidate = Readonly<{
   admissionClass?: string;
   classConcurrencyHeadroom: number | null;
   classTokenHeadroom: number | null;
+  sharedConcurrencyHeadroom: number | null;
+  sharedTokenHeadroom: number | null;
   score: number;
 }>;
 
@@ -169,16 +191,33 @@ function poolCapacity(stats: TyrPoolStats): RoutingPoolCapacity {
   if (stats.admissionClasses !== undefined) {
     const classes: Record<string, RoutingAdmissionClassCapacity> = {};
     for (const [id, state] of Object.entries(stats.admissionClasses.classes)) {
+      const protectedConcurrent = state.limits.protectedConcurrent ?? 0;
       const maxClassConcurrent = state.limits.maxConcurrent ?? null;
+      const protectedInFlightTokens =
+        state.limits.protectedInFlightTokens ?? 0;
       const maxInFlightTokens = state.limits.maxInFlightTokens ?? null;
       classes[id] = Object.freeze({
         inFlight: state.inFlight,
+        protectedConcurrent,
+        protectedConcurrentInUse: state.protectedConcurrentInUse,
+        borrowedConcurrent: state.borrowedConcurrent,
+        availableProtectedConcurrency: Math.max(
+          0,
+          protectedConcurrent - state.inFlight,
+        ),
         maxConcurrent: maxClassConcurrent,
         availableConcurrency:
           maxClassConcurrent === null
             ? null
             : Math.max(0, maxClassConcurrent - state.inFlight),
         inFlightTokens: state.inFlightTokens,
+        protectedInFlightTokens,
+        protectedTokensInUse: state.protectedTokensInUse,
+        borrowedInFlightTokens: state.borrowedInFlightTokens,
+        availableProtectedTokens: Math.max(
+          0,
+          protectedInFlightTokens - state.inFlightTokens,
+        ),
         maxInFlightTokens,
         availableTokens:
           maxInFlightTokens === null
@@ -186,8 +225,23 @@ function poolCapacity(stats: TyrPoolStats): RoutingPoolCapacity {
             : Math.max(0, maxInFlightTokens - state.inFlightTokens),
       });
     }
+    const shared = stats.admissionClasses.shared;
     admissionClasses = Object.freeze({
       defaultClass: stats.admissionClasses.defaultClass,
+      shared: Object.freeze({
+        maxConcurrent: shared.maxConcurrent,
+        inFlight: shared.inFlight,
+        availableConcurrency: shared.availableConcurrent,
+        ...(shared.tokenBudget === undefined
+          ? {}
+          : {
+              tokenBudget: Object.freeze({
+                budget: shared.tokenBudget.budget,
+                inFlightTokens: shared.tokenBudget.inFlightTokens,
+                available: shared.tokenBudget.available,
+              }),
+            }),
+      }),
       classes: Object.freeze(classes),
     });
   }
@@ -228,7 +282,7 @@ export function buildCapacitySnapshot(input: {
     pools[name] = poolCapacity(stats);
   }
   return Object.freeze({
-    schemaVersion: 2,
+    schemaVersion: 3,
     instanceId: input.instanceId,
     generatedAt: (input.now ?? new Date()).toISOString(),
     ready: input.ready,
@@ -244,6 +298,17 @@ function availableTokens(
   return priority === "high"
     ? pool.tokenBudget.highAvailable
     : pool.tokenBudget.normalAvailable;
+}
+
+function hasProtectedAdmissionClassFloors(
+  classes: TyrPoolStats["admissionClasses"] | undefined,
+): boolean {
+  if (classes === undefined) return false;
+  return Object.values(classes.classes).some(
+    (state) =>
+      (state.limits.protectedConcurrent ?? 0) > 0 ||
+      (state.limits.protectedInFlightTokens ?? 0) > 0,
+  );
 }
 
 function compatibleAdmissionClasses(
@@ -284,12 +349,14 @@ export function scoreCapacityCandidate(input: {
   const requested = input.reservation?.reserved ?? 0;
   const tokenHeadroom = available === null ? null : available - requested;
 
+  const selectedAdmissionClass =
+    input.admissionClass ?? input.pool.admissionClasses?.defaultClass;
   const classState =
-    input.admissionClass === undefined
+    selectedAdmissionClass === undefined
       ? undefined
-      : input.pool.admissionClasses?.classes[input.admissionClass];
+      : input.pool.admissionClasses?.classes[selectedAdmissionClass];
   const classMissing =
-    input.admissionClass !== undefined && classState === undefined;
+    selectedAdmissionClass !== undefined && classState === undefined;
   const classConcurrencyHeadroom =
     classState?.availableConcurrency === null || classState === undefined
       ? null
@@ -298,6 +365,37 @@ export function scoreCapacityCandidate(input: {
     classState?.availableTokens === null || classState === undefined
       ? null
       : classState.availableTokens - requested;
+
+  const requestedBorrowedConcurrent =
+    classState === undefined || classState.availableProtectedConcurrency > 0
+      ? 0
+      : 1;
+  const sharedConcurrencyAvailable =
+    input.pool.admissionClasses?.shared.availableConcurrency ?? null;
+  const sharedConcurrencyHeadroom =
+    classState === undefined || sharedConcurrencyAvailable === null
+      ? null
+      : sharedConcurrencyAvailable - requestedBorrowedConcurrent;
+
+  const requestedBorrowedTokens =
+    classState === undefined
+      ? 0
+      : Math.max(0, requested - classState.availableProtectedTokens);
+  const unusedProtectedTokens =
+    input.pool.admissionClasses === undefined
+      ? 0
+      : Object.values(input.pool.admissionClasses.classes).reduce(
+          (total, state) => total + state.availableProtectedTokens,
+          0,
+        );
+  const sharedTokensAvailable =
+    available === null
+      ? null
+      : Math.max(0, available - unusedProtectedTokens);
+  const sharedTokenHeadroom =
+    classState === undefined || sharedTokensAvailable === null
+      ? null
+      : sharedTokensAvailable - requestedBorrowedTokens;
 
   const concurrencyAdmissible =
     input.pool.admissionMode === "enforce" &&
@@ -308,12 +406,18 @@ export function scoreCapacityCandidate(input: {
     classConcurrencyHeadroom === null || classConcurrencyHeadroom >= 0;
   const classTokenAdmissible =
     classTokenHeadroom === null || classTokenHeadroom >= 0;
+  const sharedConcurrencyAdmissible =
+    sharedConcurrencyHeadroom === null || sharedConcurrencyHeadroom >= 0;
+  const sharedTokenAdmissible =
+    sharedTokenHeadroom === null || sharedTokenHeadroom >= 0;
   const admissible =
     !classMissing &&
     concurrencyAdmissible &&
     tokenAdmissible &&
     classConcurrencyAdmissible &&
-    classTokenAdmissible;
+    classTokenAdmissible &&
+    sharedConcurrencyAdmissible &&
+    sharedTokenAdmissible;
 
   const concurrencyRatio =
     input.pool.maxConcurrent <= 0
@@ -331,6 +435,16 @@ export function scoreCapacityCandidate(input: {
     classState?.maxInFlightTokens === null || classState === undefined
       ? 1
       : classTokenHeadroom! / Math.max(1, classState.maxInFlightTokens);
+  const sharedConcurrencyRatio =
+    classState === undefined || requestedBorrowedConcurrent === 0
+      ? 1
+      : sharedConcurrencyHeadroom! /
+        Math.max(1, input.pool.admissionClasses!.shared.maxConcurrent);
+  const sharedTokenRatio =
+    classState === undefined || requestedBorrowedTokens === 0
+      ? 1
+      : sharedTokenHeadroom! /
+        Math.max(1, input.pool.admissionClasses?.shared.tokenBudget?.budget ?? 1);
 
   return Object.freeze({
     instanceId: input.instanceId,
@@ -340,17 +454,21 @@ export function scoreCapacityCandidate(input: {
     admissible,
     concurrencyHeadroom,
     tokenHeadroom,
-    ...(input.admissionClass === undefined
+    ...(selectedAdmissionClass === undefined
       ? {}
-      : { admissionClass: input.admissionClass }),
+      : { admissionClass: selectedAdmissionClass }),
     classConcurrencyHeadroom,
     classTokenHeadroom,
+    sharedConcurrencyHeadroom,
+    sharedTokenHeadroom,
     score: admissible
       ? Math.min(
           concurrencyRatio,
           tokenRatio,
           classConcurrencyRatio,
           classTokenRatio,
+          sharedConcurrencyRatio,
+          sharedTokenRatio,
         )
       : -1,
   });
@@ -401,6 +519,7 @@ function nonNegativeSafeInteger(value: unknown, field: string): number {
 function validatePoolCapacity(
   value: unknown,
   field: string,
+  schemaVersion: RoutingCapacitySnapshot["schemaVersion"],
 ): RoutingPoolCapacity {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${field} must be an object`);
@@ -424,8 +543,44 @@ function validatePoolCapacity(
     pool.availableConcurrency,
     `${field}.availableConcurrency`,
   );
-  if (availableConcurrency > maxConcurrent) {
-    throw new Error(`${field}.availableConcurrency exceeds maxConcurrent`);
+  if (availableConcurrency !== Math.max(0, maxConcurrent - inFlight)) {
+    throw new Error(`${field}.availableConcurrency is inconsistent`);
+  }
+
+  let tokenBudget: RoutingPoolCapacity["tokenBudget"];
+  if (pool.tokenBudget !== undefined) {
+    if (
+      typeof pool.tokenBudget !== "object" ||
+      pool.tokenBudget === null ||
+      Array.isArray(pool.tokenBudget)
+    ) {
+      throw new Error(`${field}.tokenBudget must be an object`);
+    }
+    const budget = nonNegativeSafeInteger(
+      pool.tokenBudget.budget,
+      `${field}.tokenBudget.budget`,
+    );
+    const inFlightTokens = nonNegativeSafeInteger(
+      pool.tokenBudget.inFlightTokens,
+      `${field}.tokenBudget.inFlightTokens`,
+    );
+    const normalAvailable = nonNegativeSafeInteger(
+      pool.tokenBudget.normalAvailable,
+      `${field}.tokenBudget.normalAvailable`,
+    );
+    const highAvailable = nonNegativeSafeInteger(
+      pool.tokenBudget.highAvailable,
+      `${field}.tokenBudget.highAvailable`,
+    );
+    if (normalAvailable > highAvailable || highAvailable > budget) {
+      throw new Error(`${field}.tokenBudget availability is inconsistent`);
+    }
+    tokenBudget = Object.freeze({
+      budget,
+      inFlightTokens,
+      normalAvailable,
+      highAvailable,
+    });
   }
 
   let admissionClasses: RoutingPoolCapacity["admissionClasses"];
@@ -456,6 +611,10 @@ function validatePoolCapacity(
       );
     }
     const classes: Record<string, RoutingAdmissionClassCapacity> = {};
+    let protectedConcurrentTotal = 0;
+    let protectedConcurrentInUseTotal = 0;
+    let protectedInFlightTokensTotal = 0;
+    let protectedTokensInUseTotal = 0;
     for (const [rawId, rawState] of entries) {
       const id = normalizeAdmissionClassId(
         rawId,
@@ -542,11 +701,138 @@ function validatePoolCapacity(
       ) {
         throw new Error(`${classField}.availableTokens is inconsistent`);
       }
+
+      const protectedConcurrent =
+        schemaVersion >= 3
+          ? nonNegativeSafeInteger(
+              state.protectedConcurrent,
+              `${classField}.protectedConcurrent`,
+            )
+          : 0;
+      const protectedConcurrentInUse =
+        schemaVersion >= 3
+          ? nonNegativeSafeInteger(
+              state.protectedConcurrentInUse,
+              `${classField}.protectedConcurrentInUse`,
+            )
+          : 0;
+      const borrowedConcurrent =
+        schemaVersion >= 3
+          ? nonNegativeSafeInteger(
+              state.borrowedConcurrent,
+              `${classField}.borrowedConcurrent`,
+            )
+          : classInFlight;
+      const availableProtectedConcurrency =
+        schemaVersion >= 3
+          ? nonNegativeSafeInteger(
+              state.availableProtectedConcurrency,
+              `${classField}.availableProtectedConcurrency`,
+            )
+          : 0;
+      if (protectedConcurrentInUse !== Math.min(classInFlight, protectedConcurrent)) {
+        throw new Error(`${classField}.protectedConcurrentInUse is inconsistent`);
+      }
+      if (
+        borrowedConcurrent !==
+        Math.max(0, classInFlight - protectedConcurrentInUse)
+      ) {
+        throw new Error(`${classField}.borrowedConcurrent is inconsistent`);
+      }
+      if (
+        availableProtectedConcurrency !==
+        Math.max(0, protectedConcurrent - classInFlight)
+      ) {
+        throw new Error(
+          `${classField}.availableProtectedConcurrency is inconsistent`,
+        );
+      }
+      if (
+        classMaxConcurrent !== null &&
+        protectedConcurrent > classMaxConcurrent
+      ) {
+        throw new Error(
+          `${classField}.protectedConcurrent exceeds maxConcurrent`,
+        );
+      }
+
+      const protectedInFlightTokens =
+        schemaVersion >= 3
+          ? nonNegativeSafeInteger(
+              state.protectedInFlightTokens,
+              `${classField}.protectedInFlightTokens`,
+            )
+          : 0;
+      const protectedTokensInUse =
+        schemaVersion >= 3
+          ? nonNegativeSafeInteger(
+              state.protectedTokensInUse,
+              `${classField}.protectedTokensInUse`,
+            )
+          : 0;
+      const borrowedInFlightTokens =
+        schemaVersion >= 3
+          ? nonNegativeSafeInteger(
+              state.borrowedInFlightTokens,
+              `${classField}.borrowedInFlightTokens`,
+            )
+          : classInFlightTokens;
+      const availableProtectedTokens =
+        schemaVersion >= 3
+          ? nonNegativeSafeInteger(
+              state.availableProtectedTokens,
+              `${classField}.availableProtectedTokens`,
+            )
+          : 0;
+      if (
+        protectedTokensInUse !==
+        Math.min(classInFlightTokens, protectedInFlightTokens)
+      ) {
+        throw new Error(`${classField}.protectedTokensInUse is inconsistent`);
+      }
+      if (
+        borrowedInFlightTokens !==
+        Math.max(0, classInFlightTokens - protectedTokensInUse)
+      ) {
+        throw new Error(`${classField}.borrowedInFlightTokens is inconsistent`);
+      }
+      if (
+        availableProtectedTokens !==
+        Math.max(0, protectedInFlightTokens - classInFlightTokens)
+      ) {
+        throw new Error(`${classField}.availableProtectedTokens is inconsistent`);
+      }
+      if (
+        classMaxInFlightTokens !== null &&
+        protectedInFlightTokens > classMaxInFlightTokens
+      ) {
+        throw new Error(
+          `${classField}.protectedInFlightTokens exceeds maxInFlightTokens`,
+        );
+      }
+      if (tokenBudget === undefined && protectedInFlightTokens > 0) {
+        throw new Error(
+          `${classField}.protectedInFlightTokens requires tokenBudget`,
+        );
+      }
+
+      protectedConcurrentTotal += protectedConcurrent;
+      protectedConcurrentInUseTotal += protectedConcurrentInUse;
+      protectedInFlightTokensTotal += protectedInFlightTokens;
+      protectedTokensInUseTotal += protectedTokensInUse;
       classes[id] = Object.freeze({
         inFlight: classInFlight,
+        protectedConcurrent,
+        protectedConcurrentInUse,
+        borrowedConcurrent,
+        availableProtectedConcurrency,
         maxConcurrent: classMaxConcurrent,
         availableConcurrency: classAvailableConcurrency,
         inFlightTokens: classInFlightTokens,
+        protectedInFlightTokens,
+        protectedTokensInUse,
+        borrowedInFlightTokens,
+        availableProtectedTokens,
         maxInFlightTokens: classMaxInFlightTokens,
         availableTokens: classAvailableTokens,
       });
@@ -556,45 +842,147 @@ function validatePoolCapacity(
         `${field}.admissionClasses.defaultClass must reference a configured class`,
       );
     }
+    if (protectedConcurrentTotal > maxConcurrent) {
+      throw new Error(
+        `${field}.admissionClasses protected concurrency exceeds maxConcurrent`,
+      );
+    }
+    if (
+      tokenBudget !== undefined &&
+      protectedInFlightTokensTotal > tokenBudget.budget
+    ) {
+      throw new Error(
+        `${field}.admissionClasses protected tokens exceed tokenBudget.budget`,
+      );
+    }
+
+    let shared: RoutingAdmissionClassSharedCapacity;
+    if (schemaVersion >= 3) {
+      const rawShared = pool.admissionClasses.shared;
+      if (
+        typeof rawShared !== "object" ||
+        rawShared === null ||
+        Array.isArray(rawShared)
+      ) {
+        throw new Error(`${field}.admissionClasses.shared must be an object`);
+      }
+      const sharedMaxConcurrent = nonNegativeSafeInteger(
+        rawShared.maxConcurrent,
+        `${field}.admissionClasses.shared.maxConcurrent`,
+      );
+      const sharedInFlight = nonNegativeSafeInteger(
+        rawShared.inFlight,
+        `${field}.admissionClasses.shared.inFlight`,
+      );
+      const sharedAvailableConcurrency = nonNegativeSafeInteger(
+        rawShared.availableConcurrency,
+        `${field}.admissionClasses.shared.availableConcurrency`,
+      );
+      if (sharedMaxConcurrent !== Math.max(0, maxConcurrent - protectedConcurrentTotal)) {
+        throw new Error(
+          `${field}.admissionClasses.shared.maxConcurrent is inconsistent`,
+        );
+      }
+      if (sharedInFlight !== Math.max(0, inFlight - protectedConcurrentInUseTotal)) {
+        throw new Error(`${field}.admissionClasses.shared.inFlight is inconsistent`);
+      }
+      if (
+        sharedAvailableConcurrency !==
+        Math.max(0, sharedMaxConcurrent - sharedInFlight)
+      ) {
+        throw new Error(
+          `${field}.admissionClasses.shared.availableConcurrency is inconsistent`,
+        );
+      }
+      let sharedTokenBudget: RoutingAdmissionClassSharedCapacity["tokenBudget"];
+      if (tokenBudget !== undefined) {
+        const rawSharedTokenBudget = rawShared.tokenBudget;
+        if (
+          typeof rawSharedTokenBudget !== "object" ||
+          rawSharedTokenBudget === null ||
+          Array.isArray(rawSharedTokenBudget)
+        ) {
+          throw new Error(
+            `${field}.admissionClasses.shared.tokenBudget must be an object`,
+          );
+        }
+        const sharedBudget = nonNegativeSafeInteger(
+          rawSharedTokenBudget.budget,
+          `${field}.admissionClasses.shared.tokenBudget.budget`,
+        );
+        const sharedInFlightTokens = nonNegativeSafeInteger(
+          rawSharedTokenBudget.inFlightTokens,
+          `${field}.admissionClasses.shared.tokenBudget.inFlightTokens`,
+        );
+        const sharedAvailableTokens = nonNegativeSafeInteger(
+          rawSharedTokenBudget.available,
+          `${field}.admissionClasses.shared.tokenBudget.available`,
+        );
+        if (
+          sharedBudget !==
+          Math.max(0, tokenBudget.budget - protectedInFlightTokensTotal)
+        ) {
+          throw new Error(
+            `${field}.admissionClasses.shared.tokenBudget.budget is inconsistent`,
+          );
+        }
+        if (
+          sharedInFlightTokens !==
+          Math.max(0, tokenBudget.inFlightTokens - protectedTokensInUseTotal)
+        ) {
+          throw new Error(
+            `${field}.admissionClasses.shared.tokenBudget.inFlightTokens is inconsistent`,
+          );
+        }
+        if (
+          sharedAvailableTokens !==
+          Math.max(0, sharedBudget - sharedInFlightTokens)
+        ) {
+          throw new Error(
+            `${field}.admissionClasses.shared.tokenBudget.available is inconsistent`,
+          );
+        }
+        sharedTokenBudget = Object.freeze({
+          budget: sharedBudget,
+          inFlightTokens: sharedInFlightTokens,
+          available: sharedAvailableTokens,
+        });
+      } else if (rawShared.tokenBudget !== undefined) {
+        throw new Error(
+          `${field}.admissionClasses.shared.tokenBudget must be omitted`,
+        );
+      }
+      shared = Object.freeze({
+        maxConcurrent: sharedMaxConcurrent,
+        inFlight: sharedInFlight,
+        availableConcurrency: sharedAvailableConcurrency,
+        ...(sharedTokenBudget === undefined
+          ? {}
+          : { tokenBudget: sharedTokenBudget }),
+      });
+    } else {
+      shared = Object.freeze({
+        maxConcurrent,
+        inFlight,
+        availableConcurrency,
+        ...(tokenBudget === undefined
+          ? {}
+          : {
+              tokenBudget: Object.freeze({
+                budget: tokenBudget.budget,
+                inFlightTokens: tokenBudget.inFlightTokens,
+                available: Math.max(
+                  0,
+                  tokenBudget.budget - tokenBudget.inFlightTokens,
+                ),
+              }),
+            }),
+      });
+    }
     admissionClasses = Object.freeze({
       defaultClass,
+      shared,
       classes: Object.freeze(classes),
-    });
-  }
-
-  let tokenBudget: RoutingPoolCapacity["tokenBudget"];
-  if (pool.tokenBudget !== undefined) {
-    if (
-      typeof pool.tokenBudget !== "object" ||
-      pool.tokenBudget === null ||
-      Array.isArray(pool.tokenBudget)
-    ) {
-      throw new Error(`${field}.tokenBudget must be an object`);
-    }
-    const budget = nonNegativeSafeInteger(
-      pool.tokenBudget.budget,
-      `${field}.tokenBudget.budget`,
-    );
-    const inFlightTokens = nonNegativeSafeInteger(
-      pool.tokenBudget.inFlightTokens,
-      `${field}.tokenBudget.inFlightTokens`,
-    );
-    const normalAvailable = nonNegativeSafeInteger(
-      pool.tokenBudget.normalAvailable,
-      `${field}.tokenBudget.normalAvailable`,
-    );
-    const highAvailable = nonNegativeSafeInteger(
-      pool.tokenBudget.highAvailable,
-      `${field}.tokenBudget.highAvailable`,
-    );
-    if (normalAvailable > highAvailable || highAvailable > budget) {
-      throw new Error(`${field}.tokenBudget availability is inconsistent`);
-    }
-    tokenBudget = Object.freeze({
-      budget,
-      inFlightTokens,
-      normalAvailable,
-      highAvailable,
     });
   }
 
@@ -620,7 +1008,11 @@ function validateSnapshot(
     throw new Error("capacity snapshot must be an object");
   }
   const snapshot = value as Partial<RoutingCapacitySnapshot>;
-  if (snapshot.schemaVersion !== 1 && snapshot.schemaVersion !== 2) {
+  if (
+    snapshot.schemaVersion !== 1 &&
+    snapshot.schemaVersion !== 2 &&
+    snapshot.schemaVersion !== 3
+  ) {
     throw new Error("unsupported capacity snapshot schemaVersion");
   }
   if (snapshot.instanceId !== expectedInstanceId) {
@@ -649,7 +1041,11 @@ function validateSnapshot(
     if (name.trim().length === 0) {
       throw new Error("capacity snapshot pool names must be non-empty");
     }
-    pools[name] = validatePoolCapacity(pool, `capacity snapshot pools.${name}`);
+    pools[name] = validatePoolCapacity(
+      pool,
+      `capacity snapshot pools.${name}`,
+      snapshot.schemaVersion,
+    );
   }
   return Object.freeze({
     schemaVersion: snapshot.schemaVersion,
@@ -909,6 +1305,15 @@ export class CapacityAwareRouter {
           localStats?.admissionClasses,
           pool.admissionClasses,
         )
+      ) {
+        continue;
+      }
+      // Schema 1/2 peers predate protected class floors. During a rolling
+      // upgrade, do not route floor-dependent traffic to a replica that cannot
+      // represent or enforce the same protection semantics.
+      if (
+        cached.snapshot.schemaVersion < 3 &&
+        hasProtectedAdmissionClassFloors(localStats?.admissionClasses)
       ) {
         continue;
       }

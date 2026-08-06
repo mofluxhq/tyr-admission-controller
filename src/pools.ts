@@ -891,40 +891,93 @@ function validateLimitSnapshot(
       );
     }
     const normalized: Record<string, LLMAdmissionClassLimits> = {};
+    let protectedConcurrentTotal = 0;
+    let protectedInFlightTokensTotal = 0;
     for (const key of currentKeys) {
       const value = suppliedAdmissionClasses[key];
+      const classField = `${poolName}.limits.admissionClasses[${JSON.stringify(key)}]`;
       if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        throw new Error(
-          `${poolName}.limits.admissionClasses[${JSON.stringify(key)}] must be an object`,
-        );
+        throw new Error(`${classField} must be an object`);
       }
-      const classMaxConcurrent = value.maxConcurrent;
-      const classMaxInFlightTokens = value.maxInFlightTokens;
-      if (classMaxConcurrent !== undefined) {
-        assertInteger(
-          classMaxConcurrent,
-          `${poolName}.limits.admissionClasses[${JSON.stringify(key)}].maxConcurrent`,
-          { min: 0 },
-        );
-      }
-      if (classMaxInFlightTokens !== undefined) {
-        if (tokenBudget === undefined) {
+      for (const property of Object.keys(value)) {
+        if (
+          property !== "protectedConcurrent" &&
+          property !== "maxConcurrent" &&
+          property !== "protectedInFlightTokens" &&
+          property !== "maxInFlightTokens"
+        ) {
           throw new Error(
-            `${poolName}.limits.admissionClasses[${JSON.stringify(key)}].maxInFlightTokens requires tokenBudget`,
+            `${classField} contains unknown property ${JSON.stringify(property)}`,
           );
         }
-        assertInteger(
-          classMaxInFlightTokens,
-          `${poolName}.limits.admissionClasses[${JSON.stringify(key)}].maxInFlightTokens`,
-          { min: 0 },
+      }
+      const protectedConcurrent = value.protectedConcurrent;
+      const classMaxConcurrent = value.maxConcurrent;
+      const protectedInFlightTokens = value.protectedInFlightTokens;
+      const classMaxInFlightTokens = value.maxInFlightTokens;
+      for (const [property, candidate] of [
+        ["protectedConcurrent", protectedConcurrent],
+        ["maxConcurrent", classMaxConcurrent],
+        ["protectedInFlightTokens", protectedInFlightTokens],
+        ["maxInFlightTokens", classMaxInFlightTokens],
+      ] as const) {
+        if (candidate !== undefined) {
+          assertInteger(candidate, `${classField}.${property}`, { min: 0 });
+        }
+      }
+      if (
+        protectedConcurrent !== undefined &&
+        classMaxConcurrent !== undefined &&
+        protectedConcurrent > classMaxConcurrent
+      ) {
+        throw new Error(
+          `${classField}.protectedConcurrent must not exceed ${classField}.maxConcurrent`,
         );
       }
+      if (
+        protectedInFlightTokens !== undefined &&
+        classMaxInFlightTokens !== undefined &&
+        protectedInFlightTokens > classMaxInFlightTokens
+      ) {
+        throw new Error(
+          `${classField}.protectedInFlightTokens must not exceed ${classField}.maxInFlightTokens`,
+        );
+      }
+      if (protectedInFlightTokens !== undefined && tokenBudget === undefined) {
+        throw new Error(
+          `${classField}.protectedInFlightTokens requires tokenBudget`,
+        );
+      }
+      if (classMaxInFlightTokens !== undefined && tokenBudget === undefined) {
+        throw new Error(`${classField}.maxInFlightTokens requires tokenBudget`);
+      }
+      protectedConcurrentTotal += protectedConcurrent ?? 0;
+      protectedInFlightTokensTotal += protectedInFlightTokens ?? 0;
       normalized[key] = Object.freeze({
-        ...(classMaxConcurrent === undefined ? {} : { maxConcurrent: classMaxConcurrent }),
+        ...(protectedConcurrent === undefined ? {} : { protectedConcurrent }),
+        ...(classMaxConcurrent === undefined
+          ? {}
+          : { maxConcurrent: classMaxConcurrent }),
+        ...(protectedInFlightTokens === undefined
+          ? {}
+          : { protectedInFlightTokens }),
         ...(classMaxInFlightTokens === undefined
           ? {}
           : { maxInFlightTokens: classMaxInFlightTokens }),
       });
+    }
+    if (protectedConcurrentTotal > maxConcurrent) {
+      throw new Error(
+        `${poolName}.limits.admissionClasses protectedConcurrent sum must not exceed maxConcurrent`,
+      );
+    }
+    if (
+      tokenBudget !== undefined &&
+      protectedInFlightTokensTotal > tokenBudget.budget
+    ) {
+      throw new Error(
+        `${poolName}.limits.admissionClasses protectedInFlightTokens sum must not exceed tokenBudget.budget`,
+      );
     }
     admissionClasses = Object.freeze(normalized);
   } else if (suppliedAdmissionClasses !== undefined) {

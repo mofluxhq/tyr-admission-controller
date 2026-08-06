@@ -15,11 +15,31 @@ const request = (content = "hello") => ({
   messages: [{ role: "user", content }],
   max_tokens: 100,
 });
+
+async function waitFor(predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("condition was not met before timeout");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 const policy = {
   defaultClass: "standard",
   classes: {
-    standard: { maxConcurrent: 1, maxInFlightTokens: 2_000 },
-    premium: { maxConcurrent: 1, maxInFlightTokens: 2_000 },
+    standard: {
+      protectedConcurrent: 1,
+      maxConcurrent: 1,
+      protectedInFlightTokens: 2_000,
+      maxInFlightTokens: 2_000,
+    },
+    premium: {
+      protectedConcurrent: 1,
+      maxConcurrent: 1,
+      protectedInFlightTokens: 2_000,
+      maxInFlightTokens: 2_000,
+    },
   },
   rules: [
     { admissionClass: "premium", tenantIds: ["tenant-paid"] },
@@ -167,8 +187,18 @@ assert.throws(
   /admissionClasses is required/,
 );
 const nextClasses = {
-  standard: { maxConcurrent: 1, maxInFlightTokens: 1_500 },
-  premium: { maxConcurrent: 1, maxInFlightTokens: 2_500 },
+  standard: {
+    protectedConcurrent: 1,
+    maxConcurrent: 1,
+    protectedInFlightTokens: 1_500,
+    maxInFlightTokens: 1_500,
+  },
+  premium: {
+    protectedConcurrent: 1,
+    maxConcurrent: 1,
+    protectedInFlightTokens: 2_500,
+    maxInFlightTokens: 2_500,
+  },
 };
 assert.equal(
   pool.controller.applyLimits({
@@ -198,20 +228,46 @@ const capacityBase = {
   },
   admissionClasses: {
     defaultClass: "standard",
+    shared: {
+      maxConcurrent: 2,
+      inFlight: 0,
+      availableConcurrency: 2,
+      tokenBudget: {
+        budget: 0,
+        inFlightTokens: 0,
+        available: 0,
+      },
+    },
     classes: {
       standard: {
         inFlight: 0,
+        protectedConcurrent: 1,
+        protectedConcurrentInUse: 0,
+        borrowedConcurrent: 0,
+        availableProtectedConcurrency: 1,
         maxConcurrent: 1,
         availableConcurrency: 1,
         inFlightTokens: 0,
+        protectedInFlightTokens: 2_000,
+        protectedTokensInUse: 0,
+        borrowedInFlightTokens: 0,
+        availableProtectedTokens: 2_000,
         maxInFlightTokens: 2_000,
         availableTokens: 2_000,
       },
       premium: {
         inFlight: 1,
+        protectedConcurrent: 1,
+        protectedConcurrentInUse: 1,
+        borrowedConcurrent: 0,
+        availableProtectedConcurrency: 0,
         maxConcurrent: 1,
         availableConcurrency: 0,
         inFlightTokens: 500,
+        protectedInFlightTokens: 2_000,
+        protectedTokensInUse: 500,
+        borrowedInFlightTokens: 0,
+        availableProtectedTokens: 1_500,
         maxInFlightTokens: 2_000,
         availableTokens: 1_500,
       },
@@ -233,6 +289,14 @@ const availablePeer = scoreCapacityCandidate({
   baseUrl: "http://tyr-b:8787",
   pool: {
     ...capacityBase,
+    inFlight: 0,
+    availableConcurrency: 4,
+    tokenBudget: {
+      ...capacityBase.tokenBudget,
+      inFlightTokens: 0,
+      normalAvailable: 4_000,
+      highAvailable: 4_000,
+    },
     admissionClasses: {
       ...capacityBase.admissionClasses,
       classes: {
@@ -240,7 +304,13 @@ const availablePeer = scoreCapacityCandidate({
         premium: {
           ...capacityBase.admissionClasses.classes.premium,
           inFlight: 0,
+          protectedConcurrentInUse: 0,
+          availableProtectedConcurrency: 1,
           availableConcurrency: 1,
+          inFlightTokens: 0,
+          protectedTokensInUse: 0,
+          availableProtectedTokens: 2_000,
+          availableTokens: 2_000,
         },
       },
     },
@@ -271,10 +341,14 @@ pools:
       defaultClass: standard
       classes:
         standard:
+          protectedConcurrent: 1
           maxConcurrent: 1
+          protectedInFlightTokens: 2000
           maxInFlightTokens: 2000
         premium:
+          protectedConcurrent: 1
           maxConcurrent: 1
+          protectedInFlightTokens: 2000
           maxInFlightTokens: 2000
       rules:
         - admissionClass: premium
@@ -355,6 +429,129 @@ await latchflo.start();
 assert.equal(latchflo.ready(), true);
 assert.deepEqual(appliedManaged[0].limits.admissionClasses, policy.classes);
 latchflo.stop();
+
+// A class-aware lease expiration must still fail closed after protected floors
+// are enabled. The kill switch zeros floors while retaining fixed class keys,
+// and a later higher-revision grant that omits class limits restores the last
+// non-expiration class table for compatibility with older control planes.
+const managedPools = createPools([
+  {
+    name: "lease-protected",
+    modelPrefixes: ["gpt"],
+    model: "gpt-4o",
+    maxConcurrent: 0,
+    budget: 0,
+    initialRevision: 0,
+    admissionClasses: {
+      defaultClass: "standard",
+      classes: {
+        standard: {
+          protectedConcurrent: 0,
+          maxConcurrent: 0,
+          protectedInFlightTokens: 0,
+          maxInFlightTokens: 0,
+        },
+        premium: {
+          protectedConcurrent: 0,
+          maxConcurrent: 0,
+          protectedInFlightTokens: 0,
+          maxInFlightTokens: 0,
+        },
+      },
+    },
+  },
+]);
+const grantedClassLimits = {
+  standard: {
+    protectedConcurrent: 1,
+    maxConcurrent: 2,
+    protectedInFlightTokens: 1_000,
+    maxInFlightTokens: 2_000,
+  },
+  premium: {
+    protectedConcurrent: 1,
+    maxConcurrent: 2,
+    protectedInFlightTokens: 1_000,
+    maxInFlightTokens: 2_000,
+  },
+};
+let leaseRevision = 1;
+let includeGrantedClasses = true;
+let leaseExpiresAt = new Date(Date.now() + 150).toISOString();
+const leaseAgent = new LatchfloTyrAgent({
+  controlPlaneUrl: "http://latchflo.invalid",
+  instanceId: "tyr-a",
+  pools: ["lease-protected"],
+  agentToken: "agent-token",
+  control: managedPools,
+  fetch: (input) => {
+    if (String(input).endsWith("/desired-state")) {
+      return Promise.resolve(
+        new globalThis.Response(
+          JSON.stringify({
+            controllerEpoch: 1,
+            serverTime: new Date().toISOString(),
+            heartbeatIntervalMs: 10_000,
+            pollIntervalMs: 10_000,
+            grants: [
+              {
+                grantId: "00000000-0000-4000-8000-000000000002",
+                instanceId: "tyr-a",
+                pool: "lease-protected",
+                controllerEpoch: 1,
+                revision: leaseRevision,
+                issuedAt: new Date().toISOString(),
+                expiresAt: leaseExpiresAt,
+                limits: {
+                  revision: leaseRevision,
+                  maxConcurrent: 4,
+                  maxQueue: 0,
+                  tokenBudget: { budget: 4_000, highPriorityReserve: 0 },
+                  ...(includeGrantedClasses
+                    ? { admissionClasses: grantedClassLimits }
+                    : {}),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    }
+    return Promise.resolve(new globalThis.Response("{}", { status: 200 }));
+  },
+  logger: { info() {}, warn() {}, error() {} },
+});
+await leaseAgent.start();
+assert.equal(
+  managedPools.limits()["lease-protected"].admissionClasses.standard
+    .protectedConcurrent,
+  1,
+);
+await waitFor(
+  () => managedPools.limits()["lease-protected"].revision === 2,
+  2_000,
+);
+const expiredLimits = managedPools.limits()["lease-protected"];
+assert.equal(expiredLimits.maxConcurrent, 0);
+assert.equal(
+  expiredLimits.admissionClasses.standard.protectedConcurrent ?? 0,
+  0,
+);
+assert.equal(expiredLimits.admissionClasses.standard.maxConcurrent, 2);
+leaseRevision = 3;
+includeGrantedClasses = false;
+leaseExpiresAt = new Date(Date.now() + 5_000).toISOString();
+await leaseAgent.pollNow();
+const restoredLimits = managedPools.limits()["lease-protected"];
+assert.equal(restoredLimits.maxConcurrent, 4);
+assert.equal(
+  restoredLimits.admissionClasses.standard.protectedConcurrent,
+  1,
+);
+await leaseAgent.pollNow();
+assert.equal(leaseAgent.ready(), true);
+leaseAgent.stop();
 
 const listen = (server) =>
   new Promise((resolve) =>
@@ -444,6 +641,14 @@ try {
   assert.match(
     metrics,
     /tyr_pool_admission_class_rejected_total\{admission_class="premium",pool="openai"\} 1/,
+  );
+  assert.match(
+    metrics,
+    /tyr_pool_admission_class_protected_concurrent\{admission_class="premium",pool="openai"\} 1/,
+  );
+  assert.match(
+    metrics,
+    /tyr_pool_admission_class_shared_max_concurrent\{pool="openai"\} 0/,
   );
 } finally {
   releaseUpstream();

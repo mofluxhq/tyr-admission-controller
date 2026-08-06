@@ -960,7 +960,8 @@ function normalizeControlPlane(
 function normalizeAdmissionClasses(
   value: unknown,
   field: string,
-  tokenBudgetEnabled: boolean,
+  maxConcurrent: number,
+  tokenBudget: number | undefined,
 ): AdmissionClassesConfig | undefined {
   if (value === undefined) return undefined;
   const policy = objectValue(value, field);
@@ -981,8 +982,15 @@ function normalizeAdmissionClasses(
   }
   const classes: Record<
     string,
-    { maxConcurrent?: number; maxInFlightTokens?: number }
+    {
+      protectedConcurrent?: number;
+      maxConcurrent?: number;
+      protectedInFlightTokens?: number;
+      maxInFlightTokens?: number;
+    }
   > = {};
+  let protectedConcurrentTotal = 0;
+  let protectedInFlightTokensTotal = 0;
   for (const [rawClassId, rawLimits] of classEntries) {
     const classId = normalizeAdmissionClassId(rawClassId, `${field} class id`);
     if (Object.hasOwn(classes, classId)) {
@@ -990,36 +998,95 @@ function normalizeAdmissionClasses(
         `${field}.classes contains duplicate normalized class ID ${JSON.stringify(classId)}`,
       );
     }
-    const limits = objectValue(
-      rawLimits,
-      `${field}.classes[${JSON.stringify(classId)}]`,
-    );
+    const classField = `${field}.classes[${JSON.stringify(classId)}]`;
+    const limits = objectValue(rawLimits, classField);
     assertKnownKeys(
       limits,
-      ["maxConcurrent", "maxInFlightTokens"],
-      `${field}.classes[${JSON.stringify(classId)}]`,
+      [
+        "protectedConcurrent",
+        "maxConcurrent",
+        "protectedInFlightTokens",
+        "maxInFlightTokens",
+      ],
+      classField,
     );
-    const maxConcurrent = optionalInteger(
+    const protectedConcurrent = optionalInteger(
+      limits,
+      "protectedConcurrent",
+      `${classField}.protectedConcurrent`,
+      { min: 0 },
+    );
+    const classMaxConcurrent = optionalInteger(
       limits,
       "maxConcurrent",
-      `${field}.classes[${JSON.stringify(classId)}].maxConcurrent`,
+      `${classField}.maxConcurrent`,
+      { min: 0 },
+    );
+    const protectedInFlightTokens = optionalInteger(
+      limits,
+      "protectedInFlightTokens",
+      `${classField}.protectedInFlightTokens`,
       { min: 0 },
     );
     const maxInFlightTokens = optionalInteger(
       limits,
       "maxInFlightTokens",
-      `${field}.classes[${JSON.stringify(classId)}].maxInFlightTokens`,
+      `${classField}.maxInFlightTokens`,
       { min: 0 },
     );
-    if (!tokenBudgetEnabled && maxInFlightTokens !== undefined) {
+    if (
+      protectedConcurrent !== undefined &&
+      classMaxConcurrent !== undefined &&
+      protectedConcurrent > classMaxConcurrent
+    ) {
       throw new Error(
-        `${field}.classes[${JSON.stringify(classId)}].maxInFlightTokens requires inFlightTokenBudget`,
+        `${classField}.protectedConcurrent must not exceed ${classField}.maxConcurrent`,
       );
     }
+    if (
+      protectedInFlightTokens !== undefined &&
+      maxInFlightTokens !== undefined &&
+      protectedInFlightTokens > maxInFlightTokens
+    ) {
+      throw new Error(
+        `${classField}.protectedInFlightTokens must not exceed ${classField}.maxInFlightTokens`,
+      );
+    }
+    if (tokenBudget === undefined && protectedInFlightTokens !== undefined) {
+      throw new Error(
+        `${classField}.protectedInFlightTokens requires inFlightTokenBudget`,
+      );
+    }
+    if (tokenBudget === undefined && maxInFlightTokens !== undefined) {
+      throw new Error(
+        `${classField}.maxInFlightTokens requires inFlightTokenBudget`,
+      );
+    }
+    protectedConcurrentTotal += protectedConcurrent ?? 0;
+    protectedInFlightTokensTotal += protectedInFlightTokens ?? 0;
     classes[classId] = {
-      ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
+      ...(protectedConcurrent === undefined ? {} : { protectedConcurrent }),
+      ...(classMaxConcurrent === undefined
+        ? {}
+        : { maxConcurrent: classMaxConcurrent }),
+      ...(protectedInFlightTokens === undefined
+        ? {}
+        : { protectedInFlightTokens }),
       ...(maxInFlightTokens === undefined ? {} : { maxInFlightTokens }),
     };
+  }
+  if (protectedConcurrentTotal > maxConcurrent) {
+    throw new Error(
+      `${field}.classes protectedConcurrent sum must not exceed maxConcurrent`,
+    );
+  }
+  if (
+    tokenBudget !== undefined &&
+    protectedInFlightTokensTotal > tokenBudget
+  ) {
+    throw new Error(
+      `${field}.classes protectedInFlightTokens sum must not exceed inFlightTokenBudget`,
+    );
   }
   if (!Object.hasOwn(classes, defaultClass)) {
     throw new Error(`${field}.defaultClass must reference a configured class`);
@@ -1312,7 +1379,8 @@ function normalizePool(value: unknown, index: number): PoolConfig {
   const admissionClasses = normalizeAdmissionClasses(
     pool["admissionClasses"],
     `${field}.admissionClasses`,
-    budget !== undefined,
+    maxConcurrent,
+    budget,
   );
 
   if (reserve !== undefined && budget === undefined) {

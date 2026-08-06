@@ -48,7 +48,9 @@ type AdmissionTokenBudget = {
 };
 
 type TyrAdmissionClassLimits = {
+  readonly protectedConcurrent?: number;
   readonly maxConcurrent?: number;
+  readonly protectedInFlightTokens?: number;
   readonly maxInFlightTokens?: number;
 };
 
@@ -288,33 +290,74 @@ function parseAdmissionClasses(
     }
     const limits = objectValue(rawLimits, classField);
     for (const key of Object.keys(limits)) {
-      if (key !== "maxConcurrent" && key !== "maxInFlightTokens") {
+      if (
+        key !== "protectedConcurrent" &&
+        key !== "maxConcurrent" &&
+        key !== "protectedInFlightTokens" &&
+        key !== "maxInFlightTokens"
+      ) {
         throw new Error(
           `${classField} contains unknown property ${JSON.stringify(key)}`,
         );
       }
     }
-    const maxConcurrent = limits["maxConcurrent"];
-    const maxInFlightTokens = limits["maxInFlightTokens"];
+    const protectedConcurrentRaw = limits["protectedConcurrent"];
+    const maxConcurrentRaw = limits["maxConcurrent"];
+    const protectedInFlightTokensRaw = limits["protectedInFlightTokens"];
+    const maxInFlightTokensRaw = limits["maxInFlightTokens"];
+    const protectedConcurrent =
+      protectedConcurrentRaw === undefined
+        ? undefined
+        : integerValue(
+            protectedConcurrentRaw,
+            `${classField}.protectedConcurrent`,
+            0,
+          );
+    const maxConcurrent =
+      maxConcurrentRaw === undefined
+        ? undefined
+        : integerValue(maxConcurrentRaw, `${classField}.maxConcurrent`, 0);
+    const protectedInFlightTokens =
+      protectedInFlightTokensRaw === undefined
+        ? undefined
+        : integerValue(
+            protectedInFlightTokensRaw,
+            `${classField}.protectedInFlightTokens`,
+            0,
+          );
+    const maxInFlightTokens =
+      maxInFlightTokensRaw === undefined
+        ? undefined
+        : integerValue(
+            maxInFlightTokensRaw,
+            `${classField}.maxInFlightTokens`,
+            0,
+          );
+    if (
+      protectedConcurrent !== undefined &&
+      maxConcurrent !== undefined &&
+      protectedConcurrent > maxConcurrent
+    ) {
+      throw new Error(
+        `${classField}.protectedConcurrent must not exceed ${classField}.maxConcurrent`,
+      );
+    }
+    if (
+      protectedInFlightTokens !== undefined &&
+      maxInFlightTokens !== undefined &&
+      protectedInFlightTokens > maxInFlightTokens
+    ) {
+      throw new Error(
+        `${classField}.protectedInFlightTokens must not exceed ${classField}.maxInFlightTokens`,
+      );
+    }
     parsed[id] = Object.freeze({
-      ...(maxConcurrent === undefined
+      ...(protectedConcurrent === undefined ? {} : { protectedConcurrent }),
+      ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
+      ...(protectedInFlightTokens === undefined
         ? {}
-        : {
-            maxConcurrent: integerValue(
-              maxConcurrent,
-              `${classField}.maxConcurrent`,
-              0,
-            ),
-          }),
-      ...(maxInFlightTokens === undefined
-        ? {}
-        : {
-            maxInFlightTokens: integerValue(
-              maxInFlightTokens,
-              `${classField}.maxInFlightTokens`,
-              0,
-            ),
-          }),
+        : { protectedInFlightTokens }),
+      ...(maxInFlightTokens === undefined ? {} : { maxInFlightTokens }),
     });
   }
   return Object.freeze(parsed);
@@ -322,6 +365,13 @@ function parseAdmissionClasses(
 
 function parseLimits(value: unknown, field: string): TyrAdmissionLimits {
   const limits = objectValue(value, field);
+  const revision = integerValue(limits["revision"], `${field}.revision`, 0);
+  const maxConcurrent = integerValue(
+    limits["maxConcurrent"],
+    `${field}.maxConcurrent`,
+    0,
+  );
+  const maxQueue = integerValue(limits["maxQueue"], `${field}.maxQueue`, 0);
   const tokenBudget =
     limits["tokenBudget"] === undefined
       ? undefined
@@ -333,16 +383,50 @@ function parseLimits(value: unknown, field: string): TyrAdmissionLimits {
           limits["admissionClasses"],
           `${field}.admissionClasses`,
         );
+  if (admissionClasses !== undefined) {
+    let protectedConcurrentTotal = 0;
+    let protectedInFlightTokensTotal = 0;
+    for (const [id, classLimits] of Object.entries(admissionClasses)) {
+      protectedConcurrentTotal += classLimits.protectedConcurrent ?? 0;
+      protectedInFlightTokensTotal +=
+        classLimits.protectedInFlightTokens ?? 0;
+      if (
+        tokenBudget === undefined &&
+        classLimits.protectedInFlightTokens !== undefined
+      ) {
+        throw new Error(
+          `${field}.admissionClasses[${JSON.stringify(id)}].protectedInFlightTokens requires tokenBudget`,
+        );
+      }
+      if (
+        tokenBudget === undefined &&
+        classLimits.maxInFlightTokens !== undefined
+      ) {
+        throw new Error(
+          `${field}.admissionClasses[${JSON.stringify(id)}].maxInFlightTokens requires tokenBudget`,
+        );
+      }
+    }
+    if (protectedConcurrentTotal > maxConcurrent) {
+      throw new Error(
+        `${field}.admissionClasses protectedConcurrent sum must not exceed maxConcurrent`,
+      );
+    }
+    if (
+      tokenBudget !== undefined &&
+      protectedInFlightTokensTotal > tokenBudget.budget
+    ) {
+      throw new Error(
+        `${field}.admissionClasses protectedInFlightTokens sum must not exceed tokenBudget.budget`,
+      );
+    }
+  }
   return {
-    ...(admissionClasses === undefined ? {} : { admissionClasses }),
-    revision: integerValue(limits["revision"], `${field}.revision`, 0),
-    maxConcurrent: integerValue(
-      limits["maxConcurrent"],
-      `${field}.maxConcurrent`,
-      0,
-    ),
-    maxQueue: integerValue(limits["maxQueue"], `${field}.maxQueue`, 0),
+    revision,
+    maxConcurrent,
+    maxQueue,
     ...(tokenBudget === undefined ? {} : { tokenBudget }),
+    ...(admissionClasses === undefined ? {} : { admissionClasses }),
   };
 }
 
@@ -466,7 +550,10 @@ function admissionClassesEqual(
     const leftLimits = left[key];
     const rightLimits = right[key];
     return (
+      leftLimits?.protectedConcurrent === rightLimits?.protectedConcurrent &&
       leftLimits?.maxConcurrent === rightLimits?.maxConcurrent &&
+      leftLimits?.protectedInFlightTokens ===
+        rightLimits?.protectedInFlightTokens &&
       leftLimits?.maxInFlightTokens === rightLimits?.maxInFlightTokens
     );
   });
@@ -483,7 +570,8 @@ function limitsEqual(
     left.tokenBudget?.budget === right.tokenBudget?.budget &&
     left.tokenBudget?.highPriorityReserve ===
       right.tokenBudget?.highPriorityReserve &&
-    admissionClassesEqual(left.admissionClasses, right.admissionClasses)
+    (right.admissionClasses === undefined ||
+      admissionClassesEqual(left.admissionClasses, right.admissionClasses))
   );
 }
 
@@ -498,26 +586,30 @@ function limitsEqual(
 function resolveGrantAdmissionClasses(
   applied: LLMAdmissionLimits,
   grant: CapacityGrant,
+  fallbackAdmissionClasses?: LLMAdmissionLimits["admissionClasses"],
 ):
   | { readonly ok: true; readonly admissionClasses?: LLMAdmissionLimits["admissionClasses"] }
   | { readonly ok: false; readonly reason: string } {
   const granted = grant.limits.admissionClasses;
   const local = applied.admissionClasses;
+  const fallback = fallbackAdmissionClasses ?? local;
 
   // No classes anywhere: nothing to reconcile.
-  if (granted === undefined && local === undefined) return { ok: true };
+  if (granted === undefined && fallback === undefined) return { ok: true };
 
   // Control plane predates class-aware allocation, or simply has no class
-  // policy for this pool. Keep enforcing the locally configured table.
-  if (granted === undefined) return { ok: true, admissionClasses: local };
+  // policy for this pool. Keep enforcing the last non-expiration class table.
+  // The separate fallback matters after a lease kill switch has temporarily
+  // zeroed protected floors to satisfy the zero physical envelope.
+  if (granted === undefined) return { ok: true, admissionClasses: fallback };
 
   // The pool is not class-configured, so the bulkhead would reject the table
   // outright. Applying it is impossible; say so rather than crashing.
-  if (local === undefined) {
+  if (fallback === undefined) {
     return { ok: false, reason: "admission_classes_not_configured" };
   }
 
-  const localKeys = Object.keys(local).sort();
+  const localKeys = Object.keys(fallback).sort();
   const grantedKeys = Object.keys(granted).sort();
   if (
     localKeys.length !== grantedKeys.length ||
@@ -526,6 +618,29 @@ function resolveGrantAdmissionClasses(
     return { ok: false, reason: "admission_class_key_mismatch" };
   }
   return { ok: true, admissionClasses: granted };
+}
+
+function failClosedAdmissionClasses(
+  admissionClasses: NonNullable<LLMAdmissionLimits["admissionClasses"]>,
+): NonNullable<LLMAdmissionLimits["admissionClasses"]> {
+  const closed: Record<string, TyrAdmissionClassLimits> = {};
+  for (const [id, limits] of Object.entries(admissionClasses)) {
+    closed[id] = Object.freeze({
+      ...(limits.protectedConcurrent === undefined
+        ? {}
+        : { protectedConcurrent: 0 }),
+      ...(limits.maxConcurrent === undefined
+        ? {}
+        : { maxConcurrent: limits.maxConcurrent }),
+      ...(limits.protectedInFlightTokens === undefined
+        ? {}
+        : { protectedInFlightTokens: 0 }),
+      ...(limits.maxInFlightTokens === undefined
+        ? {}
+        : { maxInFlightTokens: limits.maxInFlightTokens }),
+    });
+  }
+  return Object.freeze(closed);
 }
 
 function grantUpdate(
@@ -577,6 +692,10 @@ export class LatchfloTyrAgent {
   readonly #retryMaxIntervalMs: number;
   readonly #random: () => number;
   readonly #grants = new Map<string, CapacityGrant>();
+  readonly #admissionClassFallbacks = new Map<
+    string,
+    NonNullable<LLMAdmissionLimits["admissionClasses"]>
+  >();
   #agentToken: string | undefined;
   #registration: Promise<void> | undefined;
   #controllerEpoch: number | undefined;
@@ -605,6 +724,11 @@ export class LatchfloTyrAgent {
     this.#fetch = options.fetch ?? globalThis.fetch;
     this.#logger = options.logger ?? console;
     this.#managedPools = new Set(options.pools);
+    const initialLimits = options.control.limits();
+    for (const pool of options.pools) {
+      const classes = initialLimits[pool]?.admissionClasses;
+      if (classes !== undefined) this.#admissionClassFallbacks.set(pool, classes);
+    }
     this.#requestTimeoutMs = options.requestTimeoutMs ?? 5_000;
     this.#retryIntervalMs = options.retryIntervalMs ?? 1_000;
     this.#retryMaxIntervalMs = options.retryMaxIntervalMs ?? 30_000;
@@ -842,7 +966,11 @@ export class LatchfloTyrAgent {
         }
         continue;
       }
-      const classes = resolveGrantAdmissionClasses(applied, grant);
+      const classes = resolveGrantAdmissionClasses(
+        applied,
+        grant,
+        this.#admissionClassFallbacks.get(grant.pool),
+      );
       if (!classes.ok) {
         await this.#ack(grant, "rejected", classes.reason);
         this.#setReady(false);
@@ -861,6 +989,12 @@ export class LatchfloTyrAgent {
         }
         this.#setReady(false);
         return;
+      }
+      for (const [pool, appliedPool] of Object.entries(result.pools)) {
+        const classes = appliedPool.current.admissionClasses;
+        if (classes !== undefined) {
+          this.#admissionClassFallbacks.set(pool, classes);
+        }
       }
     }
 
@@ -1062,7 +1196,11 @@ export class LatchfloTyrAgent {
             : { tokenBudget: { budget: 0, highPriorityReserve: 0 } }),
           ...(update.limits.admissionClasses === undefined
             ? {}
-            : { admissionClasses: update.limits.admissionClasses }),
+            : {
+                admissionClasses: failClosedAdmissionClasses(
+                  update.limits.admissionClasses,
+                ),
+              }),
         },
       };
     });

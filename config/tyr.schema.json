@@ -576,9 +576,19 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "protectedConcurrent": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Concurrency reserved for this class before shared capacity is borrowed."
+        },
         "maxConcurrent": {
           "type": "integer",
           "minimum": 0
+        },
+        "protectedInFlightTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "In-flight token capacity reserved for this class before shared capacity is borrowed; requires inFlightTokenBudget."
         },
         "maxInFlightTokens": {
           "type": "integer",

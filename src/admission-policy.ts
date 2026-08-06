@@ -94,26 +94,65 @@ function normalizeLimits(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${field} must be an object`);
   }
-  assertKnownKeys(value, ["maxConcurrent", "maxInFlightTokens"], field);
+  assertKnownKeys(
+    value,
+    [
+      "protectedConcurrent",
+      "maxConcurrent",
+      "protectedInFlightTokens",
+      "maxInFlightTokens",
+    ],
+    field,
+  );
+  const protectedConcurrent = value.protectedConcurrent;
   const maxConcurrent = value.maxConcurrent;
+  const protectedInFlightTokens = value.protectedInFlightTokens;
   const maxInFlightTokens = value.maxInFlightTokens;
-  if (
-    maxConcurrent !== undefined &&
-    (!Number.isSafeInteger(maxConcurrent) || maxConcurrent < 0)
-  ) {
-    throw new Error(`${field}.maxConcurrent must be a safe integer >= 0`);
+  for (const [name, candidate] of [
+    ["protectedConcurrent", protectedConcurrent],
+    ["maxConcurrent", maxConcurrent],
+    ["protectedInFlightTokens", protectedInFlightTokens],
+    ["maxInFlightTokens", maxInFlightTokens],
+  ] as const) {
+    if (
+      candidate !== undefined &&
+      (!Number.isSafeInteger(candidate) || candidate < 0)
+    ) {
+      throw new Error(`${field}.${name} must be a safe integer >= 0`);
+    }
   }
   if (
-    maxInFlightTokens !== undefined &&
-    (!Number.isSafeInteger(maxInFlightTokens) || maxInFlightTokens < 0)
+    protectedConcurrent !== undefined &&
+    maxConcurrent !== undefined &&
+    protectedConcurrent > maxConcurrent
   ) {
-    throw new Error(`${field}.maxInFlightTokens must be a safe integer >= 0`);
+    throw new Error(
+      `${field}.protectedConcurrent must not exceed ${field}.maxConcurrent`,
+    );
+  }
+  if (
+    protectedInFlightTokens !== undefined &&
+    maxInFlightTokens !== undefined &&
+    protectedInFlightTokens > maxInFlightTokens
+  ) {
+    throw new Error(
+      `${field}.protectedInFlightTokens must not exceed ${field}.maxInFlightTokens`,
+    );
+  }
+  if (!tokenBudgetEnabled && protectedInFlightTokens !== undefined) {
+    throw new Error(
+      `${field}.protectedInFlightTokens requires an in-flight token budget`,
+    );
   }
   if (!tokenBudgetEnabled && maxInFlightTokens !== undefined) {
     throw new Error(`${field}.maxInFlightTokens requires an in-flight token budget`);
   }
   return Object.freeze({
+    ...(protectedConcurrent === undefined ? {} : { protectedConcurrent }),
     ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
+    ...(protectedInFlightTokens === undefined
+      ? {}
+      : { protectedInFlightTokens }),
     ...(maxInFlightTokens === undefined ? {} : { maxInFlightTokens }),
   });
 }

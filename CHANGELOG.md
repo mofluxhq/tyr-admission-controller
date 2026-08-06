@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-08-06
+
+### Added
+
+- Added strict protected admission-class floors through
+  `protectedConcurrent` and `protectedInFlightTokens`. Tyr validates each floor,
+  the corresponding hard ceiling, and the sum of all floors against the local
+  physical pool envelope before startup or runtime application.
+- Added bounded Prometheus gauges and counters for protected, borrowed, and
+  shared class capacity, including cumulative admissions and reservation tokens
+  that used the shared remainder.
+- Capacity-aware routing snapshots now use schema version `3` and include
+  protected/borrowed class state plus the shared remainder. Replica selection
+  predicts protection-layer rejection in addition to global and hard class
+  ceilings.
+
+### Changed
+
+- Updated the exact runtime dependency from `async-bulkhead-llm@3.14.0` to
+  `3.15.1` and refreshed the bundled offline artifact.
+- Latchflo grant parsing and same-revision comparison now include protected
+  class floors. Grants may resize floors atomically with physical and hard class
+  limits; active work is never revoked and new borrowing pauses until attrition
+  restores protection.
+- A replica with protected floors will not route class-aware work to a schema-1
+  or schema-2 peer that cannot represent or enforce floor semantics. Tyr still
+  accepts older snapshots for fleets that do not use protected floors.
+
+### Fixed
+
+- Latchflo lease expiration now zeroes protected class floors before applying
+  the zero-capacity kill switch, while retaining the last non-expiration class
+  table so a later higher-revision grant that omits class limits can restore it.
+- Repeated same-revision grants that omit admission classes are now idempotent
+  when Tyr is preserving its local/effective fixed class table, rather than
+  being misclassified as revision-content conflicts.
+- `tyr_build_info` now reports `0.22.0`; telemetry smoke verification also checks
+  that the runtime version constant matches `package.json`.
+
+### Compatibility
+
+- Existing admission-class configurations that omit both protected fields retain
+  0.21 behavior.
+- Protected floors are strict local reservations. Capacity above all floors is
+  shared, but an idle floor is not automatically lent; demand-aware floor
+  resizing remains a Latchflo control-plane policy.
+
 ## [0.21.0] - 2026-08-05
 
 ### Added
@@ -855,7 +902,9 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.18.0...v0.19.0

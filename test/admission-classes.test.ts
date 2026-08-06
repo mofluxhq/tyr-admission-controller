@@ -103,6 +103,69 @@ describe("identity-aware admission classes", () => {
     await held;
   });
 
+  it("preserves protected concurrency floors before lending shared capacity", async () => {
+    const protectedPolicy = normalizeAdmissionClassesConfig(
+      {
+        defaultClass: "standard",
+        classes: {
+          standard: { protectedConcurrent: 1, maxConcurrent: 3 },
+          premium: { protectedConcurrent: 2, maxConcurrent: 3 },
+        },
+      },
+      "policy",
+      false,
+    );
+    const pools = createPools([
+      {
+        name: "openai",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 3,
+        adaptiveEstimation: { enabled: false },
+        admissionClasses: protectedPolicy,
+      },
+    ]);
+    const pool = pools.get("openai")!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const held = [0, 1].map((index) => {
+      const premiumRequest = {
+        ...request,
+        messages: [{ role: "user" as const, content: `premium-${index}` }],
+      };
+      const prepared = pool.prepare(premiumRequest, "normal", "premium");
+      return pool.run(premiumRequest, prepared, async () => gate, {
+        priority: "normal",
+        admissionClass: "premium",
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    expect(pool.prepare(request, "normal", "premium").advisory).toMatchObject({
+      admit: false,
+      reason: "concurrency_limit",
+      detail: { constraint: "admission_class_protection" },
+    });
+    const standard = pool.prepare(request, "normal", "standard");
+    expect(standard.advisory.admit).toBe(true);
+    await pool.run(request, standard, async () => undefined, {
+      priority: "normal",
+      admissionClass: "standard",
+    });
+
+    const classes = pool.stats().admissionClasses!;
+    expect(classes.shared.maxConcurrent).toBe(0);
+    expect(classes.classes.premium).toMatchObject({
+      protectedConcurrentInUse: 2,
+      borrowedConcurrent: 0,
+    });
+
+    release();
+    await Promise.all(held);
+  });
+
   it("records the default class and rejects prepare/run class drift", async () => {
     const pools = createPools([
       {
@@ -138,20 +201,41 @@ describe("identity-aware admission classes", () => {
       availableConcurrency: 3,
       admissionClasses: {
         defaultClass: "standard",
+        shared: {
+          maxConcurrent: 4,
+          inFlight: 1,
+          availableConcurrency: 3,
+        },
         classes: {
           standard: {
             inFlight: 0,
+            protectedConcurrent: 0,
+            protectedConcurrentInUse: 0,
+            borrowedConcurrent: 0,
+            availableProtectedConcurrency: 0,
             maxConcurrent: 1,
             availableConcurrency: 1,
             inFlightTokens: 0,
+            protectedInFlightTokens: 0,
+            protectedTokensInUse: 0,
+            borrowedInFlightTokens: 0,
+            availableProtectedTokens: 0,
             maxInFlightTokens: null,
             availableTokens: null,
           },
           premium: {
             inFlight: 1,
+            protectedConcurrent: 0,
+            protectedConcurrentInUse: 0,
+            borrowedConcurrent: 1,
+            availableProtectedConcurrency: 0,
             maxConcurrent: 1,
             availableConcurrency: 0,
             inFlightTokens: 0,
+            protectedInFlightTokens: 0,
+            protectedTokensInUse: 0,
+            borrowedInFlightTokens: 0,
+            availableProtectedTokens: 0,
             maxInFlightTokens: null,
             availableTokens: null,
           },
@@ -172,13 +256,21 @@ describe("identity-aware admission classes", () => {
       baseUrl: "http://tyr-b:8787",
       pool: {
         ...base,
+        inFlight: 0,
+        availableConcurrency: 4,
         admissionClasses: {
           ...base.admissionClasses!,
+          shared: {
+            ...base.admissionClasses!.shared,
+            inFlight: 0,
+            availableConcurrency: 4,
+          },
           classes: {
             ...base.admissionClasses!.classes,
             premium: {
               ...base.admissionClasses!.classes.premium!,
               inFlight: 0,
+              borrowedConcurrent: 0,
               availableConcurrency: 1,
             },
           },
@@ -214,6 +306,28 @@ describe("identity-aware admission classes", () => {
         false,
       ),
     ).toThrow(/requires an in-flight token budget/);
+    expect(() =>
+      normalizeAdmissionClassesConfig(
+        {
+          defaultClass: "standard",
+          classes: {
+            standard: { protectedConcurrent: 2, maxConcurrent: 1 },
+          },
+        },
+        "policy",
+        false,
+      ),
+    ).toThrow(/protectedConcurrent/);
+    expect(() =>
+      normalizeAdmissionClassesConfig(
+        {
+          defaultClass: "standard",
+          classes: { standard: { protectedInFlightTokens: 1 } },
+        },
+        "policy",
+        false,
+      ),
+    ).toThrow(/protectedInFlightTokens requires an in-flight token budget/);
     expect(() =>
       normalizeAdmissionClassesConfig(
         {

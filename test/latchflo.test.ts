@@ -743,8 +743,18 @@ describe("Latchflo admission-class grants", () => {
     const { control } = createControl({ ...CLASS_POOL_LIMITS });
     const stub = collectingFetch(
       classDesiredState({
-        premium: { maxConcurrent: 2, maxInFlightTokens: 4_000 },
-        noisy: { maxConcurrent: 6, maxInFlightTokens: 12_000 },
+        premium: {
+          protectedConcurrent: 1,
+          maxConcurrent: 2,
+          protectedInFlightTokens: 2_000,
+          maxInFlightTokens: 4_000,
+        },
+        noisy: {
+          protectedConcurrent: 2,
+          maxConcurrent: 6,
+          protectedInFlightTokens: 4_000,
+          maxInFlightTokens: 12_000,
+        },
       }),
     );
     const agent = new LatchfloTyrAgent({
@@ -771,8 +781,18 @@ describe("Latchflo admission-class grants", () => {
     const { control, applied } = createControl({ ...CLASS_POOL_LIMITS });
     const stub = collectingFetch(
       classDesiredState({
-        premium: { maxConcurrent: 2, maxInFlightTokens: 4_000 },
-        noisy: { maxConcurrent: 6, maxInFlightTokens: 12_000 },
+        premium: {
+          protectedConcurrent: 1,
+          maxConcurrent: 2,
+          protectedInFlightTokens: 2_000,
+          maxInFlightTokens: 4_000,
+        },
+        noisy: {
+          protectedConcurrent: 2,
+          maxConcurrent: 6,
+          protectedInFlightTokens: 4_000,
+          maxInFlightTokens: 12_000,
+        },
       }),
     );
     const agent = new LatchfloTyrAgent({
@@ -789,8 +809,18 @@ describe("Latchflo admission-class grants", () => {
     expect(agent.ready()).toBe(true);
     expect(applied).toHaveLength(1);
     expect(applied[0]?.[0]?.limits.admissionClasses).toEqual({
-      premium: { maxConcurrent: 2, maxInFlightTokens: 4_000 },
-      noisy: { maxConcurrent: 6, maxInFlightTokens: 12_000 },
+      premium: {
+        protectedConcurrent: 1,
+        maxConcurrent: 2,
+        protectedInFlightTokens: 2_000,
+        maxInFlightTokens: 4_000,
+      },
+      noisy: {
+        protectedConcurrent: 2,
+        maxConcurrent: 6,
+        protectedInFlightTokens: 4_000,
+        maxInFlightTokens: 12_000,
+      },
     });
     agent.stop();
   });
@@ -820,6 +850,110 @@ describe("Latchflo admission-class grants", () => {
       premium: { maxConcurrent: 3, maxInFlightTokens: 5_000 },
       noisy: { maxConcurrent: 5, maxInFlightTokens: 11_000 },
     });
+    agent.stop();
+  });
+
+  it("fails closed with protected floors and restores the last class table", async () => {
+    const initial: LLMAdmissionLimits = {
+      ...CLASS_POOL_LIMITS,
+      admissionClasses: {
+        premium: {
+          protectedConcurrent: 0,
+          maxConcurrent: 0,
+          protectedInFlightTokens: 0,
+          maxInFlightTokens: 0,
+        },
+        noisy: {
+          protectedConcurrent: 0,
+          maxConcurrent: 0,
+          protectedInFlightTokens: 0,
+          maxInFlightTokens: 0,
+        },
+      },
+    };
+    const { control, applied } = createControl(initial);
+    const acks: unknown[] = [];
+    let revision = 11;
+    let includeClasses = true;
+    let expiresAt = new Date(Date.now() + 100).toISOString();
+    const grantedClasses = {
+      premium: {
+        protectedConcurrent: 1,
+        maxConcurrent: 2,
+        protectedInFlightTokens: 2_000,
+        maxInFlightTokens: 4_000,
+      },
+      noisy: {
+        protectedConcurrent: 2,
+        maxConcurrent: 6,
+        protectedInFlightTokens: 4_000,
+        maxInFlightTokens: 12_000,
+      },
+    };
+    const fetchImpl: typeof globalThis.fetch = (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/desired-state")) {
+        return Promise.resolve(
+          new Response(
+            classDesiredState(
+              includeClasses ? grantedClasses : undefined,
+              revision,
+            ).replace(
+              /"expiresAt":"[^"]+"/,
+              `"expiresAt":"${expiresAt}"`,
+            ),
+            { status: 200 },
+          ),
+        );
+      }
+      if (url.endsWith("/ack")) {
+        acks.push(JSON.parse(String(init?.body)));
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    };
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: fetchImpl,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    await waitFor(() => applied.length === 2);
+    expect(applied[1]?.[0]?.limits).toMatchObject({
+      revision: 12,
+      maxConcurrent: 0,
+      maxQueue: 0,
+      admissionClasses: {
+        premium: {
+          protectedConcurrent: 0,
+          maxConcurrent: 2,
+          protectedInFlightTokens: 0,
+          maxInFlightTokens: 4_000,
+        },
+        noisy: {
+          protectedConcurrent: 0,
+          maxConcurrent: 6,
+          protectedInFlightTokens: 0,
+          maxInFlightTokens: 12_000,
+        },
+      },
+    });
+
+    revision = 13;
+    includeClasses = false;
+    expiresAt = new Date(Date.now() + 10_000).toISOString();
+    await agent.pollNow();
+    expect(applied[2]?.[0]?.limits.admissionClasses).toEqual(grantedClasses);
+
+    const applyCount = applied.length;
+    await agent.pollNow();
+    expect(applied).toHaveLength(applyCount);
+    expect(acks.at(-1)).toMatchObject({ status: "applied", revision: 13 });
+    expect(agent.ready()).toBe(true);
     agent.stop();
   });
 

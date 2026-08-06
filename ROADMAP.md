@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.20.0` identity-aware admission release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.22.0` protected admission-class release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.20.0
+## Current baseline: v0.22.0
 
 The current release provides:
 
@@ -287,49 +287,39 @@ Shipped:
 - Kept tenant churn out of runtime bulkhead keys, timers, and metric series by
   limiting policy to at most 64 configured classes.
 
-Deferred to the next policy milestone:
+### v0.21.0 — Latchflo-distributed class limits — shipped 2026-08-05
 
-- Model allow/deny policy by tenant and application.
-- Dynamic weighted lending or reserved-capacity restoration between classes.
-- Atomic policy reload and Latchflo-distributed policy versions.
-- Durable audit export and external policy-management APIs.
+Shipped:
 
-Exit evidence:
+- Declared admission-class capability during Latchflo registration.
+- Consumed per-replica class partitions from capacity grants and applied them
+  atomically with physical concurrency and token limits.
+- Preserved fixed class-key tables and rejected mismatched or conflicting grant
+  revisions through the normal acknowledgement path.
+- Kept locally configured class limits as bootstrap values when an older control
+  plane omits class partitions.
 
-- A full premium class does not consume the standard class's configured
-  capacity.
-- Class-aware routing avoids replicas where the selected class is exhausted.
-- Latchflo grant updates and expiration revisions retain the local class table.
-- Raw tenant and application values do not become metric labels or bulkhead
-  keys.
+### v0.22.0 — Protected class floors and borrowing visibility — shipped 2026-08-06
 
-### v0.21.0 — Distributed policy and model authorization
+Shipped:
 
-**Target duration:** 2–4 weeks
-**Goal:** Move identity-aware policy from static local configuration to a
-versioned, auditable fleet policy without introducing unbounded state.
+- Added strict local concurrency and in-flight token floors beneath class hard
+  ceilings through `async-bulkhead-llm@3.15.1`.
+- Added bounded protected, borrowed, and shared-capacity telemetry.
+- Added routing snapshot schema 3 so replica selection predicts floor-protection
+  rejection and avoids peers that cannot represent the active policy.
+- Extended Latchflo grants to resize floors atomically without revoking active
+  work; shrink-by-attrition pauses new borrowing until protection is restored.
 
-Planned work:
+Current guarantee boundary:
 
-- Add model-access allow and deny policies by tenant and application.
-- Define deterministic precedence across global, pool, class, tenant, and
-  application scopes.
-- Add policy versioning, validation, dry-run evaluation, atomic reload, and
-  Latchflo distribution.
-- Add optional work-conserving lending with protected floor restoration between
-  configured classes.
-- Include policy identifiers and versions in audit events.
-- Add fairness, noisy-neighbor, rollout, rollback, and stale-policy tests.
+- Floors are strict local reservations and capacity above all floors is shared.
+- An idle floor is not automatically lent by the data-plane library. Demand-aware
+  floor resizing and restoration remain a Latchflo allocation policy.
+- Dynamic model authorization, policy rollout, and durable policy management are
+  still future work.
 
-Exit criteria:
-
-- A tenant cannot access a disallowed model or consume another class's protected
-  floor.
-- Invalid or stale policy revisions cannot partially apply.
-- Policy rollout and rollback are observable and deterministic across replicas.
-- Tenant churn remains bounded independently of fleet size.
-
-### v0.22.0 — Fleet coordination hardening
+### v0.23.0 — Fleet coordination hardening
 
 **Target duration:** 4–6 weeks
 **Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas
@@ -457,10 +447,11 @@ A milestone may ship only when:
 Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.11.0, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.
 
 
-## Shipped in v0.20.0
+## Shipped in v0.22.0
 
-- Bounded identity-aware admission classes using
-  `async-bulkhead-llm@3.14.0`.
-- First-match claim rules, class-aware routing, bounded telemetry, and fixed-key
-  runtime class-limit updates.
-- Latchflo grant preservation for local class limits.
+- Protected identity-aware admission classes using
+  `async-bulkhead-llm@3.15.1`.
+- First-match claim rules, class-aware schema-3 routing, bounded telemetry, and
+  fixed-key runtime class-limit updates.
+- Latchflo-distributed class ceilings and protected floors with atomic grant
+  application and shrink-by-attrition restoration.

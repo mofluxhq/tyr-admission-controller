@@ -114,6 +114,81 @@ describe("capacity-aware routing", () => {
   });
 
 
+  it("excludes a replica that would violate another class's protected floor", () => {
+    const protectedPool: RoutingPoolCapacity = {
+      revision: 1,
+      admissionMode: "enforce",
+      closed: false,
+      maxConcurrent: 3,
+      inFlight: 2,
+      pending: 0,
+      maxQueue: 0,
+      availableConcurrency: 1,
+      admissionClasses: {
+        defaultClass: "standard",
+        shared: {
+          maxConcurrent: 0,
+          inFlight: 0,
+          availableConcurrency: 0,
+        },
+        classes: {
+          premium: {
+            inFlight: 2,
+            protectedConcurrent: 2,
+            protectedConcurrentInUse: 2,
+            borrowedConcurrent: 0,
+            availableProtectedConcurrency: 0,
+            maxConcurrent: 3,
+            availableConcurrency: 1,
+            inFlightTokens: 0,
+            protectedInFlightTokens: 0,
+            protectedTokensInUse: 0,
+            borrowedInFlightTokens: 0,
+            availableProtectedTokens: 0,
+            maxInFlightTokens: null,
+            availableTokens: null,
+          },
+          standard: {
+            inFlight: 0,
+            protectedConcurrent: 1,
+            protectedConcurrentInUse: 0,
+            borrowedConcurrent: 0,
+            availableProtectedConcurrency: 1,
+            maxConcurrent: 3,
+            availableConcurrency: 3,
+            inFlightTokens: 0,
+            protectedInFlightTokens: 0,
+            protectedTokensInUse: 0,
+            borrowedInFlightTokens: 0,
+            availableProtectedTokens: 0,
+            maxInFlightTokens: null,
+            availableTokens: null,
+          },
+        },
+      },
+    };
+    const premium = scoreCapacityCandidate({
+      instanceId: "tyr-a",
+      local: true,
+      pool: protectedPool,
+      priority: "normal",
+      admissionClass: "premium",
+      reservation: null,
+    });
+    const standard = scoreCapacityCandidate({
+      instanceId: "tyr-a",
+      local: true,
+      pool: protectedPool,
+      priority: "normal",
+      admissionClass: "standard",
+      reservation: null,
+    });
+
+    expect(premium.admissible).toBe(false);
+    expect(premium.sharedConcurrencyHeadroom).toBe(-1);
+    expect(standard.admissible).toBe(true);
+  });
+
   it("does not route enforce-mode traffic into an observe-mode peer", () => {
     const observePeer = scoreCapacityCandidate({
       instanceId: "tyr-b",

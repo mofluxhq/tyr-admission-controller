@@ -137,6 +137,73 @@ describe("file configuration", () => {
     }
   });
 
+  it("loads protected admission-class floors and rejects overcommit", () => {
+    const path = tempConfig(`
+version: 1
+upstreams:
+  openai:
+    baseUrl: http://localhost:8000
+pools:
+  - name: local
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 4
+    inFlightTokenBudget: 10000
+    admissionClasses:
+      defaultClass: standard
+      classes:
+        standard:
+          protectedConcurrent: 1
+          maxConcurrent: 3
+          protectedInFlightTokens: 2000
+          maxInFlightTokens: 6000
+        premium:
+          protectedConcurrent: 2
+          maxConcurrent: 4
+          protectedInFlightTokens: 4000
+          maxInFlightTokens: 8000
+`);
+    expect(loadRuntimeConfigFile(path).gateway.pools[0]?.admissionClasses).toEqual({
+      defaultClass: "standard",
+      classes: {
+        standard: {
+          protectedConcurrent: 1,
+          maxConcurrent: 3,
+          protectedInFlightTokens: 2_000,
+          maxInFlightTokens: 6_000,
+        },
+        premium: {
+          protectedConcurrent: 2,
+          maxConcurrent: 4,
+          protectedInFlightTokens: 4_000,
+          maxInFlightTokens: 8_000,
+        },
+      },
+    });
+
+    const invalid = tempConfig(`
+version: 1
+upstreams:
+  openai:
+    baseUrl: http://localhost:8000
+pools:
+  - name: local
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 2
+    admissionClasses:
+      defaultClass: standard
+      classes:
+        standard:
+          protectedConcurrent: 2
+        premium:
+          protectedConcurrent: 1
+`, "invalid-floors.yaml");
+    expect(() => loadRuntimeConfigFile(invalid)).toThrow(
+      /protectedConcurrent sum must not exceed maxConcurrent/,
+    );
+  });
+
   it("loads first-class JWT identity and role policy configuration", () => {
     const path = tempConfig(`
 version: 1

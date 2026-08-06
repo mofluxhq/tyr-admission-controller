@@ -2,6 +2,7 @@ import type { LLMPriority, LLMRejectReason, TokenUsage } from "async-bulkhead-ll
 import type { ApiShape } from "./adapters.js";
 import type { TyrRequestIdentity } from "./identity.js";
 import type { AdmissionProvenance, TyrPoolStats } from "./pools.js";
+import { TYR_VERSION } from "./version.js";
 
 export type TyrAdmissionOutcome = "admitted" | "bypassed" | "rejected";
 
@@ -313,7 +314,7 @@ export class TyrTelemetry {
     const lines: string[] = [];
 
     addMetricHeader(lines, "tyr_build_info", "gauge", "Tyr build information.");
-    addSample(lines, "tyr_build_info", 1, { version: "0.20.0" });
+    addSample(lines, "tyr_build_info", 1, { version: TYR_VERSION });
 
     addMetricHeader(lines, "tyr_ready", "gauge", "Whether Tyr is ready to accept managed traffic.");
     addSample(lines, "tyr_ready", ready ? 1 : 0);
@@ -489,6 +490,64 @@ export class TyrTelemetry {
       }
     }
 
+    const sharedAdmissionClassMetrics: Array<{
+      name: string;
+      type: "counter" | "gauge";
+      help: string;
+      value: (
+        snapshot: NonNullable<TyrPoolStats["admissionClasses"]>["shared"],
+      ) => number | undefined;
+    }> = [
+      {
+        name: "tyr_pool_admission_class_shared_max_concurrent",
+        type: "gauge",
+        help: "Concurrency remaining after all protected admission-class floors.",
+        value: (snapshot) => snapshot.maxConcurrent,
+      },
+      {
+        name: "tyr_pool_admission_class_shared_in_flight",
+        type: "gauge",
+        help: "Requests currently consuming shared admission-class concurrency.",
+        value: (snapshot) => snapshot.inFlight,
+      },
+      {
+        name: "tyr_pool_admission_class_shared_available_concurrent",
+        type: "gauge",
+        help: "Shared admission-class concurrency currently available.",
+        value: (snapshot) => snapshot.availableConcurrent,
+      },
+      {
+        name: "tyr_pool_admission_class_shared_token_budget",
+        type: "gauge",
+        help: "Token capacity remaining after all protected admission-class floors.",
+        value: (snapshot) => snapshot.tokenBudget?.budget,
+      },
+      {
+        name: "tyr_pool_admission_class_shared_tokens_in_flight",
+        type: "gauge",
+        help: "Tokens currently consuming shared admission-class capacity.",
+        value: (snapshot) => snapshot.tokenBudget?.inFlightTokens,
+      },
+      {
+        name: "tyr_pool_admission_class_shared_tokens_available",
+        type: "gauge",
+        help: "Shared admission-class token capacity currently available.",
+        value: (snapshot) => snapshot.tokenBudget?.available,
+      },
+    ];
+
+    for (const metric of sharedAdmissionClassMetrics) {
+      addMetricHeader(lines, metric.name, metric.type, metric.help);
+      for (const pool of poolNames) {
+        const shared = stats[pool]?.admissionClasses?.shared;
+        if (shared === undefined) continue;
+        const value = metric.value(shared);
+        if (value !== undefined) {
+          addSample(lines, metric.name, value, { pool });
+        }
+      }
+    }
+
     const admissionClassMetrics: Array<{
       name: string;
       type: "counter" | "gauge";
@@ -503,6 +562,24 @@ export class TyrTelemetry {
         value: (snapshot) => snapshot.inFlight,
       },
       {
+        name: "tyr_pool_admission_class_protected_concurrent",
+        type: "gauge",
+        help: "Concurrency reserved for a bounded admission class before shared capacity is borrowed.",
+        value: (snapshot) => snapshot.limits.protectedConcurrent ?? 0,
+      },
+      {
+        name: "tyr_pool_admission_class_protected_concurrent_in_use",
+        type: "gauge",
+        help: "Admission-class requests currently consuming protected concurrency.",
+        value: (snapshot) => snapshot.protectedConcurrentInUse,
+      },
+      {
+        name: "tyr_pool_admission_class_borrowed_concurrent",
+        type: "gauge",
+        help: "Admission-class requests currently consuming shared concurrency.",
+        value: (snapshot) => snapshot.borrowedConcurrent,
+      },
+      {
         name: "tyr_pool_admission_class_max_concurrent",
         type: "gauge",
         help: "Configured class-specific concurrency ceiling; absent when the physical pool alone governs concurrency.",
@@ -513,6 +590,24 @@ export class TyrTelemetry {
         type: "gauge",
         help: "Tokens currently held in flight by a bounded admission class.",
         value: (snapshot) => snapshot.inFlightTokens,
+      },
+      {
+        name: "tyr_pool_admission_class_protected_in_flight_tokens",
+        type: "gauge",
+        help: "In-flight tokens reserved for a bounded admission class before shared capacity is borrowed.",
+        value: (snapshot) => snapshot.limits.protectedInFlightTokens ?? 0,
+      },
+      {
+        name: "tyr_pool_admission_class_protected_tokens_in_use",
+        type: "gauge",
+        help: "Admission-class tokens currently consuming protected token capacity.",
+        value: (snapshot) => snapshot.protectedTokensInUse,
+      },
+      {
+        name: "tyr_pool_admission_class_borrowed_in_flight_tokens",
+        type: "gauge",
+        help: "Admission-class tokens currently consuming shared token capacity.",
+        value: (snapshot) => snapshot.borrowedInFlightTokens,
       },
       {
         name: "tyr_pool_admission_class_max_in_flight_tokens",
@@ -537,6 +632,18 @@ export class TyrTelemetry {
         type: "counter",
         help: "Rejected admissions attributed to a bounded admission class.",
         value: (snapshot) => snapshot.rejected,
+      },
+      {
+        name: "tyr_pool_admission_class_borrowed_admissions_total",
+        type: "counter",
+        help: "Admissions whose concurrency slot came from shared class capacity.",
+        value: (snapshot) => snapshot.totalBorrowedAdmissions,
+      },
+      {
+        name: "tyr_pool_admission_class_borrowed_tokens_reserved_total",
+        type: "counter",
+        help: "Reservation tokens placed in shared class capacity at admission time.",
+        value: (snapshot) => snapshot.totalBorrowedTokensReserved,
       },
     ];
 
