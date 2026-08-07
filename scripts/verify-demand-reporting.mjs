@@ -69,6 +69,101 @@ function poolStats(input = {}) {
   };
 }
 
+
+function classPoolStats(input = {}) {
+  const base = poolStats({
+    admitted: (input.premiumAdmitted ?? 0) + (input.noisyAdmitted ?? 0),
+    rejected: (input.premiumRejected ?? 0) + (input.noisyRejected ?? 0),
+    budgetRejected: input.premiumBudgetRejected ?? 0,
+    concurrencyRejected: input.premiumConcurrencyRejected ?? 0,
+    inFlight: 4,
+    inFlightTokens: 3_500,
+    availableTokens: 4_000,
+  });
+  return {
+    ...base,
+    limits: {
+      ...base.limits,
+      admissionClasses: {
+        premium: {
+          protectedConcurrent: 2,
+          maxConcurrent: 4,
+          protectedInFlightTokens: 2_000,
+          maxInFlightTokens: 5_000,
+        },
+        noisy: {
+          protectedConcurrent: 2,
+          maxConcurrent: 4,
+          protectedInFlightTokens: 3_000,
+          maxInFlightTokens: 5_000,
+        },
+      },
+    },
+    admissionClasses: {
+      defaultClass: "premium",
+      classes: {
+        premium: {
+          limits: {
+            protectedConcurrent: 2,
+            maxConcurrent: 4,
+            protectedInFlightTokens: 2_000,
+            maxInFlightTokens: 5_000,
+          },
+          inFlight: 3,
+          protectedConcurrentInUse: 2,
+          borrowedConcurrent: 1,
+          inFlightTokens: 2_500,
+          protectedTokensInUse: 2_000,
+          borrowedInFlightTokens: 500,
+          admitted: input.premiumAdmitted ?? 0,
+          released: 0,
+          rejected: input.premiumRejected ?? 0,
+          rejectedByReason: {
+            budget_limit: input.premiumBudgetRejected ?? 0,
+            concurrency_limit: input.premiumConcurrencyRejected ?? 0,
+          },
+          totalReserved: 0,
+          totalConsumed: 0,
+          totalRefunded: 0,
+          totalOverrun: 0,
+          totalBorrowedAdmissions: 0,
+          totalBorrowedTokensReserved: 0,
+        },
+        noisy: {
+          limits: {
+            protectedConcurrent: 2,
+            maxConcurrent: 4,
+            protectedInFlightTokens: 3_000,
+            maxInFlightTokens: 5_000,
+          },
+          inFlight: 1,
+          protectedConcurrentInUse: 1,
+          borrowedConcurrent: 0,
+          inFlightTokens: 1_000,
+          protectedTokensInUse: 1_000,
+          borrowedInFlightTokens: 0,
+          admitted: input.noisyAdmitted ?? 0,
+          released: 0,
+          rejected: input.noisyRejected ?? 0,
+          rejectedByReason: {},
+          totalReserved: 0,
+          totalConsumed: 0,
+          totalRefunded: 0,
+          totalOverrun: 0,
+          totalBorrowedAdmissions: 0,
+          totalBorrowedTokensReserved: 0,
+        },
+      },
+      shared: {
+        maxConcurrent: 4,
+        inFlight: 1,
+        availableConcurrent: 3,
+        tokenBudget: { budget: 2_500, inFlightTokens: 500, available: 2_000 },
+      },
+    },
+  };
+}
+
 function waitFor(predicate, timeoutMs = 1_000) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
@@ -153,6 +248,69 @@ assert.deepEqual(reporter.capture()[0], {
   lastRequestAt: "2026-08-01T20:00:01.000Z",
 });
 
+let classNow = Date.parse("2026-08-07T20:00:00.000Z");
+let classCurrent = classPoolStats({
+  premiumAdmitted: 5,
+  premiumRejected: 2,
+  premiumBudgetRejected: 1,
+  premiumConcurrencyRejected: 1,
+  noisyAdmitted: 1,
+});
+const classControl = {
+  limits: () => ({}),
+  stats: () => ({ interactive: classCurrent }),
+  applyLimits: () => ({ applied: false, reason: "unknown_pool", pool: "interactive" }),
+};
+const classReporter = new TyrDemandReporter(classControl, ["interactive"], () => classNow);
+const classDemand = classReporter.capture()[0].admissionClasses;
+assert.deepEqual(classDemand, [
+  {
+    admissionClass: "noisy",
+    inFlight: 1,
+    recentAdmissions: 1,
+    recentRejections: 0,
+    recentBudgetRejections: 0,
+    recentConcurrencyRejections: 0,
+    protectedConcurrent: 2,
+    protectedConcurrentInUse: 1,
+    borrowedConcurrent: 0,
+    inFlightTokens: 1_000,
+    protectedInFlightTokens: 3_000,
+    protectedTokensInUse: 1_000,
+    borrowedInFlightTokens: 0,
+    lastRequestAt: "2026-08-07T20:00:00.000Z",
+  },
+  {
+    admissionClass: "premium",
+    inFlight: 3,
+    recentAdmissions: 5,
+    recentRejections: 2,
+    recentBudgetRejections: 1,
+    recentConcurrencyRejections: 1,
+    protectedConcurrent: 2,
+    protectedConcurrentInUse: 2,
+    borrowedConcurrent: 1,
+    inFlightTokens: 2_500,
+    protectedInFlightTokens: 2_000,
+    protectedTokensInUse: 2_000,
+    borrowedInFlightTokens: 500,
+    lastRequestAt: "2026-08-07T20:00:00.000Z",
+  },
+]);
+classReporter.commit();
+classNow += 1_000;
+classCurrent = classPoolStats({
+  premiumAdmitted: 7,
+  premiumRejected: 3,
+  premiumBudgetRejected: 2,
+  premiumConcurrencyRejected: 1,
+  noisyAdmitted: 1,
+});
+const nextClassDemand = classReporter.capture()[0].admissionClasses;
+assert.equal(nextClassDemand.find((entry) => entry.admissionClass === "premium").recentAdmissions, 2);
+assert.equal(nextClassDemand.find((entry) => entry.admissionClass === "premium").recentRejections, 1);
+assert.equal(nextClassDemand.find((entry) => entry.admissionClass === "noisy").recentAdmissions, 0);
+
 const limits = {
   interactive: { revision: 0, maxConcurrent: 0, maxQueue: 0 },
 };
@@ -185,9 +343,11 @@ const control = {
   },
 };
 const heartbeatBodies = [];
+const registrationBodies = [];
 const fetchStub = async (input, init) => {
   const url = String(input);
   if (url.endsWith("/v1/agents/register")) {
+    registrationBodies.push(JSON.parse(String(init?.body ?? "{}")));
     return new globalThis.Response(
       JSON.stringify({ agentToken: "agent-token", controllerEpoch: 1 }),
       { status: 200, headers: { "content-type": "application/json" } },
@@ -248,6 +408,10 @@ const mode = createLatchfloManagedMode({
 try {
   mode.start();
   await waitFor(() => heartbeatBodies.length > 0);
+  assert.deepEqual(registrationBodies[0]?.capabilities, {
+    admissionClasses: true,
+    admissionClassDemand: true,
+  });
   assert.equal(mode.ready(), true);
   assert.deepEqual(
     {

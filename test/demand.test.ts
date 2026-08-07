@@ -85,6 +85,112 @@ function poolStats(input: {
   };
 }
 
+
+function classPoolStats(input: {
+  premiumAdmitted?: number;
+  premiumRejected?: number;
+  premiumBudgetRejected?: number;
+  premiumConcurrencyRejected?: number;
+  noisyAdmitted?: number;
+  noisyRejected?: number;
+} = {}): TyrPoolStats {
+  const base = poolStats({
+    admitted: (input.premiumAdmitted ?? 0) + (input.noisyAdmitted ?? 0),
+    rejected: (input.premiumRejected ?? 0) + (input.noisyRejected ?? 0),
+    budgetRejected: input.premiumBudgetRejected ?? 0,
+    concurrencyRejected: input.premiumConcurrencyRejected ?? 0,
+    inFlight: 4,
+    inFlightTokens: 3_500,
+    availableTokens: 4_000,
+  });
+  return {
+    ...base,
+    limits: {
+      ...base.limits,
+      admissionClasses: {
+        premium: {
+          protectedConcurrent: 2,
+          maxConcurrent: 4,
+          protectedInFlightTokens: 2_000,
+          maxInFlightTokens: 5_000,
+        },
+        noisy: {
+          protectedConcurrent: 2,
+          maxConcurrent: 4,
+          protectedInFlightTokens: 3_000,
+          maxInFlightTokens: 5_000,
+        },
+      },
+    },
+    admissionClasses: {
+      defaultClass: "premium",
+      classes: {
+        premium: {
+          limits: {
+            protectedConcurrent: 2,
+            maxConcurrent: 4,
+            protectedInFlightTokens: 2_000,
+            maxInFlightTokens: 5_000,
+          },
+          inFlight: 3,
+          protectedConcurrentInUse: 2,
+          borrowedConcurrent: 1,
+          inFlightTokens: 2_500,
+          protectedTokensInUse: 2_000,
+          borrowedInFlightTokens: 500,
+          admitted: input.premiumAdmitted ?? 0,
+          released: 0,
+          rejected: input.premiumRejected ?? 0,
+          rejectedByReason: {
+            budget_limit: input.premiumBudgetRejected ?? 0,
+            concurrency_limit: input.premiumConcurrencyRejected ?? 0,
+          },
+          totalReserved: 0,
+          totalConsumed: 0,
+          totalRefunded: 0,
+          totalOverrun: 0,
+          totalBorrowedAdmissions: 0,
+          totalBorrowedTokensReserved: 0,
+        },
+        noisy: {
+          limits: {
+            protectedConcurrent: 2,
+            maxConcurrent: 4,
+            protectedInFlightTokens: 3_000,
+            maxInFlightTokens: 5_000,
+          },
+          inFlight: 1,
+          protectedConcurrentInUse: 1,
+          borrowedConcurrent: 0,
+          inFlightTokens: 1_000,
+          protectedTokensInUse: 1_000,
+          borrowedInFlightTokens: 0,
+          admitted: input.noisyAdmitted ?? 0,
+          released: 0,
+          rejected: input.noisyRejected ?? 0,
+          rejectedByReason: {},
+          totalReserved: 0,
+          totalConsumed: 0,
+          totalRefunded: 0,
+          totalOverrun: 0,
+          totalBorrowedAdmissions: 0,
+          totalBorrowedTokensReserved: 0,
+        },
+      },
+      shared: {
+        maxConcurrent: 4,
+        inFlight: 1,
+        availableConcurrent: 3,
+        tokenBudget: {
+          budget: 2_500,
+          inFlightTokens: 500,
+          available: 2_000,
+        },
+      },
+    },
+  };
+}
+
 function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
@@ -193,6 +299,111 @@ describe("Tyr Latchflo demand reporting", () => {
       recentBudgetRejections: 2,
       recentConcurrencyRejections: 1,
     });
+  });
+
+  it("reports bounded per-class demand and protected/borrowed utilization", () => {
+    let now = Date.parse("2026-08-07T20:00:00.000Z");
+    let current = classPoolStats({
+      premiumAdmitted: 5,
+      premiumRejected: 2,
+      premiumBudgetRejected: 1,
+      premiumConcurrencyRejected: 1,
+      noisyAdmitted: 1,
+    });
+    const control = {
+      limits: () => ({}),
+      stats: () => ({ interactive: current }),
+      applyLimits: () => ({
+        applied: false as const,
+        reason: "unknown_pool" as const,
+        pool: "interactive",
+      }),
+    } satisfies TyrControlPlane;
+    const reporter = new TyrDemandReporter(control, ["interactive"], () => now);
+
+    expect(reporter.capture()[0]?.admissionClasses).toEqual([
+      {
+        admissionClass: "noisy",
+        inFlight: 1,
+        recentAdmissions: 1,
+        recentRejections: 0,
+        recentBudgetRejections: 0,
+        recentConcurrencyRejections: 0,
+        protectedConcurrent: 2,
+        protectedConcurrentInUse: 1,
+        borrowedConcurrent: 0,
+        inFlightTokens: 1_000,
+        protectedInFlightTokens: 3_000,
+        protectedTokensInUse: 1_000,
+        borrowedInFlightTokens: 0,
+        lastRequestAt: "2026-08-07T20:00:00.000Z",
+      },
+      {
+        admissionClass: "premium",
+        inFlight: 3,
+        recentAdmissions: 5,
+        recentRejections: 2,
+        recentBudgetRejections: 1,
+        recentConcurrencyRejections: 1,
+        protectedConcurrent: 2,
+        protectedConcurrentInUse: 2,
+        borrowedConcurrent: 1,
+        inFlightTokens: 2_500,
+        protectedInFlightTokens: 2_000,
+        protectedTokensInUse: 2_000,
+        borrowedInFlightTokens: 500,
+        lastRequestAt: "2026-08-07T20:00:00.000Z",
+      },
+    ]);
+    reporter.commit();
+
+    now += 1_000;
+    current = classPoolStats({
+      premiumAdmitted: 7,
+      premiumRejected: 3,
+      premiumBudgetRejected: 2,
+      premiumConcurrencyRejected: 1,
+      noisyAdmitted: 1,
+    });
+    expect(reporter.capture()[0]?.admissionClasses).toEqual([
+      expect.objectContaining({
+        admissionClass: "noisy",
+        recentAdmissions: 0,
+        recentRejections: 0,
+        lastRequestAt: "2026-08-07T20:00:00.000Z",
+      }),
+      expect.objectContaining({
+        admissionClass: "premium",
+        recentAdmissions: 2,
+        recentRejections: 1,
+        recentBudgetRejections: 1,
+        recentConcurrencyRejections: 0,
+        lastRequestAt: "2026-08-07T20:00:01.000Z",
+      }),
+    ]);
+  });
+
+  it("retains per-class deltas until the heartbeat is accepted", () => {
+    let current = classPoolStats({ premiumAdmitted: 2, premiumRejected: 1 });
+    const control = {
+      limits: () => ({}),
+      stats: () => ({ interactive: current }),
+      applyLimits: () => ({
+        applied: false as const,
+        reason: "unknown_pool" as const,
+        pool: "interactive",
+      }),
+    } satisfies TyrControlPlane;
+    const reporter = new TyrDemandReporter(control, ["interactive"], () => 1_000);
+
+    expect(reporter.capture()[0]?.admissionClasses?.find(
+      (entry) => entry.admissionClass === "premium",
+    )).toMatchObject({ recentAdmissions: 2, recentRejections: 1 });
+
+    current = classPoolStats({ premiumAdmitted: 4, premiumRejected: 3 });
+    expect(reporter.capture()[0]?.admissionClasses?.find(
+      (entry) => entry.admissionClass === "premium",
+    )).toMatchObject({ recentAdmissions: 4, recentRejections: 3 });
   });
 
   it("automatically includes demand snapshots in managed-mode heartbeats", async () => {

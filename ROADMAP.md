@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.22.0` protected admission-class release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.23.0` class-demand reporting release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,20 +21,22 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.22.0
+## Current baseline: v0.23.0
 
 The current release provides:
 
 - Anthropic Messages and OpenAI Chat Completions proxy routes.
 - Model-prefix routing to independently configured local pools.
-- A v3.14 pool policy runtime using exact reservation previews, native observe
+- A v3.15 pool policy runtime using exact reservation previews, native observe
   mode, and complete versioned admission-limit snapshots.
 - Tyr-local all-or-nothing runtime updates across named pools, with stale
   revision protection and shrink-by-attrition semantics.
 - First-class Latchflo-managed operation with registration, persisted credentials,
   readiness, expiring grants, and fail-closed zero-capacity startup.
-- Automatic per-pool demand snapshots on authenticated Latchflo heartbeats,
-  including accepted-heartbeat admission/rejection deltas and live token pressure.
+- Automatic per-pool and bounded per-admission-class demand snapshots on
+  authenticated Latchflo heartbeats, including accepted-heartbeat
+  admission/rejection deltas, protected/shared utilization, and live token
+  pressure.
 - Admission-linearized revisions and a bounded per-pool Latchflo provenance ledger
   containing grant ID, controller epoch, and expiration.
 - Exact grant-attribution response headers for admissions, bypasses, and
@@ -319,7 +321,29 @@ Current guarantee boundary:
 - Dynamic model authorization, policy rollout, and durable policy management are
   still future work.
 
-### v0.23.0 — Fleet coordination hardening
+### v0.23.0 — Bounded admission-class demand reporting — shipped 2026-08-07
+
+Shipped:
+
+- Extended every managed pool demand heartbeat with deterministic, bounded
+  snapshots for its configured admission classes.
+- Added live class in-flight pressure, accepted-heartbeat admission/rejection
+  deltas, protected utilization, shared-capacity borrowing, and token pressure.
+- Added per-class accepted-heartbeat checkpoints so failed control-plane calls do
+  not lose demand evidence.
+- Advertised `capabilities.admissionClassDemand: true` while preserving wire
+  compatibility with Latchflo 0.8.x, which ignores the additive fields.
+- Kept lending policy out of Tyr: the gateway reports demand and continues to
+  enforce only the complete higher-revision limit snapshots issued by Latchflo.
+
+Outcome:
+
+- Latchflo now has a bounded gateway-side signal it can use to distinguish idle
+  protected classes from classes that need their nominal floor restored.
+- No raw tenant/application identity is added to runtime keys or control-plane
+  demand cardinality.
+
+### v0.24.0 — Fleet coordination hardening
 
 **Target duration:** 4–6 weeks
 **Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas
@@ -356,7 +380,7 @@ Non-goals:
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.22.0
+**Target duration:** 3–5 weeks after v0.24.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:
@@ -447,7 +471,7 @@ A milestone may ship only when:
 Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.11.0, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.
 
 
-## Shipped in v0.22.0
+## Shipped in v0.23.0
 
 - Protected identity-aware admission classes using
   `async-bulkhead-llm@3.15.1`.
@@ -455,3 +479,6 @@ Timeline estimates are directional and should be revised after each design-partn
   fixed-key runtime class-limit updates.
 - Latchflo-distributed class ceilings and protected floors with atomic grant
   application and shrink-by-attrition restoration.
+- Bounded per-class demand heartbeats with accepted-heartbeat delta retention,
+  protected/borrowed utilization, and additive capability signaling for future
+  demand-aware class-floor lending.

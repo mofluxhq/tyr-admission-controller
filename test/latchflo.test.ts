@@ -772,7 +772,7 @@ describe("Latchflo admission-class grants", () => {
     expect(stub.registrations[0]).toMatchObject({
       instanceId: "tyr-a",
       pools: ["openai-primary"],
-      capabilities: { admissionClasses: true },
+      capabilities: { admissionClasses: true, admissionClassDemand: true },
     });
     agent.stop();
   });

@@ -8,6 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-07
+
+### Added
+
+- Added bounded per-admission-class demand snapshots to Latchflo heartbeats. Each
+  configured class now reports live in-flight work, accepted-heartbeat admission
+  and rejection deltas, budget/concurrency rejection deltas, protected
+  concurrency usage, shared-capacity borrowing, and token pressure when the pool
+  has a token budget. Class IDs remain bounded by Tyr's fixed validated class
+  table and are never derived from tenant/application churn.
+- Added per-class accepted-heartbeat checkpoints and `lastRequestAt` tracking. A
+  failed heartbeat does not advance class counters, so a later retry carries all
+  activity since the last heartbeat Latchflo actually accepted.
+- Tyr now advertises `capabilities.admissionClassDemand: true` alongside
+  `admissionClasses: true` when registering with Latchflo. Current Latchflo 0.8.x
+  ignores the additive capability and nested heartbeat field; a class-demand-aware
+  allocator can opt into the richer signal without changing Tyr's request path.
+- Extended executable demand verification and unit coverage for deterministic
+  class ordering, protected/borrowed utilization, accepted-heartbeat deltas, and
+  retry retention.
+
+### Changed
+
+- Demand reporting is now the gateway-side protocol foundation for future
+  demand-aware lending of protected admission-class floors. Tyr still does not
+  decide when a floor is lent or restored; that policy remains a Latchflo
+  control-plane responsibility.
+- Updated runtime build metadata, examples, verification documentation, and
+  release version to `0.23.0`. Runtime dependencies are unchanged from 0.22.0.
+
+### Compatibility
+
+- Existing pool-level demand fields are unchanged. Pools without admission
+  classes emit the same heartbeat shape as 0.22.0.
+- Admission-class floor semantics are unchanged: idle protected capacity remains
+  reserved until Latchflo explicitly issues a higher-revision grant with resized
+  floors.
+
 ## [0.22.0] - 2026-08-06
 
 ### Added
@@ -902,7 +940,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.0...v0.20.1

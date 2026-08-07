@@ -1,8 +1,32 @@
-import type { LLMRejectReason } from "async-bulkhead-llm";
+import type { LLMAdmissionClassStats, LLMRejectReason } from "async-bulkhead-llm";
 import type { TyrPoolStats } from "./pools.js";
 import type { TyrControlPlane } from "./server.js";
 
-/** Demand snapshot accepted by Latchflo 0.6.0 agent heartbeats. */
+/**
+ * Bounded demand for one configured admission class.
+ *
+ * Class IDs come only from Tyr's fixed, validated admission-class table; this
+ * structure therefore cannot grow from tenant/application churn. Counter
+ * fields are deltas since the last heartbeat accepted by Latchflo.
+ */
+export type AdmissionClassDemandSnapshot = {
+  readonly admissionClass: string;
+  readonly inFlight: number;
+  readonly recentAdmissions: number;
+  readonly recentRejections: number;
+  readonly recentBudgetRejections: number;
+  readonly recentConcurrencyRejections: number;
+  readonly protectedConcurrent: number;
+  readonly protectedConcurrentInUse: number;
+  readonly borrowedConcurrent: number;
+  readonly inFlightTokens?: number;
+  readonly protectedInFlightTokens?: number;
+  readonly protectedTokensInUse?: number;
+  readonly borrowedInFlightTokens?: number;
+  readonly lastRequestAt?: string;
+};
+
+/** Demand snapshot accepted by Latchflo agent heartbeats. */
 export type PoolDemandSnapshot = {
   readonly pool: string;
   readonly observedAt: string;
@@ -16,6 +40,12 @@ export type PoolDemandSnapshot = {
   readonly availableTokens?: number;
   readonly oldestPendingMs?: number;
   readonly lastRequestAt?: string;
+  /**
+   * Optional bounded per-class demand. Latchflo versions that predate class
+   * demand can ignore this field while continuing to consume the pool-level
+   * snapshot above.
+   */
+  readonly admissionClasses?: readonly AdmissionClassDemandSnapshot[];
 };
 
 type DemandCheckpoint = {
@@ -27,7 +57,9 @@ type DemandCheckpoint = {
 
 type PendingCapture = {
   readonly checkpoints: ReadonlyMap<string, DemandCheckpoint>;
+  readonly classCheckpoints: ReadonlyMap<string, ReadonlyMap<string, DemandCheckpoint>>;
   readonly lastRequestAt: ReadonlyMap<string, string>;
+  readonly classLastRequestAt: ReadonlyMap<string, ReadonlyMap<string, string>>;
 };
 
 const ZERO_CHECKPOINT: DemandCheckpoint = Object.freeze({
@@ -38,16 +70,27 @@ const ZERO_CHECKPOINT: DemandCheckpoint = Object.freeze({
 });
 
 function rejectionCount(
-  stats: TyrPoolStats,
+  stats: Pick<TyrPoolStats["llm"], "rejectedByReason">,
   reason: LLMRejectReason,
 ): number {
-  return stats.llm.rejectedByReason[reason] ?? 0;
+  return stats.rejectedByReason[reason] ?? 0;
 }
 
-function checkpoint(stats: TyrPoolStats): DemandCheckpoint {
+function checkpoint(
+  stats: Pick<TyrPoolStats["llm"], "admitted" | "rejected" | "rejectedByReason">,
+): DemandCheckpoint {
   return {
-    admitted: stats.llm.admitted,
-    rejected: stats.llm.rejected,
+    admitted: stats.admitted,
+    rejected: stats.rejected,
+    budgetRejected: rejectionCount(stats, "budget_limit"),
+    concurrencyRejected: rejectionCount(stats, "concurrency_limit"),
+  };
+}
+
+function classCheckpoint(stats: LLMAdmissionClassStats): DemandCheckpoint {
+  return {
+    admitted: stats.admitted,
+    rejected: stats.rejected,
     budgetRejected: rejectionCount(stats, "budget_limit"),
     concurrencyRejected: rejectionCount(stats, "concurrency_limit"),
   };
@@ -62,6 +105,16 @@ function delta(current: number, previous: number): number {
   return current >= previous ? current - previous : current;
 }
 
+function copyNestedMap<T>(
+  source: ReadonlyMap<string, ReadonlyMap<string, T>>,
+): Map<string, Map<string, T>> {
+  const result = new Map<string, Map<string, T>>();
+  for (const [outerKey, inner] of source) {
+    result.set(outerKey, new Map(inner));
+  }
+  return result;
+}
+
 /**
  * Converts Tyr's live pool statistics into Latchflo demand heartbeats.
  *
@@ -71,7 +124,9 @@ function delta(current: number, previous: number): number {
  */
 export class TyrDemandReporter {
   readonly #accepted = new Map<string, DemandCheckpoint>();
+  readonly #acceptedClasses = new Map<string, Map<string, DemandCheckpoint>>();
   readonly #lastRequestAt = new Map<string, string>();
+  readonly #classLastRequestAt = new Map<string, Map<string, string>>();
   #pending: PendingCapture | undefined;
 
   constructor(
@@ -91,7 +146,9 @@ export class TyrDemandReporter {
     const observedAt = new Date(this.now()).toISOString();
     const statsByPool = this.control.stats();
     const checkpoints = new Map<string, DemandCheckpoint>();
+    const classCheckpoints = copyNestedMap(this.#acceptedClasses);
     const nextLastRequestAt = new Map(this.#lastRequestAt);
+    const nextClassLastRequestAt = copyNestedMap(this.#classLastRequestAt);
     const snapshots: PoolDemandSnapshot[] = [];
 
     for (const pool of this.pools) {
@@ -100,7 +157,7 @@ export class TyrDemandReporter {
         throw new Error(`managed Tyr pool ${pool} is missing from local statistics`);
       }
 
-      const current = checkpoint(stats);
+      const current = checkpoint(stats.llm);
       const previous = this.#accepted.get(pool) ?? ZERO_CHECKPOINT;
       const recentAdmissions = delta(current.admitted, previous.admitted);
       const recentRejections = delta(current.rejected, previous.rejected);
@@ -115,6 +172,75 @@ export class TyrDemandReporter {
 
       if (recentAdmissions > 0 || recentRejections > 0) {
         nextLastRequestAt.set(pool, observedAt);
+      }
+
+      let admissionClasses: AdmissionClassDemandSnapshot[] | undefined;
+      if (stats.admissionClasses !== undefined) {
+        admissionClasses = [];
+        const previousByClass = this.#acceptedClasses.get(pool) ?? new Map();
+        const checkpointByClass = new Map<string, DemandCheckpoint>();
+        const lastRequestByClass =
+          nextClassLastRequestAt.get(pool) ?? new Map<string, string>();
+
+        for (const admissionClass of Object.keys(stats.admissionClasses.classes).sort()) {
+          const classStats = stats.admissionClasses.classes[admissionClass];
+          if (classStats === undefined) continue;
+
+          const classCurrent = classCheckpoint(classStats);
+          const classPrevious = previousByClass.get(admissionClass) ?? ZERO_CHECKPOINT;
+          const classRecentAdmissions = delta(
+            classCurrent.admitted,
+            classPrevious.admitted,
+          );
+          const classRecentRejections = delta(
+            classCurrent.rejected,
+            classPrevious.rejected,
+          );
+          const classRecentBudgetRejections = delta(
+            classCurrent.budgetRejected,
+            classPrevious.budgetRejected,
+          );
+          const classRecentConcurrencyRejections = delta(
+            classCurrent.concurrencyRejected,
+            classPrevious.concurrencyRejected,
+          );
+
+          if (classRecentAdmissions > 0 || classRecentRejections > 0) {
+            lastRequestByClass.set(admissionClass, observedAt);
+          }
+          const classLastRequestAt = lastRequestByClass.get(admissionClass);
+
+          admissionClasses.push({
+            admissionClass,
+            inFlight: classStats.inFlight,
+            recentAdmissions: classRecentAdmissions,
+            recentRejections: classRecentRejections,
+            recentBudgetRejections: classRecentBudgetRejections,
+            recentConcurrencyRejections: classRecentConcurrencyRejections,
+            protectedConcurrent: classStats.limits.protectedConcurrent ?? 0,
+            protectedConcurrentInUse: classStats.protectedConcurrentInUse,
+            borrowedConcurrent: classStats.borrowedConcurrent,
+            ...(stats.tokenBudget === undefined
+              ? {}
+              : {
+                  inFlightTokens: classStats.inFlightTokens,
+                  protectedInFlightTokens:
+                    classStats.limits.protectedInFlightTokens ?? 0,
+                  protectedTokensInUse: classStats.protectedTokensInUse,
+                  borrowedInFlightTokens: classStats.borrowedInFlightTokens,
+                }),
+            ...(classLastRequestAt === undefined
+              ? {}
+              : { lastRequestAt: classLastRequestAt }),
+          });
+          checkpointByClass.set(admissionClass, classCurrent);
+        }
+
+        classCheckpoints.set(pool, checkpointByClass);
+        nextClassLastRequestAt.set(pool, lastRequestByClass);
+      } else {
+        classCheckpoints.delete(pool);
+        nextClassLastRequestAt.delete(pool);
       }
 
       const tokenBudget = stats.tokenBudget;
@@ -135,13 +261,16 @@ export class TyrDemandReporter {
               availableTokens: tokenBudget.available,
             }),
         ...(lastRequestAt === undefined ? {} : { lastRequestAt }),
+        ...(admissionClasses === undefined ? {} : { admissionClasses }),
       });
       checkpoints.set(pool, current);
     }
 
     this.#pending = {
       checkpoints,
+      classCheckpoints,
       lastRequestAt: nextLastRequestAt,
+      classLastRequestAt: nextClassLastRequestAt,
     };
     return snapshots;
   }
@@ -154,9 +283,17 @@ export class TyrDemandReporter {
     for (const [pool, value] of pending.checkpoints) {
       this.#accepted.set(pool, value);
     }
+    this.#acceptedClasses.clear();
+    for (const [pool, values] of pending.classCheckpoints) {
+      this.#acceptedClasses.set(pool, new Map(values));
+    }
     this.#lastRequestAt.clear();
     for (const [pool, value] of pending.lastRequestAt) {
       this.#lastRequestAt.set(pool, value);
+    }
+    this.#classLastRequestAt.clear();
+    for (const [pool, values] of pending.classLastRequestAt) {
+      this.#classLastRequestAt.set(pool, new Map(values));
     }
     this.#pending = undefined;
   }

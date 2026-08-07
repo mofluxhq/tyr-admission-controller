@@ -5,18 +5,35 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.22.0 is built on
+Tyr 0.23.0 is built on
 [`async-bulkhead-llm@3.15.1`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, bounded
 identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.22.0, identity-aware distributed admission data plane,
+> **Status:** v0.23.0, identity-aware distributed admission data plane,
 > proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
 > first-class Latchflo managed mode with configuration-driven registration,
 > expiring grants, readiness, persisted agent credentials, demand reporting,
 > and fail-closed expiration behavior.
+
+## What shipped in v0.23.0
+
+- Added bounded per-admission-class demand snapshots to managed-mode Latchflo
+  heartbeats. Each configured class reports live in-flight work, accepted-
+  heartbeat admission/rejection deltas, budget/concurrency rejection pressure,
+  protected utilization, and shared-capacity borrowing.
+- Added per-class accepted-heartbeat checkpoints and `lastRequestAt` tracking, so
+  failed heartbeats cannot discard class demand before Latchflo sees it.
+- Added `capabilities.admissionClassDemand: true` during Latchflo registration.
+  The extension is additive: current Latchflo 0.8.x ignores the nested class
+  demand field while continuing to consume the existing pool-level snapshot.
+- Kept policy ownership explicit. Tyr observes and reports class demand; it does
+  not autonomously lend protected floors. A future class-demand-aware Latchflo
+  allocator can resize floors through the existing higher-revision grant path.
+- Runtime dependencies remain `async-bulkhead-llm@3.15.1` and its
+  `async-bulkhead-ts@1.0.1` dependency.
 
 ## What shipped in v0.22.0
 
@@ -216,7 +233,7 @@ For each provider request, Tyr:
 5. When capacity-aware routing is enabled, compares the local grant partition
    with fresh peer snapshots and may forward the request once to a roomier Tyr.
 6. The serving Tyr captures its complete versioned limit snapshot, computes its
-   own authoritative reservation, and calls the native v3.14 `run()` path in
+   own authoritative reservation, and calls the native v3.15 `run()` path in
    the configured `enforce` or `observe` mode.
 7. Reconciles live and final provider usage. Budgeted streams progressively
    return processed capacity when cumulative usage is available; native observe
@@ -831,7 +848,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.22.0
+    version: 0.23.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -853,8 +870,9 @@ bounded by `requestTimeoutMs`.
 
 ### Demand-aware Latchflo heartbeats
 
-Tyr 0.18 automatically derives one snapshot per managed pool from its existing
-statistics and includes it in the heartbeat accepted by Latchflo 0.6:
+Tyr automatically derives one snapshot per managed pool from its existing
+statistics. Tyr 0.23.0 extends that additive heartbeat with bounded per-class
+demand while preserving the original pool-level fields:
 
 ```json
 {
@@ -870,7 +888,25 @@ statistics and includes it in the heartbeat accepted by Latchflo 0.6:
       "recentConcurrencyRejections": 1,
       "inFlightTokens": 9200,
       "availableTokens": 800,
-      "lastRequestAt": "2026-08-01T19:59:59.900Z"
+      "lastRequestAt": "2026-08-01T19:59:59.900Z",
+      "admissionClasses": [
+        {
+          "admissionClass": "premium",
+          "inFlight": 8,
+          "recentAdmissions": 24,
+          "recentRejections": 3,
+          "recentBudgetRejections": 2,
+          "recentConcurrencyRejections": 1,
+          "protectedConcurrent": 4,
+          "protectedConcurrentInUse": 4,
+          "borrowedConcurrent": 4,
+          "inFlightTokens": 6100,
+          "protectedInFlightTokens": 4000,
+          "protectedTokensInUse": 4000,
+          "borrowedInFlightTokens": 2100,
+          "lastRequestAt": "2026-08-01T19:59:59.900Z"
+        }
+      ]
     }
   ]
 }
@@ -880,6 +916,18 @@ statistics and includes it in the heartbeat accepted by Latchflo 0.6:
 process-lifetime totals. Current in-flight work keeps a pool demanding even when
 no new arrivals occurred during the interval. A failed heartbeat does not
 advance the checkpoint, so its activity is retried rather than lost.
+
+The same accepted-heartbeat semantics apply independently to every configured
+admission class. `admissionClasses` is deterministic and bounded by Tyr's fixed
+class table (at most 64 entries); tenant, application, subject, and other raw
+identity values never become heartbeat keys. `protected*` and `borrowed*` fields
+report current use of the active floor and shared remainder. They are telemetry,
+not a request for Tyr to resize its own limits.
+
+Tyr 0.23.0 advertises `admissionClassDemand: true` at registration. Latchflo
+0.8.x safely ignores the additive nested class snapshots, so 0.23.0 remains
+compatible with the current control plane while providing the protocol surface
+for a later class-demand-aware allocator.
 
 Tyr omits token fields for concurrency-only pools and currently omits
 `oldestPendingMs` because the underlying queue statistics do not expose waiter
@@ -1000,7 +1048,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.22.0 .
+docker build -t tyr-admission-controller:0.23.0 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -1011,7 +1059,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.22.0
+  tyr-admission-controller:0.23.0
 ```
 
 Or use the included Compose example:
@@ -1127,7 +1175,7 @@ counted by `tyr_audit_write_failures_total`.
   unavailable peers are ignored, and a routed rejection is returned without a
   second automatic attempt.
 - Routing, upstream, estimator, timeout, and admission-mode configuration is
-  loaded only at startup. Only the v3.14 admission-limit snapshot is remotely
+  loaded only at startup. Only the v3.15 admission-limit snapshot is remotely
   replaceable at runtime.
 - Adaptive calibration is local, learned only from live observations, and is not
   persisted across restarts.
@@ -1158,7 +1206,7 @@ src/
   index.ts          validated process entrypoint and managed-mode lifecycle
   latchflo.ts        built-in Latchflo agent, retry, readiness, demand heartbeat, and token persistence
   demand.ts          accepted-heartbeat demand deltas derived from live pool statistics
-  pools.ts          v3.14 policy runtime, progressive reconciliation, versioned limits, observe mode, and drain
+  pools.ts          v3.15 policy runtime, progressive reconciliation, versioned limits, observe mode, and drain
   routing.ts        protected peer snapshots and request-specific replica selection
   server.ts         HTTP proxy, routing, admission, telemetry, timeouts, and shutdown
   telemetry.ts      Prometheus metrics and structured admission audit events

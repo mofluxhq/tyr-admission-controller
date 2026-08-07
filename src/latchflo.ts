@@ -820,8 +820,13 @@ export class LatchfloTyrAgent {
           // admissionClassLimits unless it declares that it can apply the
           // per-replica class partition. Tyr consumes grant-borne class
           // limits (see resolveGrantAdmissionClasses), so this is truthful.
-          // Older control planes ignore the field.
-          capabilities: { admissionClasses: true },
+          // `admissionClassDemand` means heartbeats may also carry bounded
+          // per-class demand snapshots. Latchflo 0.8.x ignores unknown
+          // capability and heartbeat fields, preserving wire compatibility.
+          capabilities: {
+            admissionClasses: true,
+            admissionClassDemand: true,
+          },
         }),
       });
     } catch (error) {
