@@ -98,6 +98,27 @@ type FailureReporter = (event: {
   reason: LatchfloFailureReason;
 }) => void;
 
+type GrantOccupancyEvidence = {
+  readonly observedAt: string;
+  readonly inFlight: number;
+  readonly pending: number;
+  readonly inFlightTokens?: number;
+};
+
+type DrainEvidenceTarget = {
+  readonly revision: number;
+  readonly maxConcurrent: number;
+  readonly tokenBudget?: number;
+  readonly requireTokenEvidence: boolean;
+};
+
+/**
+ * While a shrink-by-attrition grant is draining, report occupancy more quickly
+ * than the ordinary managed-mode heartbeat cadence. This is intentionally
+ * bounded and only active for managed pools that have acknowledged a shrink.
+ */
+const DRAIN_EVIDENCE_HEARTBEAT_INTERVAL_MS = 500;
+
 function reportFailure(
   reporter: FailureReporter | undefined,
   event: Parameters<FailureReporter>[0],
@@ -575,6 +596,36 @@ function limitsEqual(
   );
 }
 
+function isCapacityShrink(
+  current: LLMAdmissionLimits,
+  desired: TyrAdmissionLimits,
+): boolean {
+  if (desired.maxConcurrent < current.maxConcurrent) return true;
+  const currentBudget = current.tokenBudget?.budget;
+  const desiredBudget = desired.tokenBudget?.budget;
+  return (
+    desiredBudget !== undefined &&
+    (currentBudget === undefined || desiredBudget < currentBudget)
+  );
+}
+
+function drainEvidenceTarget(
+  current: LLMAdmissionLimits,
+  grant: CapacityGrant,
+): DrainEvidenceTarget {
+  const currentBudget = current.tokenBudget?.budget;
+  const desiredBudget = grant.limits.tokenBudget?.budget;
+  const requireTokenEvidence =
+    desiredBudget !== undefined &&
+    (currentBudget === undefined || desiredBudget < currentBudget);
+  return {
+    revision: grant.revision,
+    maxConcurrent: grant.limits.maxConcurrent,
+    ...(desiredBudget === undefined ? {} : { tokenBudget: desiredBudget }),
+    requireTokenEvidence,
+  };
+}
+
 /**
  * Decides which admission-class table to apply for one grant.
  *
@@ -696,8 +747,10 @@ export class LatchfloTyrAgent {
     string,
     NonNullable<LLMAdmissionLimits["admissionClasses"]>
   >();
+  readonly #drainEvidenceTargets = new Map<string, DrainEvidenceTarget>();
   #agentToken: string | undefined;
   #registration: Promise<void> | undefined;
+  #heartbeatTail: Promise<void> = Promise.resolve();
   #controllerEpoch: number | undefined;
   #controlPlaneClock:
     | { readonly serverTimeMs: number; readonly observedAtMs: number }
@@ -768,6 +821,7 @@ export class LatchfloTyrAgent {
 
   stop(): void {
     this.#running = false;
+    this.#drainEvidenceTargets.clear();
     if (this.#heartbeatTimer !== undefined) clearTimeout(this.#heartbeatTimer);
     if (this.#pollTimer !== undefined) clearTimeout(this.#pollTimer);
     if (this.#expirationTimer !== undefined) clearTimeout(this.#expirationTimer);
@@ -826,6 +880,11 @@ export class LatchfloTyrAgent {
           capabilities: {
             admissionClasses: true,
             admissionClassDemand: true,
+            // Tyr 0.24 includes bounded occupancy evidence on applied grant
+            // acknowledgements and immediately follows acknowledged shrinks
+            // with a fresh demand heartbeat. Older Latchflo releases ignore
+            // this additive capability and acknowledgement field.
+            grantOccupancyAck: true,
           },
         }),
       });
@@ -871,7 +930,18 @@ export class LatchfloTyrAgent {
     await this.#ensureRegistered();
   }
 
-  async #heartbeat(): Promise<void> {
+  async #heartbeat(): Promise<readonly PoolDemandSnapshot[] | undefined> {
+    const heartbeat = this.#heartbeatTail
+      .catch(() => undefined)
+      .then(() => this.#heartbeatOnce());
+    this.#heartbeatTail = heartbeat.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await heartbeat;
+  }
+
+  async #heartbeatOnce(): Promise<readonly PoolDemandSnapshot[] | undefined> {
     const demand = await this.options.demandProvider?.();
     const response = await this.#authorizedFetch(
       `/v1/agents/${encodeURIComponent(this.options.instanceId)}/heartbeat`,
@@ -887,6 +957,90 @@ export class LatchfloTyrAgent {
     );
     if (!response.ok) throw await responseError("heartbeat", response);
     this.options.onDemandAccepted?.();
+    return demand;
+  }
+
+  #occupancy(pool: string): GrantOccupancyEvidence | undefined {
+    const stats = this.options.control.stats()[pool];
+    if (stats === undefined) return undefined;
+    return {
+      observedAt: new Date().toISOString(),
+      inFlight: stats.bulkhead.inFlight,
+      pending: stats.bulkhead.pending,
+      ...(stats.tokenBudget === undefined
+        ? {}
+        : { inFlightTokens: stats.tokenBudget.inFlightTokens }),
+    };
+  }
+
+  #publishedDrainTargetReady(
+    occupancy: PoolDemandSnapshot,
+    target: DrainEvidenceTarget,
+  ): boolean {
+    if (occupancy.inFlight > target.maxConcurrent) return false;
+    if (!target.requireTokenEvidence) return true;
+    return (
+      occupancy.inFlightTokens !== undefined &&
+      target.tokenBudget !== undefined &&
+      occupancy.inFlightTokens <= target.tokenBudget
+    );
+  }
+
+  #commitPublishedDrainEvidence(
+    demand: readonly PoolDemandSnapshot[] | undefined,
+  ): void {
+    if (demand === undefined) return;
+    const publishedByPool = new Map(
+      demand.map((snapshot) => [snapshot.pool, snapshot]),
+    );
+    for (const [pool, target] of this.#drainEvidenceTargets) {
+      const occupancy = publishedByPool.get(pool);
+      if (
+        occupancy !== undefined &&
+        this.#publishedDrainTargetReady(occupancy, target)
+      ) {
+        this.#drainEvidenceTargets.delete(pool);
+      }
+    }
+  }
+
+  #drainEvidenceHeartbeatDelay(): number {
+    return Math.min(
+      this.#heartbeatIntervalMs,
+      DRAIN_EVIDENCE_HEARTBEAT_INTERVAL_MS,
+    );
+  }
+
+  async #publishPostAckDrainEvidence(): Promise<void> {
+    if (
+      this.#drainEvidenceTargets.size === 0 ||
+      this.options.demandProvider === undefined
+    ) {
+      return;
+    }
+    try {
+      // This call is intentionally sequenced after a successful grant ACK.
+      // The heartbeat queue guarantees it cannot collapse into an older
+      // in-flight heartbeat that Latchflo observed before ackAt.
+      const demand = await this.#heartbeat();
+      this.#commitPublishedDrainEvidence(demand);
+      if (this.#drainEvidenceTargets.size > 0) {
+        this.#scheduleHeartbeat(this.#drainEvidenceHeartbeatDelay());
+      }
+    } catch (error) {
+      const requestError = normalizeRequestError(
+        error,
+        "post-ack drain evidence heartbeat",
+      );
+      reportFailure(this.options.onFailure, {
+        operation: "heartbeat",
+        reason: requestError.retryable ? "retryable" : "permanent",
+      });
+      this.#logger.warn(
+        "post-ack drain evidence heartbeat failed; ordinary heartbeat retry remains active",
+        requestError,
+      );
+    }
   }
 
   async #poll(): Promise<void> {
@@ -951,6 +1105,7 @@ export class LatchfloTyrAgent {
 
     const current = this.options.control.limits();
     const updates: PoolLimitsUpdate[] = [];
+    const shrinkTargets = new Map<string, DrainEvidenceTarget>();
     for (const grant of state.grants) {
       const applied = current[grant.pool];
       if (applied === undefined) {
@@ -981,6 +1136,9 @@ export class LatchfloTyrAgent {
         this.#setReady(false);
         return;
       }
+      if (isCapacityShrink(applied, grant.limits)) {
+        shrinkTargets.set(grant.pool, drainEvidenceTarget(applied, grant));
+      }
       updates.push(
         grantUpdate(grant, grant.revision, classes.admissionClasses),
       );
@@ -1003,11 +1161,22 @@ export class LatchfloTyrAgent {
       }
     }
 
+    for (const [pool, target] of this.#drainEvidenceTargets) {
+      if (desiredByPool.get(pool)?.revision !== target.revision) {
+        this.#drainEvidenceTargets.delete(pool);
+      }
+    }
+
     this.#grants.clear();
     for (const grant of state.grants) {
       this.#grants.set(grant.pool, grant);
-      await this.#ack(grant, "applied");
+      const acknowledged = await this.#ack(grant, "applied");
+      const shrinkTarget = shrinkTargets.get(grant.pool);
+      if (acknowledged && shrinkTarget !== undefined) {
+        this.#drainEvidenceTargets.set(grant.pool, shrinkTarget);
+      }
     }
+    await this.#publishPostAckDrainEvidence();
     this.#setReady(this.#hasCompleteUnexpiredGrantSet());
     this.#scheduleExpiration();
   }
@@ -1016,8 +1185,10 @@ export class LatchfloTyrAgent {
     grant: CapacityGrant,
     status: "applied" | "rejected",
     reason?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
+      const occupancy =
+        status === "applied" ? this.#occupancy(grant.pool) : undefined;
       const response = await this.#authorizedFetch(
         `/v1/agents/${encodeURIComponent(this.options.instanceId)}/ack`,
         {
@@ -1029,6 +1200,9 @@ export class LatchfloTyrAgent {
             revision: grant.revision,
             status,
             ...(reason === undefined ? {} : { reason }),
+            ...(occupancy === undefined
+              ? {}
+              : { appliedAt: occupancy.observedAt, occupancy }),
           }),
         },
       );
@@ -1037,7 +1211,9 @@ export class LatchfloTyrAgent {
         this.#logger.warn(
           `grant acknowledgement failed: ${await readError(response)}`,
         );
+        return false;
       }
+      return true;
     } catch (error) {
       // Acknowledgement delivery is best-effort. Local lease enforcement and
       // expiration scheduling must still complete after limits were applied.
@@ -1046,6 +1222,7 @@ export class LatchfloTyrAgent {
         reason: "transport_error",
       });
       this.#logger.warn("grant acknowledgement failed", error);
+      return false;
     }
   }
 
@@ -1060,10 +1237,13 @@ export class LatchfloTyrAgent {
 
   async #runHeartbeatLoop(): Promise<void> {
     try {
-      await this.#heartbeat();
+      const demand = await this.#heartbeat();
       this.#heartbeatFailures = 0;
+      this.#commitPublishedDrainEvidence(demand);
       this.#scheduleHeartbeat(
-        jitteredInterval(this.#heartbeatIntervalMs, this.#random),
+        this.#drainEvidenceTargets.size > 0
+          ? this.#drainEvidenceHeartbeatDelay()
+          : jitteredInterval(this.#heartbeatIntervalMs, this.#random),
       );
     } catch (error) {
       const requestError = normalizeRequestError(error, "Latchflo heartbeat");
@@ -1217,7 +1397,10 @@ export class LatchfloTyrAgent {
       });
       this.#logger.error("failed to apply Latchflo expiration kill switch", result);
     } else {
-      for (const grant of expired) this.#grants.delete(grant.pool);
+      for (const grant of expired) {
+        this.#grants.delete(grant.pool);
+        this.#drainEvidenceTargets.delete(grant.pool);
+      }
       this.#logger.warn(
         `failed closed ${expired.length} Tyr pool(s) after Latchflo grants expired`,
       );

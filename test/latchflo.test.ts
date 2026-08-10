@@ -772,7 +772,11 @@ describe("Latchflo admission-class grants", () => {
     expect(stub.registrations[0]).toMatchObject({
       instanceId: "tyr-a",
       pools: ["openai-primary"],
-      capabilities: { admissionClasses: true, admissionClassDemand: true },
+      capabilities: {
+        admissionClasses: true,
+        admissionClassDemand: true,
+        grantOccupancyAck: true,
+      },
     });
     agent.stop();
   });
@@ -1093,6 +1097,164 @@ describe("Latchflo admission-class grants", () => {
 
     await expect(agent.start()).rejects.toThrow(/reserved class ID/);
     expect(agent.ready()).toBe(false);
+    agent.stop();
+  });
+});
+
+describe("Latchflo acknowledged capacity handoff evidence", () => {
+  it("publishes post-ack occupancy and accelerates until the published drain is safe", async () => {
+    const pool = "openai-primary";
+    let revision = 10;
+    let maxConcurrent = 8;
+    let tokenBudget = 16_000;
+    let inFlight = 6;
+    let inFlightTokens = 12_000;
+    let current: LLMAdmissionLimits = {
+      revision: 0,
+      maxConcurrent: 0,
+      maxQueue: 0,
+      tokenBudget: { budget: 0, highPriorityReserve: 0 },
+    };
+    const events: Array<{ type: "ack" | "heartbeat"; body: unknown }> = [];
+
+    const control: TyrControlPlane = {
+      limits: () => ({ [pool]: current }),
+      stats: () => ({
+        [pool]: {
+          bulkhead: { inFlight, pending: 0 },
+          tokenBudget: { inFlightTokens },
+        } as unknown as TyrPoolStats,
+      }),
+      applyLimits: (updates) => {
+        const update = updates[0];
+        if (update === undefined) {
+          return { applied: false, reason: "unknown_pool", pool };
+        }
+        const previous = current;
+        current = update.limits;
+        return {
+          applied: true,
+          pools: {
+            [pool]: {
+              previous,
+              current,
+              ...(update.provenance === undefined
+                ? {}
+                : { provenance: update.provenance }),
+            },
+          },
+        };
+      },
+    };
+
+    const state = (): string =>
+      JSON.stringify({
+        controllerEpoch: 7,
+        serverTime: new Date().toISOString(),
+        heartbeatIntervalMs: 10_000,
+        pollIntervalMs: 10_000,
+        grants: [
+          {
+            grantId: `00000000-0000-4000-8000-${String(revision).padStart(12, "0")}`,
+            instanceId: "tyr-a",
+            pool,
+            controllerEpoch: 7,
+            revision,
+            issuedAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 30_000).toISOString(),
+            limits: {
+              revision,
+              maxConcurrent,
+              maxQueue: 0,
+              tokenBudget: { budget: tokenBudget, highPriorityReserve: 0 },
+            },
+          },
+        ],
+      });
+
+    const fetchImpl: typeof globalThis.fetch = (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/desired-state")) {
+        return Promise.resolve(
+          new Response(state(), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      if (url.endsWith("/ack")) {
+        events.push({
+          type: "ack",
+          body: JSON.parse(String(init?.body ?? "{}")),
+        });
+      } else if (url.endsWith("/heartbeat")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          demand?: Array<{ inFlight?: number }>;
+        };
+        events.push({ type: "heartbeat", body });
+        if (revision === 11 && body.demand?.[0]?.inFlight === 6) {
+          inFlight = 4;
+          inFlightTokens = 8_000;
+        }
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    };
+
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: [pool],
+      agentToken: "persisted-token",
+      control,
+      fetch: fetchImpl,
+      demandProvider: () => [
+        {
+          pool,
+          observedAt: new Date().toISOString(),
+          inFlight,
+          pending: 0,
+          recentAdmissions: 0,
+          recentRejections: 0,
+          recentBudgetRejections: 0,
+          recentConcurrencyRejections: 0,
+          inFlightTokens,
+          availableTokens: Math.max(0, tokenBudget - inFlightTokens),
+        },
+      ],
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    await waitFor(() => events.some((event) => event.type === "heartbeat"));
+    events.length = 0;
+
+    revision = 11;
+    maxConcurrent = 4;
+    tokenBudget = 8_000;
+    await agent.pollNow();
+
+    expect(events[0]?.type).toBe("ack");
+    expect(events[0]?.body).toMatchObject({
+      status: "applied",
+      revision: 11,
+      occupancy: { inFlight: 6, inFlightTokens: 12_000 },
+    });
+    expect(events[1]?.type).toBe("heartbeat");
+    expect(events[1]?.body).toMatchObject({
+      demand: [{ pool, inFlight: 6, inFlightTokens: 12_000 }],
+    });
+    expect(inFlight).toBe(4);
+    expect(inFlightTokens).toBe(8_000);
+
+    await waitFor(
+      () => events.filter((event) => event.type === "heartbeat").length >= 2,
+      1_500,
+    );
+    expect(
+      events.filter((event) => event.type === "heartbeat").at(-1)?.body,
+    ).toMatchObject({
+      demand: [{ pool, inFlight: 4, inFlightTokens: 8_000 }],
+    });
     agent.stop();
   });
 });

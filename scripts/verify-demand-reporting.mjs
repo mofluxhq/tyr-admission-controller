@@ -411,6 +411,7 @@ try {
   assert.deepEqual(registrationBodies[0]?.capabilities, {
     admissionClasses: true,
     admissionClassDemand: true,
+    grantOccupancyAck: true,
   });
   assert.equal(mode.ready(), true);
   assert.deepEqual(
@@ -434,11 +435,26 @@ try {
     },
   );
 
+  const heartbeatCountBeforeIdle = heartbeatBodies.length;
   current = poolStats({ admitted: 4, rejected: 2, budgetRejected: 2 });
-  await waitFor(() => heartbeatBodies.length > 1);
-  assert.equal(heartbeatBodies[1].demand[0].recentAdmissions, 0);
-  assert.equal(heartbeatBodies[1].demand[0].recentRejections, 0);
-  assert.equal(heartbeatBodies[1].demand[0].inFlight, 0);
+
+  // Tyr 0.24 can publish a post-ACK occupancy heartbeat before the ordinary
+  // managed-mode cadence. Find the first heartbeat after this state change
+  // that actually observes the idle pool rather than relying on array index 1.
+  const idleHeartbeat = () =>
+    heartbeatBodies.slice(heartbeatCountBeforeIdle).find((body) => {
+      const snapshot = body?.demand?.[0];
+      return (
+        snapshot?.inFlight === 0 &&
+        snapshot.recentAdmissions === 0 &&
+        snapshot.recentRejections === 0
+      );
+    });
+
+  await waitFor(() => idleHeartbeat() !== undefined);
+  assert.equal(idleHeartbeat().demand[0].recentAdmissions, 0);
+  assert.equal(idleHeartbeat().demand[0].recentRejections, 0);
+  assert.equal(idleHeartbeat().demand[0].inFlight, 0);
 } finally {
   mode.stop();
 }

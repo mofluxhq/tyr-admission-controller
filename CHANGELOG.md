@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-07
+
+### Added
+
+- Added `capabilities.grantOccupancyAck: true` to Latchflo registration and
+  additive bounded occupancy evidence on successful `applied` grant
+  acknowledgements: `appliedAt`, `inFlight`, `pending`, and `inFlightTokens`
+  when the pool exposes token occupancy.
+- Added executable handoff verification and focused unit coverage for strict
+  acknowledgement-before-heartbeat ordering, unsafe first evidence, an
+  attrition race while the heartbeat response is in flight, and eventual safe
+  evidence publication.
+
+### Changed
+
+- After a successfully acknowledged higher-revision physical-pool shrink, Tyr
+  immediately publishes a distinct post-ack demand heartbeat. While the exact
+  occupancy snapshot that Tyr actually published remains above the new
+  concurrency or token ceiling, managed mode temporarily uses a bounded 500 ms
+  heartbeat cadence and automatically returns to the configured cadence once a
+  safe snapshot has been published.
+- Serialized managed-mode heartbeat calls so post-ack evidence cannot reuse or
+  race with a pre-ack request. Drain-target completion is evaluated against the
+  exact sent snapshot rather than a newer local read, preserving proof ordering
+  when requests finish during the control-plane round trip.
+- Updated release metadata, examples, README, roadmap, and verification
+  documentation to `0.24.0`. Runtime dependencies are unchanged from 0.23.0.
+
+### Compatibility
+
+- Latchflo 0.10.0 remains wire-compatible: its parsers ignore the additive
+  registration and acknowledgement fields and continue to commit handoffs only
+  after the existing `applied` acknowledgement plus a fresh post-ack heartbeat
+  proves occupancy is within the drain target.
+- Active work is never cancelled or preempted. Existing shrink-by-attrition
+  semantics remain authoritative, and lease expiry remains the conservative
+  control-plane fallback when acknowledgement/evidence publication fails.
+- Non-shrink grants, standalone mode, and pools without managed-mode demand
+  reporting retain their existing behavior.
+
 ## [0.23.0] - 2026-08-07
 
 ### Added
@@ -940,7 +980,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.20.1...v0.21.0

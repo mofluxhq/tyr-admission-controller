@@ -5,18 +5,45 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.23.0 is built on
+Tyr 0.24.0 is built on
 [`async-bulkhead-llm@3.15.1`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, bounded
 identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.23.0, identity-aware distributed admission data plane,
+> **Status:** v0.24.0, identity-aware distributed admission data plane,
 > proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
 > first-class Latchflo managed mode with configuration-driven registration,
 > expiring grants, readiness, persisted agent credentials, demand reporting,
 > and fail-closed expiration behavior.
+
+## What shipped in v0.24.0
+
+- Added acknowledged capacity-handoff evidence for Latchflo-managed physical
+  pool shrinks. After Tyr installs a lower complete grant and Latchflo accepts
+  the normal `applied` acknowledgement, Tyr immediately publishes a distinct
+  post-ack demand heartbeat instead of waiting for the ordinary heartbeat
+  cadence.
+- Added additive `capabilities.grantOccupancyAck: true` registration metadata
+  and bounded occupancy evidence on successful grant acknowledgements
+  (`appliedAt`, `inFlight`, `pending`, and `inFlightTokens` when available).
+  Latchflo 0.10.0 ignores these unknown additive fields and continues to use
+  the existing acknowledgement plus fresh-heartbeat proof.
+- While a successfully acknowledged shrink remains above its new concurrency or
+  token ceiling, Tyr temporarily publishes demand at a bounded 500 ms cadence.
+  It automatically returns to Latchflo's configured heartbeat cadence after an
+  exact published snapshot proves the drain target is safe.
+- Serialized managed-mode heartbeats so a post-ack proof cannot collapse into a
+  pre-ack request. Drain completion is evaluated against the exact occupancy
+  snapshot actually sent, avoiding races when local work finishes while a
+  heartbeat response is in flight.
+- Active work is never cancelled or preempted. Shrinks still use the existing
+  attrition semantics, and Latchflo lease expiry remains the conservative
+  control-plane fallback when an acknowledgement or fresh proof cannot be
+  obtained.
+- Runtime dependencies remain `async-bulkhead-llm@3.15.1` and its
+  `async-bulkhead-ts@1.0.1` dependency.
 
 ## What shipped in v0.23.0
 
@@ -848,7 +875,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.23.0
+    version: 0.24.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -871,8 +898,8 @@ bounded by `requestTimeoutMs`.
 ### Demand-aware Latchflo heartbeats
 
 Tyr automatically derives one snapshot per managed pool from its existing
-statistics. Tyr 0.23.0 extends that additive heartbeat with bounded per-class
-demand while preserving the original pool-level fields:
+statistics. Tyr 0.24.0 carries forward bounded per-class demand in that additive
+heartbeat while preserving the original pool-level fields:
 
 ```json
 {
@@ -924,16 +951,36 @@ identity values never become heartbeat keys. `protected*` and `borrowed*` fields
 report current use of the active floor and shared remainder. They are telemetry,
 not a request for Tyr to resize its own limits.
 
-Tyr 0.23.0 advertises `admissionClassDemand: true` at registration. Latchflo
-0.8.x safely ignores the additive nested class snapshots, so 0.23.0 remains
-compatible with the current control plane while providing the protocol surface
-for a later class-demand-aware allocator.
+Tyr 0.24.0 advertises `admissionClassDemand: true` and the additive
+`grantOccupancyAck: true` capability at registration. Older control planes that
+ignore unknown capability fields remain compatible; Latchflo 0.10.0 consumes
+class demand and uses the existing normal grant acknowledgement plus fresh
+heartbeat ordering for safe capacity handoffs.
 
 Tyr omits token fields for concurrency-only pools and currently omits
 `oldestPendingMs` because the underlying queue statistics do not expose waiter
 age. Latchflo can still age continuous demand from successive reports. Missing
 or stale telemetry remains protected by Latchflo; it cannot cause a floor to be
 lent early.
+
+### Acknowledged capacity handoffs
+
+When Latchflo 0.10.0 restores capacity from a borrower, it can issue a lower
+complete physical-pool grant as a drain target. Tyr installs that higher
+revision locally first, so no new request can extend occupancy beyond the new
+ceiling. Active work is not revoked; the pool shrinks by attrition.
+
+Only after the `applied` acknowledgement succeeds does Tyr publish a separate
+demand heartbeat. If the exact published snapshot is still above the new
+`maxConcurrent` limit, or above a newly introduced/lower token budget, Tyr uses
+a bounded 500 ms evidence cadence until a published snapshot is at or below the
+target. Normal heartbeat cadence then resumes. Failed acknowledgements or
+heartbeats do not weaken local enforcement, and Latchflo can still fall back to
+lease expiry rather than double-allocating capacity.
+
+The acknowledgement's `occupancy` object is additive observability evidence;
+Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
+post-ack heartbeat remains the authoritative proof used by that control plane.
 
 `/readyz` remains `503` until every managed pool has a complete unexpired grant.
 A transient poll failure does not discard a still-valid lease. When a grant
@@ -1048,7 +1095,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.23.0 .
+docker build -t tyr-admission-controller:0.24.0 .
 ```
 
 Run it with a read-only mounted configuration:
@@ -1059,7 +1106,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.23.0
+  tyr-admission-controller:0.24.0
 ```
 
 Or use the included Compose example:

@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.23.0
+## Current baseline: v0.24.0
 
 The current release provides:
 
@@ -37,6 +37,10 @@ The current release provides:
   authenticated Latchflo heartbeats, including accepted-heartbeat
   admission/rejection deltas, protected/shared utilization, and live token
   pressure.
+- Acknowledged physical-capacity handoff evidence: shrink grants are installed
+  before acknowledgement, followed by a distinct fresh occupancy heartbeat and
+  bounded 500 ms evidence cadence until the exact published snapshot is within
+  the new ceiling.
 - Admission-linearized revisions and a bounded per-pool Latchflo provenance ledger
   containing grant ID, controller epoch, and expiration.
 - Exact grant-attribution response headers for admissions, bypasses, and
@@ -343,7 +347,33 @@ Outcome:
 - No raw tenant/application identity is added to runtime keys or control-plane
   demand cardinality.
 
-### v0.24.0 — Fleet coordination hardening
+### v0.24.0 — Acknowledged capacity-handoff evidence — shipped 2026-08-07
+
+Shipped:
+
+- Advertised the additive `grantOccupancyAck` capability and included bounded
+  current occupancy in successful grant acknowledgements.
+- Installed lower physical-pool grants before acknowledgement, then published a
+  distinct post-ack demand heartbeat so Latchflo can prove that borrowed
+  capacity actually drained before committing its staged expansion.
+- Added a bounded 500 ms evidence cadence while the exact published occupancy
+  remains above a successfully acknowledged shrink target; ordinary Latchflo
+  heartbeat cadence resumes automatically after safe evidence is published.
+- Serialized heartbeats and tied drain completion to the exact sent snapshot,
+  closing a race where local occupancy changes while the control-plane response
+  is in flight.
+- Preserved non-revoking shrink-by-attrition behavior and the control plane's
+  lease-expiry safety fallback.
+
+Outcome:
+
+- Latchflo 0.10.0 can reclaim borrowed capacity materially sooner than a normal
+  heartbeat/lease boundary without treating acknowledgement alone as proof that
+  capacity is free.
+- Tyr remains a small data plane: it reports and enforces the grant; Latchflo
+  still owns allocation and transfer policy.
+
+### v0.25.0 — Fleet coordination hardening
 
 **Target duration:** 4–6 weeks
 **Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas
@@ -380,7 +410,7 @@ Non-goals:
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.24.0
+**Target duration:** 3–5 weeks after v0.25.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:

@@ -521,9 +521,31 @@ describe("Tyr Latchflo demand reporting", () => {
       ],
     });
 
+    const heartbeatCountBeforeIdle = heartbeatBodies.length;
     current = poolStats({ admitted: 4, rejected: 2, budgetRejected: 2 });
-    await waitFor(() => heartbeatBodies.length > 1);
-    expect(heartbeatBodies[1]).toMatchObject({
+
+    // Tyr 0.24 may emit an additional post-ACK occupancy heartbeat when the
+    // applied grant tightens any capacity dimension. Do not assume the next
+    // managed heartbeat has a fixed array index; wait for a heartbeat emitted
+    // after this state transition that reflects the new idle occupancy.
+    const idleHeartbeat = (): unknown =>
+      heartbeatBodies.slice(heartbeatCountBeforeIdle).find((body) => {
+        const snapshot = (body as {
+          demand?: Array<{
+            inFlight?: number;
+            recentAdmissions?: number;
+            recentRejections?: number;
+          }>;
+        }).demand?.[0];
+        return (
+          snapshot?.inFlight === 0 &&
+          snapshot.recentAdmissions === 0 &&
+          snapshot.recentRejections === 0
+        );
+      });
+
+    await waitFor(() => idleHeartbeat() !== undefined);
+    expect(idleHeartbeat()).toMatchObject({
       demand: [
         {
           recentAdmissions: 0,
