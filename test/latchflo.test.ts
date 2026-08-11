@@ -776,6 +776,7 @@ describe("Latchflo admission-class grants", () => {
         admissionClasses: true,
         admissionClassDemand: true,
         grantOccupancyAck: true,
+        admissionClassOccupancyAck: true,
       },
     });
     agent.stop();
@@ -1254,6 +1255,333 @@ describe("Latchflo acknowledged capacity handoff evidence", () => {
       events.filter((event) => event.type === "heartbeat").at(-1)?.body,
     ).toMatchObject({
       demand: [{ pool, inFlight: 4, inFlightTokens: 8_000 }],
+    });
+    agent.stop();
+  });
+});
+
+describe("Latchflo acknowledged admission-class handoff evidence", () => {
+  it("publishes ordered class occupancy and accelerates until shared borrowing is safe", async () => {
+    const pool = "openai-primary";
+    let desiredRevision = 10;
+    let premiumInFlight = 8;
+    let premiumInFlightTokens = 16_000;
+    let current: LLMAdmissionLimits = {
+      revision: 10,
+      maxConcurrent: 8,
+      maxQueue: 0,
+      tokenBudget: { budget: 16_000, highPriorityReserve: 0 },
+      admissionClasses: {
+        premium: {
+          protectedConcurrent: 4,
+          maxConcurrent: 8,
+          protectedInFlightTokens: 8_000,
+          maxInFlightTokens: 16_000,
+        },
+        noisy: {
+          protectedConcurrent: 0,
+          maxConcurrent: 8,
+          protectedInFlightTokens: 0,
+          maxInFlightTokens: 16_000,
+        },
+      },
+    };
+    type ClassEvidence = {
+      readonly admissionClass?: string;
+      readonly borrowedConcurrent?: number;
+      readonly borrowedInFlightTokens?: number;
+    };
+    type EventBody = {
+      readonly status?: string;
+      readonly revision?: number;
+      readonly occupancy?: { readonly admissionClasses?: readonly ClassEvidence[] };
+      readonly demand?: readonly { readonly admissionClasses?: readonly ClassEvidence[] }[];
+    };
+    const events: Array<{ type: "ack" | "heartbeat"; body: EventBody }> = [];
+
+    const stats = (): TyrPoolStats => {
+      const premiumLimits = current.admissionClasses?.premium;
+      const noisyLimits = current.admissionClasses?.noisy;
+      if (premiumLimits === undefined || noisyLimits === undefined) {
+        throw new Error("class limits must be present");
+      }
+      const premiumProtectedConcurrent = premiumLimits.protectedConcurrent ?? 0;
+      const premiumProtectedTokens = premiumLimits.protectedInFlightTokens ?? 0;
+      const premiumProtectedConcurrentInUse = Math.min(
+        premiumInFlight,
+        premiumProtectedConcurrent,
+      );
+      const premiumProtectedTokensInUse = Math.min(
+        premiumInFlightTokens,
+        premiumProtectedTokens,
+      );
+      return {
+        bulkhead: { inFlight: premiumInFlight, pending: 0 },
+        tokenBudget: {
+          inFlightTokens: premiumInFlightTokens,
+          available: Math.max(0, 16_000 - premiumInFlightTokens),
+        },
+        admissionClasses: {
+          defaultClass: "noisy",
+          classes: {
+            noisy: {
+              limits: noisyLimits,
+              inFlight: 0,
+              protectedConcurrentInUse: 0,
+              borrowedConcurrent: 0,
+              inFlightTokens: 0,
+              protectedTokensInUse: 0,
+              borrowedInFlightTokens: 0,
+              admitted: 0,
+              released: 0,
+              rejected: 0,
+              rejectedByReason: {},
+              totalReserved: 0,
+              totalConsumed: 0,
+              totalRefunded: 0,
+              totalOverrun: 0,
+              totalBorrowedAdmissions: 0,
+              totalBorrowedTokensReserved: 0,
+            },
+            premium: {
+              limits: premiumLimits,
+              inFlight: premiumInFlight,
+              protectedConcurrentInUse: premiumProtectedConcurrentInUse,
+              borrowedConcurrent: Math.max(
+                0,
+                premiumInFlight - premiumProtectedConcurrentInUse,
+              ),
+              inFlightTokens: premiumInFlightTokens,
+              protectedTokensInUse: premiumProtectedTokensInUse,
+              borrowedInFlightTokens: Math.max(
+                0,
+                premiumInFlightTokens - premiumProtectedTokensInUse,
+              ),
+              admitted: 0,
+              released: 0,
+              rejected: 0,
+              rejectedByReason: {},
+              totalReserved: 0,
+              totalConsumed: 0,
+              totalRefunded: 0,
+              totalOverrun: 0,
+              totalBorrowedAdmissions: 0,
+              totalBorrowedTokensReserved: 0,
+            },
+          },
+          shared: {
+            maxConcurrent: 0,
+            inFlight: 0,
+            availableConcurrent: 0,
+            tokenBudget: { budget: 0, inFlightTokens: 0, available: 0 },
+          },
+        },
+      } as unknown as TyrPoolStats;
+    };
+
+    const desiredClasses = (): NonNullable<LLMAdmissionLimits["admissionClasses"]> =>
+      desiredRevision === 10
+        ? (current.admissionClasses as NonNullable<
+            LLMAdmissionLimits["admissionClasses"]
+          >)
+        : {
+            premium: {
+              protectedConcurrent: 4,
+              maxConcurrent: 8,
+              protectedInFlightTokens: 8_000,
+              maxInFlightTokens: 16_000,
+            },
+            noisy: {
+              protectedConcurrent: 2,
+              maxConcurrent: 8,
+              protectedInFlightTokens: 4_000,
+              maxInFlightTokens: 16_000,
+            },
+          };
+
+    const control: TyrControlPlane = {
+      limits: () => ({ [pool]: current }),
+      stats: () => ({ [pool]: stats() }),
+      applyLimits: (updates) => {
+        const update = updates[0];
+        if (update === undefined) {
+          return { applied: false, reason: "unknown_pool", pool };
+        }
+        const previous = current;
+        current = update.limits;
+        return {
+          applied: true,
+          pools: {
+            [pool]: {
+              previous,
+              current,
+              ...(update.provenance === undefined
+                ? {}
+                : { provenance: update.provenance }),
+            },
+          },
+        };
+      },
+    };
+
+    const demandProvider = () => {
+      const currentStats = stats();
+      const classes = currentStats.admissionClasses?.classes;
+      if (classes === undefined) throw new Error("class stats must be present");
+      return [
+        {
+          pool,
+          observedAt: new Date().toISOString(),
+          inFlight: premiumInFlight,
+          pending: 0,
+          recentAdmissions: 0,
+          recentRejections: 0,
+          recentBudgetRejections: 0,
+          recentConcurrencyRejections: 0,
+          inFlightTokens: premiumInFlightTokens,
+          availableTokens: Math.max(0, 16_000 - premiumInFlightTokens),
+          admissionClasses: Object.keys(classes)
+            .sort()
+            .map((admissionClass) => {
+              const state = classes[admissionClass];
+              if (state === undefined) throw new Error("class stat missing");
+              return {
+                admissionClass,
+                inFlight: state.inFlight,
+                recentAdmissions: 0,
+                recentRejections: 0,
+                recentBudgetRejections: 0,
+                recentConcurrencyRejections: 0,
+                protectedConcurrent: state.limits.protectedConcurrent ?? 0,
+                protectedConcurrentInUse: state.protectedConcurrentInUse,
+                borrowedConcurrent: state.borrowedConcurrent,
+                ...(state.limits.maxConcurrent === undefined
+                  ? {}
+                  : { maxConcurrent: state.limits.maxConcurrent }),
+                inFlightTokens: state.inFlightTokens,
+                protectedInFlightTokens:
+                  state.limits.protectedInFlightTokens ?? 0,
+                protectedTokensInUse: state.protectedTokensInUse,
+                borrowedInFlightTokens: state.borrowedInFlightTokens,
+                ...(state.limits.maxInFlightTokens === undefined
+                  ? {}
+                  : { maxInFlightTokens: state.limits.maxInFlightTokens }),
+              };
+            }),
+        },
+      ];
+    };
+
+    const fetchImpl: typeof globalThis.fetch = (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/desired-state")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              controllerEpoch: 7,
+              serverTime: new Date().toISOString(),
+              heartbeatIntervalMs: 10_000,
+              pollIntervalMs: 10_000,
+              grants: [
+                {
+                  grantId: `00000000-0000-4000-8000-${String(desiredRevision).padStart(12, "0")}`,
+                  instanceId: "tyr-a",
+                  pool,
+                  controllerEpoch: 7,
+                  revision: desiredRevision,
+                  issuedAt: new Date().toISOString(),
+                  expiresAt: new Date(Date.now() + 30_000).toISOString(),
+                  limits: {
+                    revision: desiredRevision,
+                    maxConcurrent: 8,
+                    maxQueue: 0,
+                    tokenBudget: { budget: 16_000, highPriorityReserve: 0 },
+                    admissionClasses: desiredClasses(),
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      if (url.endsWith("/ack")) {
+        events.push({
+          type: "ack",
+          body: JSON.parse(String(init?.body ?? "{}")),
+        });
+      } else if (url.endsWith("/heartbeat")) {
+        const body = JSON.parse(String(init?.body ?? "{}"));
+        events.push({ type: "heartbeat", body });
+        const premium = body.demand?.[0]?.admissionClasses?.find(
+          (entry: { admissionClass?: string }) => entry.admissionClass === "premium",
+        );
+        if (desiredRevision === 11 && premium?.borrowedConcurrent === 4) {
+          premiumInFlight = 6;
+          premiumInFlightTokens = 12_000;
+        }
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    };
+
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: [pool],
+      agentToken: "persisted-token",
+      control,
+      fetch: fetchImpl,
+      demandProvider,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    await waitFor(() => events.some((event) => event.type === "heartbeat"));
+    events.length = 0;
+
+    desiredRevision = 11;
+    await agent.pollNow();
+
+    expect(events[0]?.type).toBe("ack");
+    expect(events[0]?.body).toMatchObject({
+      status: "applied",
+      revision: 11,
+      occupancy: {
+        admissionClasses: expect.arrayContaining([
+          expect.objectContaining({
+            admissionClass: "premium",
+            borrowedConcurrent: 4,
+            borrowedInFlightTokens: 8_000,
+          }),
+          expect.objectContaining({
+            admissionClass: "noisy",
+            protectedConcurrent: 2,
+            protectedInFlightTokens: 4_000,
+          }),
+        ]),
+      },
+    });
+    expect(events[1]?.type).toBe("heartbeat");
+
+    await waitFor(
+      () => events.filter((event) => event.type === "heartbeat").length >= 2,
+      1_500,
+    );
+    const finalHeartbeat = events
+      .filter((event) => event.type === "heartbeat")
+      .at(-1)?.body;
+    expect(finalHeartbeat).toMatchObject({
+      demand: [
+        {
+          admissionClasses: expect.arrayContaining([
+            expect.objectContaining({
+              admissionClass: "premium",
+              borrowedConcurrent: 2,
+              borrowedInFlightTokens: 4_000,
+            }),
+          ]),
+        },
+      ],
     });
     agent.stop();
   });

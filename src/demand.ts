@@ -19,10 +19,12 @@ export type AdmissionClassDemandSnapshot = {
   readonly protectedConcurrent: number;
   readonly protectedConcurrentInUse: number;
   readonly borrowedConcurrent: number;
+  readonly maxConcurrent?: number;
   readonly inFlightTokens?: number;
   readonly protectedInFlightTokens?: number;
   readonly protectedTokensInUse?: number;
   readonly borrowedInFlightTokens?: number;
+  readonly maxInFlightTokens?: number;
   readonly lastRequestAt?: string;
 };
 
@@ -220,6 +222,9 @@ export class TyrDemandReporter {
             protectedConcurrent: classStats.limits.protectedConcurrent ?? 0,
             protectedConcurrentInUse: classStats.protectedConcurrentInUse,
             borrowedConcurrent: classStats.borrowedConcurrent,
+            ...(classStats.limits.maxConcurrent === undefined
+              ? {}
+              : { maxConcurrent: classStats.limits.maxConcurrent }),
             ...(stats.tokenBudget === undefined
               ? {}
               : {
@@ -228,6 +233,9 @@ export class TyrDemandReporter {
                     classStats.limits.protectedInFlightTokens ?? 0,
                   protectedTokensInUse: classStats.protectedTokensInUse,
                   borrowedInFlightTokens: classStats.borrowedInFlightTokens,
+                  ...(classStats.limits.maxInFlightTokens === undefined
+                    ? {}
+                    : { maxInFlightTokens: classStats.limits.maxInFlightTokens }),
                 }),
             ...(classLastRequestAt === undefined
               ? {}

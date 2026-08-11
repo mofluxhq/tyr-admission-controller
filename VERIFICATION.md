@@ -1,69 +1,86 @@
-# Tyr 0.24.0 verification
+# Tyr 0.25.0 verification
 
-Date: 2026-08-07
+Date: 2026-08-11
 
 ## Version alignment
 
-- Tyr package version: `0.24.0`
+- Tyr package version: `0.25.0`
 - Runtime dependency: `async-bulkhead-llm@3.15.1`
 - Transitive bulkhead dependency: `async-bulkhead-ts@1.0.1`
 - Bundled runtime artifacts remain unchanged:
   - `vendor/async-bulkhead-llm-3.15.1.tgz`
   - `vendor/async-bulkhead-ts-1.0.1.tgz`
   - `vendor/yaml-2.9.0.tgz`
-- `src/version.ts`, package metadata, examples, Compose image tag, and telemetry
-  build-info assertions report `0.24.0`.
+- `src/version.ts`, package metadata, managed-mode examples, demo image tag, and
+  telemetry build-info assertions report `0.25.0`.
 
-## Passed checks
+## Passed checks in this review environment
 
 - ESLint with zero warnings.
-- Strict TypeScript type-check.
+- Strict TypeScript type-check, including the new class-handoff unit coverage.
 - Production TypeScript build.
 - Validation of `config/tyr.example.yaml`.
 - Validation of `config/tyr.latchflo.example.yaml`.
-- Capacity-aware routing executable verification.
+- Capacity-aware routing executable verification, synchronized on completed
+  peer snapshot refreshes rather than a fixed startup sleep.
 - Protected admission-class executable verification.
-- Latchflo demand-reporting executable verification.
-- Acknowledged capacity-handoff executable verification, including:
-  - additive `grantOccupancyAck: true` registration capability;
-  - lower grant installed before an `applied` acknowledgement;
-  - acknowledgement occupancy evidence for concurrency and token pressure;
-  - a distinct post-ack heartbeat carrying the unsafe occupancy snapshot;
-  - race coverage where local work drains while that heartbeat response is in
-    flight;
-  - continued bounded evidence publication until Tyr has actually published a
-    snapshot within the shrink target.
+- Latchflo demand-reporting executable verification, including additive hard
+  `maxConcurrent` / `maxInFlightTokens` class evidence and the
+  `admissionClassOccupancyAck` registration capability.
+- Existing acknowledged physical capacity-handoff executable verification.
+- New acknowledged admission-class handoff executable verification, including:
+  - class-only protected-floor restoration with no physical-pool shrink;
+  - lower shared concurrency and token remainder after the restored floor is
+    installed;
+  - successful `applied` acknowledgement before the fresh class heartbeat;
+  - bounded class occupancy in the acknowledgement;
+  - an intentionally unsafe first post-ack class snapshot;
+  - attrition from 4 borrowed concurrent / 8,000 borrowed tokens to the safe
+    target of 2 borrowed concurrent / 4,000 borrowed tokens;
+  - continued bounded 500 ms evidence publication until the exact sent snapshot
+    is safe, then automatic return to the ordinary cadence;
+  - a second class-only transition lowering premium hard concurrency/token
+    ceilings from 8 / 16,000 to 5 / 10,000 while occupancy is 6 / 12,000, with
+    evidence continuing until attrition reaches the new hard limits.
 - Progressive-reconciliation executable verification.
 - ESM smoke imports.
-- Prometheus telemetry smoke verification, including `tyr_build_info{version="0.24.0"}`.
-- `npm pack --dry-run` for `tyr-admission-controller@0.24.0` (46 packaged files; no nested release archive).
-- A temporary Latchflo 0.10.0 compatibility run against the packed Tyr 0.24.0 artifact passed all four existing integration scenarios after updating only their Tyr fixture/version assertions: managed grant application/expiration, capacity-aware peer routing, progressive demand snapshots, and protected-class lending.
+- Prometheus telemetry smoke verification, including
+  `tyr_build_info{version="0.25.0"}`.
+- `npm pack --dry-run` for `tyr-admission-controller@0.25.0`: 46 packaged files,
+  132.1 kB packed / 543.4 kB unpacked in this environment.
 - `git diff --check`.
 
-## Full test-suite limitation
+## Full Vitest suite limitation
 
-`npm test` cannot start in this verification environment. The uploaded
-repository contains the macOS Rolldown optional native binding, while this host
-requires `@rolldown/binding-linux-x64-gnu@1.1.5`. Vitest exits during startup
-before loading any test file.
+`npm test` does **not** pass in this review environment because Vitest cannot
+start. The uploaded repository contains the macOS Rolldown optional native
+binding, while this Linux host requires
+`@rolldown/binding-linux-x64-gnu@1.1.5`. Vitest exits during startup before
+loading any test file.
 
-An attempt to rebuild dependencies with `npm ci` also failed because the
-configured environment npm mirror returned HTTP 404 for `yocto-queue@0.1.0`.
-This is not recorded as a passing test run. The new handoff behavior therefore
-has executable verification coverage here, but the Vitest suite must still be
-run on a target platform with a complete dependency install before tagging or
-publishing.
+An attempt to install the missing optional binding could not complete because
+this container has no working npm/DNS access. This is an environment limitation,
+not a passing test result. The TypeScript test sources do type-check and the new
+class-handoff behavior has executable verification coverage, but the complete
+Vitest suite must still be run on a target platform with a clean dependency
+install before tagging or publishing.
 
 Run `npm ci` and then `npm run release:check` on the target platform before
-tagging or publishing `v0.24.0`.
+publishing `v0.25.0`.
 
 ## Compatibility boundary
 
-Tyr 0.24.0 changes no runtime dependencies and never revokes active work. It
-adds bounded acknowledgement occupancy fields and the additive
-`grantOccupancyAck` capability, then accelerates demand publication after an
-acknowledged physical-pool shrink. Latchflo 0.10.0 ignores the unknown additive
-fields and continues to use the existing successful acknowledgement plus a fresh
-post-ack heartbeat as the safety proof for a handoff. If acknowledgement or
-evidence publication fails, local shrink enforcement remains in effect and the
-control plane retains its lease-expiry fallback.
+Tyr 0.25.0 changes no runtime dependencies and never revokes active work. It
+adds bounded admission-class occupancy to successful grant acknowledgements,
+adds active hard ceilings to class-demand snapshots, advertises the additive
+`admissionClassOccupancyAck` capability, and treats restrictive class-only grant
+transitions as drain targets.
+
+Latchflo 0.10.0 remains wire-compatible: it can ignore the additive capability,
+class acknowledgement evidence, and hard-limit heartbeat fields while retaining
+Tyr 0.24's physical handoff behavior. Latchflo 0.11+ can combine a successful
+`applied` acknowledgement with a fresh post-ack class heartbeat to prove that
+restored protected capacity is no longer consumed as shared capacity before the
+old lease expires. If acknowledgement or evidence publication fails, local
+limits remain enforced and lease expiry remains the conservative control-plane
+fallback.

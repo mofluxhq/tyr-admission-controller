@@ -8,6 +8,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-11
+
+### Added
+
+- Added `capabilities.admissionClassOccupancyAck: true` to Latchflo registration
+  so Latchflo 0.11+ can require ordered class-level handoff evidence before
+  reusing protected capacity ahead of lease expiry.
+- Successful `applied` acknowledgements now include bounded, deterministic
+  admission-class occupancy alongside the existing pool occupancy: protected
+  use, shared borrowing, hard ceilings, and token occupancy when configured.
+- Admission-class demand heartbeats now include the active hard
+  `maxConcurrent` and `maxInFlightTokens` values. This lets a control plane
+  reject stale pre-apply class snapshots while keeping class IDs bounded by the
+  fixed local table.
+- Added focused unit coverage and `verify:class-handoff` executable verification
+  for class-only protected-floor restoration.
+
+### Changed
+
+- Tyr now recognizes restrictive class-only grant transitions as drain targets.
+  Restoring a protected class floor is treated as a shrink of the shared
+  remainder; lowering a class hard ceiling is also treated as a drain. After the
+  grant is installed and acknowledged, Tyr immediately publishes a fresh class
+  demand heartbeat.
+- While the exact published class snapshot still exceeds the desired shared
+  concurrency/token remainder or a reduced hard class ceiling, Tyr reuses the
+  bounded 500 ms evidence cadence introduced in 0.24.0. The cadence returns to
+  normal as soon as a sent snapshot proves the class transition safe.
+- Safety evaluation uses the exact class snapshot sent to Latchflo, including
+  desired protected floors and hard ceilings, so stale/custom demand providers
+  cannot accidentally satisfy a class drain target.
+- Updated release metadata, examples, README, roadmap, and verification
+  documentation to `0.25.0`. Runtime dependencies are unchanged from 0.24.0.
+
+### Fixed
+
+- Made the capacity-routing executable verifier wait for completed peer snapshot
+  refreshes instead of assuming a fixed 100 ms startup delay. This removes a
+  timing race that could handle the first verification request locally and
+  produce a missing `x-tyr-routed-by` header on slower hosts.
+
+### Compatibility
+
+- Latchflo 0.10.0 remains wire-compatible and may ignore the additive capability,
+  acknowledgement class occupancy, and hard-limit heartbeat fields. Physical
+  handoff behavior from Tyr 0.24.0 is unchanged.
+- Latchflo 0.11+ can combine the normal `applied` acknowledgement with a fresh
+  post-ack class heartbeat to commit class-only protected-floor restoration
+  before the old lease expires.
+- Active requests are never revoked. Restrictive class transitions use the same
+  shrink-by-attrition semantics as physical drains, with lease expiry remaining
+  the conservative control-plane fallback.
+
 ## [0.24.0] - 2026-08-07
 
 ### Added
@@ -980,7 +1033,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.21.0...v0.22.0

@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.23.0` class-demand reporting release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.25.0` class-handoff evidence release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.24.0
+## Current baseline: v0.25.0
 
 The current release provides:
 
@@ -373,7 +373,30 @@ Outcome:
 - Tyr remains a small data plane: it reports and enforces the grant; Latchflo
   still owns allocation and transfer policy.
 
-### v0.25.0 — Fleet coordination hardening
+### v0.25.0 — Acknowledged admission-class handoff evidence — shipped 2026-08-11
+
+Shipped:
+
+- Advertised additive `admissionClassOccupancyAck` support and included bounded
+  class occupancy in successful grant acknowledgements.
+- Added active hard class ceilings to class-demand heartbeats so post-ack class
+  evidence proves the desired snapshot was actually installed.
+- Treated protected-floor restoration as a shrink of shared class capacity and
+  lower hard class ceilings as drain targets.
+- Published a distinct post-ack class heartbeat and retained the 500 ms evidence
+  cadence until the exact sent snapshot fits the desired shared remainder and
+  any reduced hard ceilings.
+- Preserved non-preemptive attrition and lease-expiry fallback.
+
+Outcome:
+
+- Latchflo 0.11+ has the Tyr-side protocol needed to restore admission-class
+  protected floors before the old lent-allocation lease expires without
+  double-allocating shared capacity.
+- Latchflo 0.10 remains wire-compatible and physical handoff behavior is
+  unchanged.
+
+### v0.26.0 — Fleet coordination hardening
 
 **Target duration:** 4–6 weeks
 **Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas
@@ -410,7 +433,7 @@ Non-goals:
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.25.0
+**Target duration:** 3–5 weeks after v0.26.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:

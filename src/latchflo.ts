@@ -98,11 +98,34 @@ type FailureReporter = (event: {
   reason: LatchfloFailureReason;
 }) => void;
 
+type AdmissionClassOccupancyEvidence = {
+  readonly admissionClass: string;
+  readonly inFlight: number;
+  readonly protectedConcurrent: number;
+  readonly protectedConcurrentInUse: number;
+  readonly borrowedConcurrent: number;
+  readonly maxConcurrent?: number;
+  readonly inFlightTokens?: number;
+  readonly protectedInFlightTokens?: number;
+  readonly protectedTokensInUse?: number;
+  readonly borrowedInFlightTokens?: number;
+  readonly maxInFlightTokens?: number;
+};
+
 type GrantOccupancyEvidence = {
   readonly observedAt: string;
   readonly inFlight: number;
   readonly pending: number;
   readonly inFlightTokens?: number;
+  readonly admissionClasses?: readonly AdmissionClassOccupancyEvidence[];
+};
+
+type AdmissionClassDrainEvidenceTarget = {
+  /** Shared capacity remaining after the desired protected floors are installed. */
+  readonly sharedMaxConcurrent?: number;
+  readonly sharedTokenBudget?: number;
+  /** Desired class snapshot, used to reject stale pre-apply occupancy evidence. */
+  readonly classes: Readonly<Record<string, TyrAdmissionClassLimits>>;
 };
 
 type DrainEvidenceTarget = {
@@ -110,6 +133,7 @@ type DrainEvidenceTarget = {
   readonly maxConcurrent: number;
   readonly tokenBudget?: number;
   readonly requireTokenEvidence: boolean;
+  readonly admissionClasses?: AdmissionClassDrainEvidenceTarget;
 };
 
 /**
@@ -596,33 +620,108 @@ function limitsEqual(
   );
 }
 
-function isCapacityShrink(
+function admissionClassDrainEvidenceTarget(
   current: LLMAdmissionLimits,
   desired: TyrAdmissionLimits,
-): boolean {
-  if (desired.maxConcurrent < current.maxConcurrent) return true;
-  const currentBudget = current.tokenBudget?.budget;
+  desiredClasses: LLMAdmissionLimits["admissionClasses"],
+): AdmissionClassDrainEvidenceTarget | undefined {
+  const currentClasses = current.admissionClasses;
+  if (currentClasses === undefined || desiredClasses === undefined) return undefined;
+
+  let protectedConcurrentIncreased = false;
+  let protectedTokensIncreased = false;
+  let hardLimitShrank = false;
+  let desiredProtectedConcurrentTotal = 0;
+  let desiredProtectedTokenTotal = 0;
+
+  for (const id of Object.keys(desiredClasses)) {
+    const before = currentClasses[id];
+    const after = desiredClasses[id];
+    if (before === undefined || after === undefined) continue;
+
+    const beforeProtectedConcurrent = before.protectedConcurrent ?? 0;
+    const afterProtectedConcurrent = after.protectedConcurrent ?? 0;
+    const beforeProtectedTokens = before.protectedInFlightTokens ?? 0;
+    const afterProtectedTokens = after.protectedInFlightTokens ?? 0;
+    desiredProtectedConcurrentTotal += afterProtectedConcurrent;
+    desiredProtectedTokenTotal += afterProtectedTokens;
+
+    if (afterProtectedConcurrent > beforeProtectedConcurrent) {
+      protectedConcurrentIncreased = true;
+    }
+    if (afterProtectedTokens > beforeProtectedTokens) {
+      protectedTokensIncreased = true;
+    }
+    if (
+      after.maxConcurrent !== undefined &&
+      (before.maxConcurrent === undefined || after.maxConcurrent < before.maxConcurrent)
+    ) {
+      hardLimitShrank = true;
+    }
+    if (
+      after.maxInFlightTokens !== undefined &&
+      (
+        before.maxInFlightTokens === undefined ||
+        after.maxInFlightTokens < before.maxInFlightTokens
+      )
+    ) {
+      hardLimitShrank = true;
+    }
+  }
+
+  if (!protectedConcurrentIncreased && !protectedTokensIncreased && !hardLimitShrank) {
+    return undefined;
+  }
+
   const desiredBudget = desired.tokenBudget?.budget;
-  return (
-    desiredBudget !== undefined &&
-    (currentBudget === undefined || desiredBudget < currentBudget)
-  );
+  return {
+    ...(protectedConcurrentIncreased
+      ? {
+          sharedMaxConcurrent: Math.max(
+            0,
+            desired.maxConcurrent - desiredProtectedConcurrentTotal,
+          ),
+        }
+      : {}),
+    ...(protectedTokensIncreased && desiredBudget !== undefined
+      ? {
+          sharedTokenBudget: Math.max(
+            0,
+            desiredBudget - desiredProtectedTokenTotal,
+          ),
+        }
+      : {}),
+    classes: desiredClasses,
+  };
 }
 
 function drainEvidenceTarget(
   current: LLMAdmissionLimits,
   grant: CapacityGrant,
-): DrainEvidenceTarget {
+  desiredClasses: LLMAdmissionLimits["admissionClasses"],
+): DrainEvidenceTarget | undefined {
   const currentBudget = current.tokenBudget?.budget;
   const desiredBudget = grant.limits.tokenBudget?.budget;
+  const physicalConcurrentShrink = grant.limits.maxConcurrent < current.maxConcurrent;
   const requireTokenEvidence =
     desiredBudget !== undefined &&
     (currentBudget === undefined || desiredBudget < currentBudget);
+  const admissionClasses = admissionClassDrainEvidenceTarget(
+    current,
+    grant.limits,
+    desiredClasses,
+  );
+
+  if (!physicalConcurrentShrink && !requireTokenEvidence && admissionClasses === undefined) {
+    return undefined;
+  }
+
   return {
     revision: grant.revision,
     maxConcurrent: grant.limits.maxConcurrent,
     ...(desiredBudget === undefined ? {} : { tokenBudget: desiredBudget }),
     requireTokenEvidence,
+    ...(admissionClasses === undefined ? {} : { admissionClasses }),
   };
 }
 
@@ -885,6 +984,11 @@ export class LatchfloTyrAgent {
             // with a fresh demand heartbeat. Older Latchflo releases ignore
             // this additive capability and acknowledgement field.
             grantOccupancyAck: true,
+            // Tyr 0.25 extends the same ordered post-ACK evidence protocol to
+            // class-only shrink/restoration transitions. Latchflo 0.10 ignores
+            // this additive capability; Latchflo 0.11 can require it before
+            // committing class capacity ahead of lease expiry.
+            admissionClassOccupancyAck: true,
           },
         }),
       });
@@ -963,6 +1067,39 @@ export class LatchfloTyrAgent {
   #occupancy(pool: string): GrantOccupancyEvidence | undefined {
     const stats = this.options.control.stats()[pool];
     if (stats === undefined) return undefined;
+    const admissionClasses =
+      stats.admissionClasses === undefined
+        ? undefined
+        : Object.keys(stats.admissionClasses.classes)
+            .sort()
+            .flatMap((admissionClass) => {
+              const classStats = stats.admissionClasses?.classes[admissionClass];
+              if (classStats === undefined) return [];
+              return [
+                {
+                  admissionClass,
+                  inFlight: classStats.inFlight,
+                  protectedConcurrent: classStats.limits.protectedConcurrent ?? 0,
+                  protectedConcurrentInUse: classStats.protectedConcurrentInUse,
+                  borrowedConcurrent: classStats.borrowedConcurrent,
+                  ...(classStats.limits.maxConcurrent === undefined
+                    ? {}
+                    : { maxConcurrent: classStats.limits.maxConcurrent }),
+                  ...(stats.tokenBudget === undefined
+                    ? {}
+                    : {
+                        inFlightTokens: classStats.inFlightTokens,
+                        protectedInFlightTokens:
+                          classStats.limits.protectedInFlightTokens ?? 0,
+                        protectedTokensInUse: classStats.protectedTokensInUse,
+                        borrowedInFlightTokens: classStats.borrowedInFlightTokens,
+                        ...(classStats.limits.maxInFlightTokens === undefined
+                          ? {}
+                          : { maxInFlightTokens: classStats.limits.maxInFlightTokens }),
+                      }),
+                },
+              ];
+            });
     return {
       observedAt: new Date().toISOString(),
       inFlight: stats.bulkhead.inFlight,
@@ -970,7 +1107,74 @@ export class LatchfloTyrAgent {
       ...(stats.tokenBudget === undefined
         ? {}
         : { inFlightTokens: stats.tokenBudget.inFlightTokens }),
+      ...(admissionClasses === undefined ? {} : { admissionClasses }),
     };
+  }
+
+  #publishedAdmissionClassTargetReady(
+    occupancy: PoolDemandSnapshot,
+    target: AdmissionClassDrainEvidenceTarget,
+  ): boolean {
+    const published = occupancy.admissionClasses;
+    if (published === undefined) return false;
+    const byClass = new Map(published.map((snapshot) => [snapshot.admissionClass, snapshot]));
+    const desiredIds = Object.keys(target.classes).sort();
+    if (published.length !== desiredIds.length) return false;
+
+    let borrowedConcurrent = 0;
+    let borrowedTokens = 0;
+    for (const id of desiredIds) {
+      const snapshot = byClass.get(id);
+      const desired = target.classes[id];
+      if (snapshot === undefined || desired === undefined) return false;
+
+      if (snapshot.protectedConcurrent !== (desired.protectedConcurrent ?? 0)) {
+        return false;
+      }
+      if (snapshot.maxConcurrent !== desired.maxConcurrent) return false;
+      if (snapshot.inFlight > (desired.maxConcurrent ?? Number.POSITIVE_INFINITY)) {
+        return false;
+      }
+      borrowedConcurrent += snapshot.borrowedConcurrent;
+
+      if (target.sharedTokenBudget !== undefined || desired.maxInFlightTokens !== undefined) {
+        if (
+          snapshot.inFlightTokens === undefined ||
+          snapshot.protectedInFlightTokens === undefined ||
+          snapshot.borrowedInFlightTokens === undefined
+        ) {
+          return false;
+        }
+        if (
+          snapshot.protectedInFlightTokens !==
+          (desired.protectedInFlightTokens ?? 0)
+        ) {
+          return false;
+        }
+        if (snapshot.maxInFlightTokens !== desired.maxInFlightTokens) return false;
+        if (
+          desired.maxInFlightTokens !== undefined &&
+          snapshot.inFlightTokens > desired.maxInFlightTokens
+        ) {
+          return false;
+        }
+        borrowedTokens += snapshot.borrowedInFlightTokens;
+      }
+    }
+
+    if (
+      target.sharedMaxConcurrent !== undefined &&
+      borrowedConcurrent > target.sharedMaxConcurrent
+    ) {
+      return false;
+    }
+    if (
+      target.sharedTokenBudget !== undefined &&
+      borrowedTokens > target.sharedTokenBudget
+    ) {
+      return false;
+    }
+    return true;
   }
 
   #publishedDrainTargetReady(
@@ -978,11 +1182,19 @@ export class LatchfloTyrAgent {
     target: DrainEvidenceTarget,
   ): boolean {
     if (occupancy.inFlight > target.maxConcurrent) return false;
-    if (!target.requireTokenEvidence) return true;
+    if (
+      target.requireTokenEvidence &&
+      !(
+        occupancy.inFlightTokens !== undefined &&
+        target.tokenBudget !== undefined &&
+        occupancy.inFlightTokens <= target.tokenBudget
+      )
+    ) {
+      return false;
+    }
     return (
-      occupancy.inFlightTokens !== undefined &&
-      target.tokenBudget !== undefined &&
-      occupancy.inFlightTokens <= target.tokenBudget
+      target.admissionClasses === undefined ||
+      this.#publishedAdmissionClassTargetReady(occupancy, target.admissionClasses)
     );
   }
 
@@ -1136,8 +1348,13 @@ export class LatchfloTyrAgent {
         this.#setReady(false);
         return;
       }
-      if (isCapacityShrink(applied, grant.limits)) {
-        shrinkTargets.set(grant.pool, drainEvidenceTarget(applied, grant));
+      const shrinkTarget = drainEvidenceTarget(
+        applied,
+        grant,
+        classes.admissionClasses,
+      );
+      if (shrinkTarget !== undefined) {
+        shrinkTargets.set(grant.pool, shrinkTarget);
       }
       updates.push(
         grantUpdate(grant, grant.revision, classes.admissionClasses),

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { URL } from "node:url";
 import { loadRuntimeConfigFile } from "../dist/config.js";
 import { createGateway } from "../dist/server.js";
 import {
@@ -210,6 +211,17 @@ const peer = createGateway({
   ],
 });
 const peerUrl = await listen(peer.server);
+let peerCapacityPolls = 0;
+peer.server.on("request", (req) => {
+  if (
+    req.method === "GET" &&
+    new URL(req.url ?? "/", "http://internal").pathname ===
+      TYR_ROUTING_CAPACITY_PATH &&
+    req.headers[TYR_ROUTING_TOKEN_HEADER] === SECRET
+  ) {
+    peerCapacityPolls += 1;
+  }
+});
 
 const ingress = createGateway({
   openaiUpstreamUrl: upstream,
@@ -256,7 +268,10 @@ try {
   assert.equal(snapshot.instanceId, "tyr-b");
   assert.equal(snapshot.ready, true);
 
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  // Wait for two peer polls rather than sleeping for an arbitrary duration.
+  // CapacityAwareRouter serializes refreshes, so observing the second request
+  // proves the first snapshot was fetched, validated, and cached by ingress.
+  await waitUntil(() => peerCapacityPolls >= 2);
   const response = await fetch(`${ingressUrl}/v1/chat/completions`, {
     method: "POST",
     headers: { "content-type": "application/json" },

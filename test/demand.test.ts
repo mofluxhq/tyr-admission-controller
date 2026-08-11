@@ -332,10 +332,12 @@ describe("Tyr Latchflo demand reporting", () => {
         protectedConcurrent: 2,
         protectedConcurrentInUse: 1,
         borrowedConcurrent: 0,
+        maxConcurrent: 4,
         inFlightTokens: 1_000,
         protectedInFlightTokens: 3_000,
         protectedTokensInUse: 1_000,
         borrowedInFlightTokens: 0,
+        maxInFlightTokens: 5_000,
         lastRequestAt: "2026-08-07T20:00:00.000Z",
       },
       {
@@ -348,10 +350,12 @@ describe("Tyr Latchflo demand reporting", () => {
         protectedConcurrent: 2,
         protectedConcurrentInUse: 2,
         borrowedConcurrent: 1,
+        maxConcurrent: 4,
         inFlightTokens: 2_500,
         protectedInFlightTokens: 2_000,
         protectedTokensInUse: 2_000,
         borrowedInFlightTokens: 500,
+        maxInFlightTokens: 5_000,
         lastRequestAt: "2026-08-07T20:00:00.000Z",
       },
     ]);
@@ -524,7 +528,7 @@ describe("Tyr Latchflo demand reporting", () => {
     const heartbeatCountBeforeIdle = heartbeatBodies.length;
     current = poolStats({ admitted: 4, rejected: 2, budgetRejected: 2 });
 
-    // Tyr 0.24 may emit an additional post-ACK occupancy heartbeat when the
+    // Tyr 0.25 may emit an additional post-ACK occupancy heartbeat when the
     // applied grant tightens any capacity dimension. Do not assume the next
     // managed heartbeat has a fixed array index; wait for a heartbeat emitted
     // after this state transition that reflects the new idle occupancy.
