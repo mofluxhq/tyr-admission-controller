@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.25.0` class-handoff evidence release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.25.1` class-handoff evidence release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.25.0
+## Current baseline: v0.25.1
 
 The current release provides:
 
@@ -372,6 +372,11 @@ Outcome:
   capacity is free.
 - Tyr remains a small data plane: it reports and enforces the grant; Latchflo
   still owns allocation and transfer policy.
+
+### v0.25.1 — Reproducible Docker source packaging — shipped 2026-08-11
+
+- Restores the vendored runtime tarballs required by the committed `package-lock.json` and Dockerfile so `npm ci` succeeds inside clean Docker build contexts.
+- Carries forward the 0.25.0 admission-class handoff behavior unchanged.
 
 ### v0.25.0 — Acknowledged admission-class handoff evidence — shipped 2026-08-11
 

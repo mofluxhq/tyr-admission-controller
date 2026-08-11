@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-08-11
+
+### Fixed
+
+- Restored `vendor/async-bulkhead-llm-3.15.1.tgz`,
+  `vendor/async-bulkhead-ts-1.0.1.tgz`, and `vendor/yaml-2.9.0.tgz` to the
+  source release archive. The committed lockfile resolves those exact tarballs,
+  and the Dockerfile copies `vendor/` before `npm ci`; omitting them made clean
+  Docker builds fail with `ENOENT /app/vendor/*.tgz`.
+- Kept the 0.25.0 admission-class handoff runtime behavior unchanged.
+
+### Verification
+
+- Added release verification guidance for checking vendored tarball integrity
+  against the lockfile and building the Docker image from a clean source tree.
+
 ## [0.25.0] - 2026-08-11
 
 ### Added
@@ -1033,7 +1049,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.1...HEAD
+[0.25.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.22.0...v0.23.0

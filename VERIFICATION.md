@@ -1,10 +1,10 @@
-# Tyr 0.25.0 verification
+# Tyr 0.25.1 verification
 
 Date: 2026-08-11
 
 ## Version alignment
 
-- Tyr package version: `0.25.0`
+- Tyr package version: `0.25.1`
 - Runtime dependency: `async-bulkhead-llm@3.15.1`
 - Transitive bulkhead dependency: `async-bulkhead-ts@1.0.1`
 - Bundled runtime artifacts remain unchanged:
@@ -12,10 +12,12 @@ Date: 2026-08-11
   - `vendor/async-bulkhead-ts-1.0.1.tgz`
   - `vendor/yaml-2.9.0.tgz`
 - `src/version.ts`, package metadata, managed-mode examples, demo image tag, and
-  telemetry build-info assertions report `0.25.0`.
+  telemetry build-info assertions report `0.25.1`.
 
 ## Passed checks in this review environment
 
+- Vendored artifact verification: all three `file:vendor/*.tgz` lockfile entries exist and match their exact SHA-512 integrity values.
+- Clean production dependency install with `npm ci --omit=dev` from a source tree containing only committed release files and `vendor/`.
 - ESLint with zero warnings.
 - Strict TypeScript type-check, including the new class-handoff unit coverage.
 - Production TypeScript build.
@@ -45,9 +47,9 @@ Date: 2026-08-11
 - Progressive-reconciliation executable verification.
 - ESM smoke imports.
 - Prometheus telemetry smoke verification, including
-  `tyr_build_info{version="0.25.0"}`.
-- `npm pack --dry-run` for `tyr-admission-controller@0.25.0`: 46 packaged files,
-  132.1 kB packed / 543.4 kB unpacked in this environment.
+  `tyr_build_info{version="0.25.1"}`.
+- `npm pack --dry-run` for `tyr-admission-controller@0.25.1`: 46 packaged files,
+  132.7 kB packed / 545.3 kB unpacked in this environment.
 - `git diff --check`.
 
 ## Full Vitest suite limitation
@@ -66,11 +68,11 @@ Vitest suite must still be run on a target platform with a clean dependency
 install before tagging or publishing.
 
 Run `npm ci` and then `npm run release:check` on the target platform before
-publishing `v0.25.0`.
+publishing `v0.25.1`.
 
 ## Compatibility boundary
 
-Tyr 0.25.0 changes no runtime dependencies and never revokes active work. It
+Tyr 0.25.1 changes no runtime dependencies and never revokes active work. It
 adds bounded admission-class occupancy to successful grant acknowledgements,
 adds active hard ceilings to class-demand snapshots, advertises the additive
 `admissionClassOccupancyAck` capability, and treats restrictive class-only grant

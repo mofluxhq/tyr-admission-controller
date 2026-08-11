@@ -5,18 +5,28 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.25.0 is built on
+Tyr 0.25.1 is built on
 [`async-bulkhead-llm@3.15.1`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, bounded
 identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.25.0, identity-aware distributed admission data plane,
+> **Status:** v0.25.1, identity-aware distributed admission data plane,
 > proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
 > first-class Latchflo managed mode with configuration-driven registration,
 > expiring grants, readiness, persisted agent credentials, demand reporting,
 > and fail-closed expiration behavior.
+
+## What changed in v0.25.1
+
+- Restored the three vendored runtime tarballs required by the committed lockfile
+  and Dockerfile. Clean source-tree Docker builds no longer fail with
+  `ENOENT /app/vendor/*.tgz` during `npm ci`.
+- Added `npm run verify:vendor`, which checks every `file:vendor/*.tgz` lockfile
+  entry for presence and exact SHA-512 integrity and verifies the Dockerfile copies
+  `vendor/` into the build context before installing dependencies.
+- Runtime behavior and dependency versions are unchanged from 0.25.0.
 
 ## What shipped in v0.25.0
 
@@ -899,7 +909,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.25.0
+    version: 0.25.1
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -922,7 +932,7 @@ bounded by `requestTimeoutMs`.
 ### Demand-aware Latchflo heartbeats
 
 Tyr automatically derives one snapshot per managed pool from its existing
-statistics. Tyr 0.25.0 carries forward bounded per-class demand in that additive
+statistics. Tyr 0.25.1 carries forward bounded per-class demand in that additive
 heartbeat while preserving the original pool-level fields:
 
 ```json
@@ -977,7 +987,7 @@ identity values never become heartbeat keys. `protected*` and `borrowed*` fields
 report current use of the active floor and shared remainder. They are telemetry,
 not a request for Tyr to resize its own limits.
 
-Tyr 0.25.0 advertises `admissionClassDemand: true`,
+Tyr 0.25.1 advertises `admissionClassDemand: true`,
 `grantOccupancyAck: true`, and the additive
 `admissionClassOccupancyAck: true` capability at registration. Older control
 planes that ignore unknown capability and nested evidence fields remain
@@ -1010,7 +1020,7 @@ The acknowledgement's `occupancy` object is additive observability evidence;
 Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
 post-ack heartbeat remains the authoritative proof used by that control plane.
 
-Tyr 0.25.0 applies the same ordering to restrictive class-only changes. When a
+Tyr 0.25.1 applies the same ordering to restrictive class-only changes. When a
 protected floor is restored, the newly protected capacity reduces the shared
 remainder. Tyr therefore keeps publishing bounded class evidence until the sum
 of `borrowedConcurrent` fits within the desired shared concurrency remainder and,
@@ -1132,7 +1142,9 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.25.0 .
+docker build -t tyr-admission-controller:0.25.1 .
+
+The source tree must include the committed `vendor/` directory. Run `npm run verify:vendor` before building or publishing a source archive.
 ```
 
 Run it with a read-only mounted configuration:
@@ -1143,7 +1155,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.25.0
+  tyr-admission-controller:0.25.1
 ```
 
 Or use the included Compose example:

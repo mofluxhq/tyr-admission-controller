@@ -114,7 +114,7 @@ try {
   assert.equal(metricsResponse.status, 200);
   const metrics = await metricsResponse.text();
   assert.equal(TYR_VERSION, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
-  assert.match(metrics, /tyr_build_info\{version="0\.25\.0"\} 1/);
+  assert.match(metrics, /tyr_build_info\{version="0\.25\.1"\} 1/);
   assert.match(
     metrics,
     /tyr_admission_decisions_total\{admission_class="none",outcome="admitted",pool="smoke",priority="normal"\} 2/,
