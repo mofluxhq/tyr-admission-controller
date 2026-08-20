@@ -81,6 +81,14 @@ function poolStats(input: {
         earlyReleasedTokens: 0,
       },
       provenance: { retainedRevisions: 0 },
+      admissionProvenance: {
+        capacity: 512,
+        retained: 0,
+        dropped: 0,
+        captureFailures: 0,
+        nextSequence: 1,
+        events: [],
+      },
     },
   };
 }

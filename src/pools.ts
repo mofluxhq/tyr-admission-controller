@@ -64,6 +64,30 @@ export type AdmissionProvenance = {
   readonly expiresAt: string;
 };
 
+/**
+ * Exact, bounded evidence for one successful capacity-holding admission.
+ *
+ * The event is recorded at async-bulkhead-llm's admission linearization point,
+ * before Tyr invokes the upstream callback. It deliberately contains no request
+ * body, model prompt, identity, or client-supplied request identifier.
+ */
+export type TyrAdmissionProvenanceEvent = {
+  readonly schema: "tyr.admission-provenance.v1";
+  /** Tyr-local monotonic sequence; unique within this pool process lifetime. */
+  readonly sequence: number;
+  readonly admittedAt: string;
+  readonly admissionId: string;
+  readonly pool: string;
+  readonly priority: LLMPriority;
+  readonly admissionClass?: string;
+  readonly limitRevision: number;
+  readonly reservedTokens: number;
+  /** Exact applied limits observed at the admission linearization point. */
+  readonly limits: LLMAdmissionLimits;
+  /** Exact Latchflo grant associated with limitRevision, when managed. */
+  readonly grant?: AdmissionProvenance;
+};
+
 export type AdaptiveEstimationConfig = {
   /** Enabled by default for token-budgeted pools. */
   enabled?: boolean;
@@ -180,6 +204,17 @@ export type TyrPoolStats = LLMStats & {
     provenance: {
       retainedRevisions: number;
       current?: AdmissionProvenance;
+    };
+    admissionProvenance: {
+      /** Fixed per-pool ring capacity. */
+      capacity: number;
+      retained: number;
+      dropped: number;
+      /** Admission events not published because an internal revision invariant failed. */
+      captureFailures: number;
+      /** Sequence that will be assigned to the next successful admission. */
+      nextSequence: number;
+      events: TyrAdmissionProvenanceEvent[];
     };
   };
 };
@@ -464,6 +499,12 @@ function zeroObserveStats(): LLMObserveStats {
 }
 
 const MAX_RETAINED_PROVENANCE_REVISIONS = 64;
+/**
+ * Enough to cover the current deterministic MoFlux benchmark sweeps while
+ * remaining bounded for long-lived gateways. Exact grant/revision evidence is
+ * intentionally exposed only through /stats, never as Prometheus labels.
+ */
+export const MAX_RETAINED_ADMISSION_PROVENANCE_EVENTS = 512;
 
 function validateAdmissionProvenance(
   poolName: string,
@@ -598,6 +639,10 @@ function createPool(config: PoolConfig): Pool {
         }),
   });
   const provenanceByRevision = new Map<number, AdmissionProvenance>();
+  const admissionProvenanceEvents: TyrAdmissionProvenanceEvent[] = [];
+  let admissionProvenanceDropped = 0;
+  let admissionProvenanceCaptureFailures = 0;
+  let admissionProvenanceNextSequence = 1;
 
   function retainProvenance(provenance: AdmissionProvenance): void {
     provenanceByRevision.set(provenance.revision, provenance);
@@ -609,6 +654,70 @@ function createPool(config: PoolConfig): Pool {
       provenanceByRevision.delete(oldest);
     }
   }
+
+  bulkhead.on("admit", (event) => {
+    // async-bulkhead-llm emits this synchronously after the concurrency slot
+    // and token reservation are both held, before any user callback runs. The
+    // currently exposed limits therefore correspond to event.limitRevision.
+    const liveLimits = bulkhead.limits();
+    if (liveLimits.revision !== event.limitRevision) {
+      // This would violate the upstream library's documented admission
+      // linearization contract. Do not publish fabricated provenance, but make
+      // the evidence loss explicit to operators and benchmark integrity gates.
+      admissionProvenanceCaptureFailures += 1;
+      return;
+    }
+    const limits = Object.freeze({
+      revision: liveLimits.revision,
+      maxConcurrent: liveLimits.maxConcurrent,
+      maxQueue: liveLimits.maxQueue,
+      ...(liveLimits.tokenBudget === undefined
+        ? {}
+        : {
+            tokenBudget: Object.freeze({
+              budget: liveLimits.tokenBudget.budget,
+              highPriorityReserve: liveLimits.tokenBudget.highPriorityReserve,
+            }),
+          }),
+      ...(liveLimits.admissionClasses === undefined
+        ? {}
+        : {
+            admissionClasses: Object.freeze(
+              Object.fromEntries(
+                Object.entries(liveLimits.admissionClasses).map(([name, value]) => [
+                  name,
+                  Object.freeze({ ...value }),
+                ]),
+              ),
+            ),
+          }),
+    }) as LLMAdmissionLimits;
+    const grant = provenanceByRevision.get(event.limitRevision);
+    const record: TyrAdmissionProvenanceEvent = Object.freeze({
+      schema: "tyr.admission-provenance.v1",
+      sequence: admissionProvenanceNextSequence,
+      admittedAt: new Date().toISOString(),
+      admissionId: event.admissionId,
+      pool: config.name,
+      priority: event.priority,
+      ...(event.admissionClass === undefined
+        ? {}
+        : { admissionClass: event.admissionClass }),
+      limitRevision: event.limitRevision,
+      reservedTokens: event.reservedTokens,
+      limits,
+      ...(grant === undefined ? {} : { grant }),
+    });
+    admissionProvenanceNextSequence += 1;
+    admissionProvenanceEvents.push(record);
+    if (
+      admissionProvenanceEvents.length >
+      MAX_RETAINED_ADMISSION_PROVENANCE_EVENTS
+    ) {
+      admissionProvenanceEvents.shift();
+      admissionProvenanceDropped += 1;
+    }
+  });
 
   if (adaptive !== undefined) {
     bulkhead.on("release", (event) => {
@@ -782,6 +891,14 @@ function createPool(config: PoolConfig): Pool {
           ...(currentProvenance !== undefined
             ? { current: currentProvenance }
             : {}),
+        },
+        admissionProvenance: {
+          capacity: MAX_RETAINED_ADMISSION_PROVENANCE_EVENTS,
+          retained: admissionProvenanceEvents.length,
+          dropped: admissionProvenanceDropped,
+          captureFailures: admissionProvenanceCaptureFailures,
+          nextSequence: admissionProvenanceNextSequence,
+          events: admissionProvenanceEvents.map((event) => ({ ...event })),
         },
       },
     };

@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.25.1` class-handoff evidence release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.26.0` exact-admission-provenance release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.25.1
+## Current baseline: v0.26.0
 
 The current release provides:
 
@@ -43,6 +43,9 @@ The current release provides:
   the new ceiling.
 - Admission-linearized revisions and a bounded per-pool Latchflo provenance ledger
   containing grant ID, controller epoch, and expiration.
+- A bounded exact successful-admission provenance ring in `/stats`, tying each
+  Tyr-generated admission ID to its applied limit revision/snapshot and matching
+  Latchflo grant without relying on cross-process timestamp ordering.
 - Exact grant-attribution response headers for admissions, bypasses, and
   rejections.
 - Adaptive per-model input estimates learned from provider-reported usage.
@@ -401,7 +404,28 @@ Outcome:
 - Latchflo 0.10 remains wire-compatible and physical handoff behavior is
   unchanged.
 
-### v0.26.0 — Fleet coordination hardening
+### v0.26.0 — Exact admission provenance — shipped 2026-08-19
+
+Shipped:
+
+- Captures every successful capacity-holding admission from the local admission
+  linearization event before upstream execution begins.
+- Exposes a bounded 512-event per-pool `/stats` ring with Tyr-local sequence,
+  admission timestamp/ID, priority/class, exact revision, immutable applied
+  limits, reserved tokens, and matching Latchflo grant provenance.
+- Reports retained/dropped counts, capture failures, and next sequence so evidence
+  consumers can reject incomplete histories rather than silently overclaim.
+- Keeps request bodies, identity, and client-supplied request IDs out of the
+  provenance ring and keeps all high-cardinality identifiers out of Prometheus.
+
+Outcome:
+
+- MoFlux Bench can prove that a post-handoff admission was authorized by the
+  committed successor grant directly, eliminating the 500 ms polling-window
+  ambiguity that previously made some safe handoffs inconclusive.
+- No admission-policy or Latchflo wire-protocol change is required.
+
+### v0.27.0 — Fleet coordination hardening
 
 **Target duration:** 4–6 weeks
 **Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas

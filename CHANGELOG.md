@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-19
+
+### Added
+
+- Added bounded exact successful-admission provenance to each pool's `/stats`
+  payload under `tyr.admissionProvenance`. Events are captured from
+  async-bulkhead-llm's synchronous `admit` event after capacity is held and
+  before Tyr invokes the upstream callback.
+- Added `tyr.admission-provenance.v1` records with a pool-local monotonic
+  sequence, admission timestamp, Tyr-generated admission ID, priority, optional
+  admission class, exact limit revision, reserved tokens, immutable applied
+  limits, and matching Latchflo grant provenance when managed.
+- Added a fixed 512-event per-pool retention bound plus `retained`, `dropped`,
+  `captureFailures`, and `nextSequence` counters so consumers can detect
+  incomplete proof evidence.
+- Added tests for exact managed-grant attribution, pre-callback visibility,
+  observe-mode exclusion, bounded retention, and request-content exclusion from
+  `/stats`.
+
+### Changed
+
+- Updated runtime/build metadata and deployment examples to 0.26.0.
+- Reserved high-cardinality admission/grant identifiers for `/stats` and audit
+  evidence; no new Prometheus labels were added.
+
+### Security
+
+- Exact admission provenance intentionally retains no request bodies, model
+  prompts, authenticated identity, or client-supplied request IDs. Tyr uses its
+  internally generated admission ID as the trustworthy execution identifier.
+
+### Compatibility
+
+- Admission policy and the Latchflo wire protocol are unchanged from 0.25.1.
+- Runtime dependencies remain `async-bulkhead-llm@3.15.1` and
+  `async-bulkhead-ts@1.0.1`.
+
 ## [0.25.1] - 2026-08-11
 
 ### Fixed
@@ -1049,7 +1086,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.1...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.23.0...v0.24.0

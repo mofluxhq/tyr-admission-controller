@@ -24,6 +24,7 @@ import type {
   AdaptiveEstimationConfig,
   AdmissionMode,
   PoolsDrainResult,
+  TyrPoolStats,
 } from "../src/pools.js";
 
 // Parses one complete HTTP/1.1 response (status line + headers + body,
@@ -1225,6 +1226,48 @@ describe("admission-gateway", () => {
     }
   });
 
+  it("exposes bounded admission provenance through stats without request content", async () => {
+    const gw = await startGateway({ maxConcurrent: 2, budget: 5_000 });
+    try {
+      const response = await fetch(`${gw.url}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(msg("do-not-retain-this-prompt")),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+
+      const statsResponse = await fetch(`${gw.url}/stats`);
+      expect(statsResponse.status).toBe(200);
+      const stats = (await statsResponse.json()) as Record<string, TyrPoolStats>;
+      const evidence = stats["test-pool"]!.tyr.admissionProvenance;
+      expect(evidence).toMatchObject({
+        capacity: 512,
+        retained: 1,
+        dropped: 0,
+        captureFailures: 0,
+        nextSequence: 2,
+      });
+      expect(evidence.events[0]).toMatchObject({
+        schema: "tyr.admission-provenance.v1",
+        sequence: 1,
+        pool: "test-pool",
+        priority: "normal",
+        limitRevision: 0,
+        limits: {
+          revision: 0,
+          maxConcurrent: 2,
+          tokenBudget: { budget: 5_000, highPriorityReserve: 0 },
+        },
+      });
+      expect(evidence.events[0]!.admissionId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(Date.parse(evidence.events[0]!.admittedAt)).not.toBeNaN();
+      expect(JSON.stringify(evidence)).not.toContain("do-not-retain-this-prompt");
+    } finally {
+      gw.server.close();
+    }
+  });
+
   it("exports bounded Prometheus metrics and one completed admission audit", async () => {
     const auditEvents: TyrAdmissionAuditEvent[] = [];
     const gw = await startGateway(
@@ -1252,7 +1295,7 @@ describe("admission-gateway", () => {
         "text/plain; version=0.0.4",
       );
       const metrics = await metricsResponse.text();
-      expect(metrics).toContain('tyr_build_info{version="0.25.1"} 1');
+      expect(metrics).toContain('tyr_build_info{version="0.26.0"} 1');
       expect(metrics).toContain(
         'tyr_admission_decisions_total{admission_class="none",outcome="admitted",pool="test-pool",priority="normal"} 1',
       );

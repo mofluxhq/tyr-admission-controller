@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { LLMRequest } from "async-bulkhead-llm";
 import {
   createPools,
+  MAX_RETAINED_ADMISSION_PROVENANCE_EVENTS,
   type AdmissionProvenance,
 } from "../src/pools.js";
 
@@ -687,5 +688,228 @@ describe("v3.11 versioned pool limits", () => {
       totalInputTokens: 2,
       totalOutputTokens: 1,
     });
+  });
+});
+
+describe("exact admission provenance", () => {
+  it("records the exact applied limits and Latchflo grant before the callback runs", async () => {
+    const pools = createPools([
+      {
+        name: "managed",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 1,
+        initialRevision: 0,
+        budget: 10_000,
+        adaptiveEstimation: { enabled: false },
+      },
+    ]);
+    const pool = pools.get("managed")!;
+    const grant: AdmissionProvenance = {
+      source: "latchflo",
+      grantId: "grant-successor-7",
+      controllerEpoch: 3,
+      revision: 7,
+      expiresAt: "2026-08-19T20:00:00.000Z",
+    };
+    expect(
+      pools.applyLimits([
+        {
+          pool: "managed",
+          limits: {
+            revision: 7,
+            maxConcurrent: 4,
+            maxQueue: 0,
+            tokenBudget: { budget: 40_000, highPriorityReserve: 0 },
+          },
+          provenance: grant,
+        },
+      ]),
+    ).toMatchObject({ applied: true });
+
+    const llmRequest = request("provenance");
+    const prepared = pool.prepare(llmRequest, "normal");
+    let callbackAdmissionId: string | undefined;
+    await pool.run(
+      llmRequest,
+      prepared,
+      async (_signal, context) => {
+        callbackAdmissionId = context?.admissionId;
+        const evidence = pool.stats().tyr.admissionProvenance;
+        expect(evidence.events).toHaveLength(1);
+        expect(evidence.events[0]).toMatchObject({
+          schema: "tyr.admission-provenance.v1",
+          sequence: 1,
+          admissionId: context?.admissionId,
+          pool: "managed",
+          priority: "normal",
+          limitRevision: 7,
+          limits: {
+            revision: 7,
+            maxConcurrent: 4,
+            maxQueue: 0,
+            tokenBudget: { budget: 40_000, highPriorityReserve: 0 },
+          },
+          grant,
+        });
+        expect(Date.parse(evidence.events[0]!.admittedAt)).not.toBeNaN();
+        return undefined;
+      },
+      { priority: "normal" },
+    );
+
+    const evidence = pool.stats().tyr.admissionProvenance;
+    expect(evidence).toMatchObject({
+      capacity: MAX_RETAINED_ADMISSION_PROVENANCE_EVENTS,
+      retained: 1,
+      dropped: 0,
+      captureFailures: 0,
+      nextSequence: 2,
+    });
+    expect(evidence.events[0]?.admissionId).toBe(callbackAdmissionId);
+  });
+
+  it("attributes a queued waiter to the exact expansion grant that wakes it", async () => {
+    const pools = createPools([
+      {
+        name: "queued-expansion",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 1,
+        maxQueue: 1,
+        initialRevision: 0,
+        budget: 10_000,
+        adaptiveEstimation: { enabled: false },
+      },
+    ]);
+    const pool = pools.get("queued-expansion")!;
+
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstStarted!: () => void;
+    const firstDidStart = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const firstRequest = request("first");
+    const first = pool.run(
+      firstRequest,
+      pool.prepare(firstRequest, "normal"),
+      async () => {
+        firstStarted();
+        await firstBlocked;
+      },
+      { priority: "normal" },
+    );
+
+    await firstDidStart;
+    expect(pool.stats().bulkhead.inFlight).toBe(1);
+    expect(pool.stats().tyr.admissionProvenance.events[0]).toMatchObject({
+      limitRevision: 0,
+    });
+
+    let queuedAdmissionId: string | undefined;
+    const queuedRequest = request("queued");
+    const queued = pool.run(
+      queuedRequest,
+      pool.prepare(queuedRequest, "normal"),
+      async (_signal, context) => {
+        queuedAdmissionId = context?.admissionId;
+      },
+      { priority: "normal" },
+    );
+
+    for (let i = 0; i < 50 && pool.stats().bulkhead.pending !== 1; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+    expect(pool.stats().bulkhead).toMatchObject({ inFlight: 1, pending: 1 });
+
+    const expansionGrant: AdmissionProvenance = {
+      source: "latchflo",
+      grantId: "queued-expansion-grant",
+      controllerEpoch: 11,
+      revision: 1,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    };
+    expect(
+      pools.applyLimits([
+        {
+          pool: "queued-expansion",
+          limits: {
+            revision: 1,
+            maxConcurrent: 2,
+            maxQueue: 1,
+            tokenBudget: { budget: 10_000, highPriorityReserve: 0 },
+          },
+          provenance: expansionGrant,
+        },
+      ]),
+    ).toMatchObject({ applied: true });
+
+    await queued;
+    const evidence = pool.stats().tyr.admissionProvenance;
+    expect(evidence.events).toHaveLength(2);
+    expect(evidence.events[0]).toMatchObject({ limitRevision: 0 });
+    expect(evidence.events[1]).toMatchObject({
+      admissionId: queuedAdmissionId,
+      limitRevision: 1,
+      limits: { revision: 1, maxConcurrent: 2, maxQueue: 1 },
+      grant: expansionGrant,
+    });
+
+    releaseFirst();
+    await first;
+  });
+
+  it("does not report observe-mode bypasses as successful admissions", async () => {
+    const pools = createPools([
+      {
+        name: "observe",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 0,
+        admissionMode: "observe",
+      },
+    ]);
+    const pool = pools.get("observe")!;
+    const llmRequest = request();
+    const prepared = pool.prepare(llmRequest, "normal");
+    await pool.run(llmRequest, prepared, async () => undefined, { priority: "normal" });
+    expect(pool.stats().tyr.admissionProvenance).toMatchObject({
+      retained: 0,
+      dropped: 0,
+      captureFailures: 0,
+      nextSequence: 1,
+      events: [],
+    });
+  });
+
+  it("bounds retained admission evidence and reports dropped records", async () => {
+    const pools = createPools([
+      {
+        name: "bounded",
+        modelPrefixes: ["gpt"],
+        model: "gpt-4o",
+        maxConcurrent: 1,
+      },
+    ]);
+    const pool = pools.get("bounded")!;
+    for (let index = 0; index <= MAX_RETAINED_ADMISSION_PROVENANCE_EVENTS; index += 1) {
+      const llmRequest = request(String(index));
+      await pool.run(
+        llmRequest,
+        pool.prepare(llmRequest, "normal"),
+        async () => undefined,
+        { priority: "normal" },
+      );
+    }
+    const evidence = pool.stats().tyr.admissionProvenance;
+    expect(evidence.retained).toBe(MAX_RETAINED_ADMISSION_PROVENANCE_EVENTS);
+    expect(evidence.dropped).toBe(1);
+    expect(evidence.events[0]?.sequence).toBe(2);
+    expect(evidence.events.at(-1)?.sequence).toBe(
+      MAX_RETAINED_ADMISSION_PROVENANCE_EVENTS + 1,
+    );
   });
 });
