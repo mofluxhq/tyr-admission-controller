@@ -112,6 +112,21 @@ export type ProgressiveReconciliationConfig = {
   outputSafetyMarginTokens?: number;
 };
 
+export type PoolAdmissionDecisionTiming = {
+  readonly pool: string;
+  readonly outcome: "admitted" | "rejected";
+  readonly admissionClass?: string;
+  /** Synchronous local decision time reported by async-bulkhead-llm. */
+  readonly decisionDurationNs: number;
+  /** Time spent awaiting the underlying local concurrency acquire. */
+  readonly queueWaitNs: number;
+};
+
+export type PoolsInstrumentation = {
+  /** Called synchronously for instrumented enforce-mode admission decisions. */
+  readonly onAdmissionDecisionTiming?: (event: PoolAdmissionDecisionTiming) => void;
+};
+
 export type PoolConfig = {
   /** Pool name for stats, control-plane updates, and logs. */
   name: string;
@@ -554,7 +569,10 @@ function validateAdmissionProvenance(
   });
 }
 
-function createPool(config: PoolConfig): Pool {
+function createPool(
+  config: PoolConfig,
+  instrumentation: PoolsInstrumentation = {},
+): Pool {
   const mode = config.admissionMode ?? "enforce";
   const adaptiveEnabled =
     config.budget !== undefined && (config.adaptiveEstimation?.enabled ?? true);
@@ -644,6 +662,32 @@ function createPool(config: PoolConfig): Pool {
   let admissionProvenanceCaptureFailures = 0;
   let admissionProvenanceNextSequence = 1;
 
+  function recordAdmissionDecisionTiming(
+    outcome: "admitted" | "rejected",
+    event: {
+      readonly admissionClass?: string;
+      readonly decisionDurationNs?: number;
+      readonly queueWaitNs?: number;
+    },
+  ): void {
+    if (mode !== "enforce") return;
+    if (
+      event.decisionDurationNs === undefined ||
+      event.queueWaitNs === undefined
+    ) {
+      return;
+    }
+    instrumentation.onAdmissionDecisionTiming?.({
+      pool: config.name,
+      outcome,
+      ...(event.admissionClass === undefined
+        ? {}
+        : { admissionClass: event.admissionClass }),
+      decisionDurationNs: event.decisionDurationNs,
+      queueWaitNs: event.queueWaitNs,
+    });
+  }
+
   function retainProvenance(provenance: AdmissionProvenance): void {
     provenanceByRevision.set(provenance.revision, provenance);
     while (provenanceByRevision.size > MAX_RETAINED_PROVENANCE_REVISIONS) {
@@ -656,6 +700,8 @@ function createPool(config: PoolConfig): Pool {
   }
 
   bulkhead.on("admit", (event) => {
+    recordAdmissionDecisionTiming("admitted", event);
+
     // async-bulkhead-llm emits this synchronously after the concurrency slot
     // and token reservation are both held, before any user callback runs. The
     // currently exposed limits therefore correspond to event.limitRevision.
@@ -717,6 +763,10 @@ function createPool(config: PoolConfig): Pool {
       admissionProvenanceEvents.shift();
       admissionProvenanceDropped += 1;
     }
+  });
+
+  bulkhead.on("reject", (event) => {
+    recordAdmissionDecisionTiming("rejected", event);
   });
 
   if (adaptive !== undefined) {
@@ -1110,12 +1160,15 @@ function validateLimitSnapshot(
   });
 }
 
-export function createPools(configs: PoolConfig[]): Pools {
+export function createPools(
+  configs: PoolConfig[],
+  instrumentation: PoolsInstrumentation = {},
+): Pools {
   validatePoolConfigs(configs);
 
   const pools: { prefixes: string[]; pool: Pool }[] = configs.map((config) => ({
     prefixes: [...config.modelPrefixes],
-    pool: createPool(config),
+    pool: createPool(config, instrumentation),
   }));
   const poolsByName = new Map(pools.map(({ pool }) => [pool.name, pool]));
 

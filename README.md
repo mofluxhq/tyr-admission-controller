@@ -5,20 +5,40 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.26.0 is built on
-[`async-bulkhead-llm@3.15.1`](https://www.npmjs.com/package/async-bulkhead-llm).
+Tyr 0.27.0 is built on
+[`async-bulkhead-llm@3.16.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, bounded
 identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.26.0, identity-aware distributed admission data plane,
+> **Status:** v0.27.0, identity-aware distributed admission data plane,
 > proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
 > first-class Latchflo managed mode with configuration-driven registration,
 > expiring grants, readiness, persisted agent credentials, demand reporting,
 > and fail-closed expiration behavior.
 
-## What changed in v0.26.0
+## What changed in v0.27.0
+
+- Added direct local admission-decision timing from `async-bulkhead-llm@3.16.0`
+  without adding any control-plane round trip to the request path.
+- Added `tyr_admission_decision_seconds`, which measures synchronous admission
+  work while explicitly excluding time spent awaiting local concurrency
+  capacity. The histogram is split by bounded `pool`, `outcome`
+  (`admitted`/`rejected`), and configured admission class.
+- Added `tyr_admission_queue_wait_seconds`, which separately measures the full
+  local concurrency-acquire wait using the same bounded dimensions.
+- Admission-decision buckets start at 5 microseconds and extend through 50 ms;
+  the release headline is intended to use histogram `_sum` / `_count`, with
+  buckets reserved for distribution diagnostics.
+- Observe-mode bypasses are excluded from both timing metrics. Precheck
+  rejections preserve an exact zero queue wait.
+- `tyr.admission-provenance.v1` is unchanged. Timing remains Prometheus
+  telemetry and does not alter the exact successful-admission proof schema.
+- Updated and vendored the exact runtime dependency to
+  `async-bulkhead-llm@3.16.0`; `async-bulkhead-ts@1.0.1` remains unchanged.
+
+## What shipped in v0.26.0
 
 - Added exact, bounded successful-admission provenance to each pool's `GET /stats`
   payload. Tyr records the event synchronously from async-bulkhead-llm's
@@ -930,7 +950,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.26.0
+    version: 0.27.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -953,7 +973,7 @@ bounded by `requestTimeoutMs`.
 ### Demand-aware Latchflo heartbeats
 
 Tyr automatically derives one snapshot per managed pool from its existing
-statistics. Tyr 0.26.0 carries forward bounded per-class demand in that additive
+statistics. Tyr 0.27.0 carries forward bounded per-class demand in that additive
 heartbeat while preserving the original pool-level fields:
 
 ```json
@@ -1008,7 +1028,7 @@ identity values never become heartbeat keys. `protected*` and `borrowed*` fields
 report current use of the active floor and shared remainder. They are telemetry,
 not a request for Tyr to resize its own limits.
 
-Tyr 0.26.0 advertises `admissionClassDemand: true`,
+Tyr 0.27.0 advertises `admissionClassDemand: true`,
 `grantOccupancyAck: true`, and the additive
 `admissionClassOccupancyAck: true` capability at registration. Older control
 planes that ignore unknown capability and nested evidence fields remain
@@ -1041,7 +1061,7 @@ The acknowledgement's `occupancy` object is additive observability evidence;
 Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
 post-ack heartbeat remains the authoritative proof used by that control plane.
 
-Tyr 0.26.0 applies the same ordering to restrictive class-only changes. When a
+Tyr 0.27.0 applies the same ordering to restrictive class-only changes. When a
 protected floor is restored, the newly protected capacity reduces the shared
 remainder. Tyr therefore keeps publishing bounded class evidence until the sum
 of `borrowedConcurrent` fits within the desired shared concurrency remainder and,
@@ -1163,7 +1183,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.26.0 .
+docker build -t tyr-admission-controller:0.27.0 .
 
 The source tree must include the committed `vendor/` directory. Run `npm run verify:vendor` before building or publishing a source archive.
 ```
@@ -1176,7 +1196,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.26.0
+  tyr-admission-controller:0.27.0
 ```
 
 Or use the included Compose example:
@@ -1285,9 +1305,28 @@ request IDs are not retained in this ring.
 `/metrics` exposes Prometheus text format with only bounded dimensions: configured
 pool name, configured admission-class ID, provider shape, priority, status
 class, outcome, and enumerated reason. Model strings, request IDs, admission
-IDs, grant IDs, and tenant-supplied identity values never become metric labels. Set `TYR_OPERATOR_BEARER_TOKEN` to require
-`Authorization: Bearer <token>` for both `/stats` and `/metrics`. Leave it unset
-for the local demo or protect the endpoints at the network layer.
+IDs, grant IDs, and tenant-supplied identity values never become metric labels.
+
+Tyr 0.27.0 adds two admission-path histograms.
+`tyr_admission_decision_seconds` measures synchronous local decision work and
+**excludes** the awaited local concurrency acquire.
+`tyr_admission_queue_wait_seconds` measures that acquire wait separately. Both
+are emitted only for enforce-mode admission decisions and are split by
+`pool`, `outcome` (`admitted` or `rejected`), and bounded `admission_class`.
+Use each histogram's `_sum` / `_count` for the per-outcome mean; do not pool
+admitted and rejected decisions because their mixes can differ across arms. The
+decision histogram uses 5 µs–50 ms diagnostic buckets, while queue wait reuses
+the normal duration buckets. A precheck rejection contributes exactly zero to
+queue-wait sum.
+
+For coordination comparisons, Tyr's decision duration is the local decision
+cost to compare with an external coordinator that grants/refuses immediately;
+queue wait is local capacity contention and is intentionally not part of that
+decision-cost comparison.
+
+Set `TYR_OPERATOR_BEARER_TOKEN` to require `Authorization: Bearer <token>` for
+both `/stats` and `/metrics`. Leave it unset for the local demo or protect the
+endpoints at the network layer.
 
 Set `telemetry.audit.enabled: true` or `TYR_AUDIT_ENABLED=true` to emit one JSON
 line per admission decision. Audit output is intentionally richer than metrics

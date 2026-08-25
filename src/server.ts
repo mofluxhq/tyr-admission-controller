@@ -509,8 +509,11 @@ function validateGatewayOptions(opts: GatewayOptions): void {
 
 export function createGateway(opts: GatewayOptions) {
   validateGatewayOptions(opts);
-  const pools = createPools(opts.pools);
   const telemetry = new TyrTelemetry(opts.telemetry);
+  const pools = createPools(opts.pools, {
+    onAdmissionDecisionTiming: (event) =>
+      telemetry.recordAdmissionDecisionTiming(event),
+  });
   const retryHints = new RetryHintEstimator(opts.retryHint);
   const operatorBearerToken = opts.operatorBearerToken;
   const identityOptions = opts.identity;

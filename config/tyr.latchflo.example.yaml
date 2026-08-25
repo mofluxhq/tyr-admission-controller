@@ -65,7 +65,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.26.0
+    version: 0.27.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo

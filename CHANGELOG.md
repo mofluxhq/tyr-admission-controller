@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-08-25
+
+### Added
+
+- Added `tyr_admission_decision_seconds`, sourced directly from
+  `async-bulkhead-llm@3.16.0` admission events. It measures synchronous local
+  admission-decision work while excluding the awaited local concurrency
+  acquire.
+- Added `tyr_admission_queue_wait_seconds` for that concurrency-acquire wait.
+  Both histograms use bounded `pool`, `outcome` (`admitted`/`rejected`), and
+  `admission_class` labels; model/request/identity dimensions remain excluded.
+- Added 5 µs through 50 ms decision-duration buckets for distribution
+  diagnostics. Queue-wait timing reuses the existing duration bucket set.
+- Added executable `verify:admission-timing` coverage for admitted and rejected
+  counts, exact zero queue wait on a precheck rejection, fine decision buckets,
+  and observe-mode exclusion.
+
+### Changed
+
+- Updated the exact vendored runtime dependency from
+  `async-bulkhead-llm@3.15.1` to `async-bulkhead-llm@3.16.0`. The transitive
+  `async-bulkhead-ts@1.0.1` dependency is unchanged.
+- Admission timing is reported per outcome. `_sum` / `_count` are the intended
+  headline aggregation; histogram buckets are diagnostic rather than a
+  quantile-based headline.
+- Renumbered the planned fleet-coordination-hardening milestone from v0.27.0 to
+  v0.28.0.
+
+### Compatibility
+
+- Admission policy, Latchflo wire behavior, and request/response semantics are
+  unchanged from 0.26.0.
+- Observe-mode bypasses emit no admission timing.
+- `tyr.admission-provenance.v1` is unchanged; this release adds Prometheus
+  timing only and does not version or extend the provenance record.
+
 ## [0.26.0] - 2026-08-19
 
 ### Added
@@ -1086,7 +1122,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.24.0...v0.25.0

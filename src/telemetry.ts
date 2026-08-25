@@ -85,6 +85,22 @@ type HistogramSeries = {
   readonly buckets: number[];
 };
 
+const ADMISSION_DECISION_BUCKETS_SECONDS = [
+  0.000005,
+  0.00001,
+  0.000025,
+  0.00005,
+  0.0001,
+  0.00025,
+  0.0005,
+  0.001,
+  0.0025,
+  0.005,
+  0.01,
+  0.025,
+  0.05,
+] as const;
+
 const DURATION_BUCKETS_SECONDS = [
   0.005,
   0.01,
@@ -162,16 +178,17 @@ function addHistogramSeries(
   lines: string[],
   name: string,
   series: ReadonlyMap<string, HistogramSeries>,
+  bucketBounds: readonly number[],
 ): void {
   for (const item of [...series.values()].sort((left, right) =>
     labelsKey(left.labels).localeCompare(labelsKey(right.labels)),
   )) {
     let cumulative = 0;
-    for (let index = 0; index < DURATION_BUCKETS_SECONDS.length; index += 1) {
+    for (let index = 0; index < bucketBounds.length; index += 1) {
       cumulative += item.buckets[index] ?? 0;
       addSample(lines, `${name}_bucket`, cumulative, {
         ...item.labels,
-        le: String(DURATION_BUCKETS_SECONDS[index]),
+        le: String(bucketBounds[index]),
       });
     }
     addSample(lines, `${name}_bucket`, item.count, {
@@ -195,6 +212,8 @@ export class TyrTelemetry {
   readonly #latchfloFailures = new Map<string, CounterSeries>();
   readonly #requestDurations = new Map<string, HistogramSeries>();
   readonly #upstreamDurations = new Map<string, HistogramSeries>();
+  readonly #admissionDecisionDurations = new Map<string, HistogramSeries>();
+  readonly #admissionQueueWaitDurations = new Map<string, HistogramSeries>();
   #auditWriteFailures = 0;
 
   constructor(options: TyrTelemetryOptions = {}) {
@@ -238,6 +257,32 @@ export class TyrTelemetry {
     });
   }
 
+  recordAdmissionDecisionTiming(input: {
+    readonly pool: string;
+    readonly outcome: "admitted" | "rejected";
+    readonly admissionClass?: string;
+    readonly decisionDurationNs: number;
+    readonly queueWaitNs: number;
+  }): void {
+    const labels = {
+      pool: input.pool,
+      outcome: input.outcome,
+      admission_class: input.admissionClass ?? "none",
+    };
+    this.#observe(
+      this.#admissionDecisionDurations,
+      labels,
+      input.decisionDurationNs / 1_000_000_000,
+      ADMISSION_DECISION_BUCKETS_SECONDS,
+    );
+    this.#observe(
+      this.#admissionQueueWaitDurations,
+      labels,
+      input.queueWaitNs / 1_000_000_000,
+      DURATION_BUCKETS_SECONDS,
+    );
+  }
+
   recordRequest(input: {
     readonly pool: string;
     readonly provider: ApiShape;
@@ -250,7 +295,12 @@ export class TyrTelemetry {
       outcome: input.outcome,
     };
     this.#increment(this.#requests, labels);
-    this.#observe(this.#requestDurations, labels, input.durationSeconds);
+    this.#observe(
+      this.#requestDurations,
+      labels,
+      input.durationSeconds,
+      DURATION_BUCKETS_SECONDS,
+    );
   }
 
   recordUpstreamResponse(input: {
@@ -279,6 +329,7 @@ export class TyrTelemetry {
         outcome: input.outcome,
       },
       input.durationSeconds,
+      DURATION_BUCKETS_SECONDS,
     );
   }
 
@@ -341,11 +392,47 @@ export class TyrTelemetry {
     addMetricHeader(lines, "tyr_upstream_responses_total", "counter", "Upstream responses grouped by status class.");
     addCounterSeries(lines, "tyr_upstream_responses_total", this.#upstreamResponses);
 
+    addMetricHeader(
+      lines,
+      "tyr_admission_decision_seconds",
+      "histogram",
+      "Synchronous local admission-decision duration in seconds, excluding queue wait.",
+    );
+    addHistogramSeries(
+      lines,
+      "tyr_admission_decision_seconds",
+      this.#admissionDecisionDurations,
+      ADMISSION_DECISION_BUCKETS_SECONDS,
+    );
+
+    addMetricHeader(
+      lines,
+      "tyr_admission_queue_wait_seconds",
+      "histogram",
+      "Time spent awaiting local admission concurrency capacity in seconds.",
+    );
+    addHistogramSeries(
+      lines,
+      "tyr_admission_queue_wait_seconds",
+      this.#admissionQueueWaitDurations,
+      DURATION_BUCKETS_SECONDS,
+    );
+
     addMetricHeader(lines, "tyr_request_duration_seconds", "histogram", "End-to-end Tyr request duration in seconds.");
-    addHistogramSeries(lines, "tyr_request_duration_seconds", this.#requestDurations);
+    addHistogramSeries(
+      lines,
+      "tyr_request_duration_seconds",
+      this.#requestDurations,
+      DURATION_BUCKETS_SECONDS,
+    );
 
     addMetricHeader(lines, "tyr_upstream_duration_seconds", "histogram", "Total upstream call duration in seconds.");
-    addHistogramSeries(lines, "tyr_upstream_duration_seconds", this.#upstreamDurations);
+    addHistogramSeries(
+      lines,
+      "tyr_upstream_duration_seconds",
+      this.#upstreamDurations,
+      DURATION_BUCKETS_SECONDS,
+    );
 
     addMetricHeader(lines, "tyr_latchflo_failures_total", "counter", "Latchflo integration failures by operation and bounded reason.");
     addCounterSeries(lines, "tyr_latchflo_failures_total", this.#latchfloFailures);
@@ -771,6 +858,7 @@ export class TyrTelemetry {
     target: Map<string, HistogramSeries>,
     labels: Labels,
     rawValue: number,
+    bucketBounds: readonly number[],
   ): void {
     const value = Number.isFinite(rawValue) && rawValue >= 0 ? rawValue : 0;
     const key = labelsKey(labels);
@@ -780,15 +868,13 @@ export class TyrTelemetry {
         labels: { ...labels },
         count: 0,
         sum: 0,
-        buckets: DURATION_BUCKETS_SECONDS.map(() => 0),
+        buckets: bucketBounds.map(() => 0),
       };
       target.set(key, current);
     }
     current.count += 1;
     current.sum += value;
-    const bucketIndex = DURATION_BUCKETS_SECONDS.findIndex(
-      (bucket) => value <= bucket,
-    );
+    const bucketIndex = bucketBounds.findIndex((bucket) => value <= bucket);
     if (bucketIndex >= 0) {
       current.buckets[bucketIndex] =
         (current.buckets[bucketIndex] ?? 0) + 1;

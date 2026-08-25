@@ -114,10 +114,18 @@ try {
   assert.equal(metricsResponse.status, 200);
   const metrics = await metricsResponse.text();
   assert.equal(TYR_VERSION, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
-  assert.match(metrics, /tyr_build_info\{version="0\.26\.0"\} 1/);
+  assert.match(metrics, /tyr_build_info\{version="0\.27\.0"\} 1/);
   assert.match(
     metrics,
     /tyr_admission_decisions_total\{admission_class="none",outcome="admitted",pool="smoke",priority="normal"\} 2/,
+  );
+  assert.match(
+    metrics,
+    /tyr_admission_decision_seconds_count\{admission_class="none",outcome="admitted",pool="smoke"\} 2/,
+  );
+  assert.match(
+    metrics,
+    /tyr_admission_queue_wait_seconds_count\{admission_class="none",outcome="admitted",pool="smoke"\} 2/,
   );
   assert.match(metrics, /tyr_pool_tokens_consumed_total\{pool="smoke"\} 50/);
   assert.match(metrics, /tyr_pool_progressive_reconciliation_enabled\{pool="smoke"\} 1/);

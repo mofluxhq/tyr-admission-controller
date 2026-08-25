@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.26.0` exact-admission-provenance release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.27.0` admission-decision-instrumentation release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,13 +21,13 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.26.0
+## Current baseline: v0.27.0
 
 The current release provides:
 
 - Anthropic Messages and OpenAI Chat Completions proxy routes.
 - Model-prefix routing to independently configured local pools.
-- A v3.15 pool policy runtime using exact reservation previews, native observe
+- A v3.16 pool policy runtime using exact reservation previews, native observe
   mode, and complete versioned admission-limit snapshots.
 - Tyr-local all-or-nothing runtime updates across named pools, with stale
   revision protection and shrink-by-attrition semantics.
@@ -425,7 +425,26 @@ Outcome:
   ambiguity that previously made some safe handoffs inconclusive.
 - No admission-policy or Latchflo wire-protocol change is required.
 
-### v0.27.0 — Fleet coordination hardening
+### v0.27.0 — Admission-decision instrumentation — shipped 2026-08-25
+
+- Measures synchronous local admission-decision time separately from local
+  concurrency queue wait using `async-bulkhead-llm@3.16.0`.
+- Exposes per-outcome Prometheus histograms with bounded pool/class labels and
+  fine 5 µs–50 ms decision buckets.
+- Excludes observe-mode bypasses and preserves exact zero queue wait for
+  precheck rejections.
+- Keeps `tyr.admission-provenance.v1` unchanged.
+- Adds executable release verification so missing timing cannot be mistaken for
+  zero decision cost.
+
+Outcome:
+
+- MoFlux Bench can directly measure Tyr's local admission decision cost instead
+  of leaving the MoFlux arm permanently `not-instrumented`.
+- The coordination claim can compare local Tyr decision cost against an
+  immediate external coordinator while reporting queue contention separately.
+
+### v0.28.0 — Fleet coordination hardening
 
 **Target duration:** 4–6 weeks
 **Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas
@@ -462,7 +481,7 @@ Non-goals:
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.26.0
+**Target duration:** 3–5 weeks after v0.28.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:
