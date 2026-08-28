@@ -39,7 +39,9 @@ priority:
 # Optional capacity-aware routing across Tyr replicas. Every replica uses the
 # same secret, keeps a short-lived cache of protected peer capacity snapshots,
 # and forwards at most once to the peer with the best request-specific
-# concurrency and token headroom. Peer membership is static in this release.
+# concurrency and token headroom. In standalone mode this peer list is static;
+# in Latchflo 0.13+ managed mode it is the startup/fallback set and is replaced
+# by newer versioned routingTopology snapshots from desired state.
 # routing:
 #   capacityAware:
 #     instanceId: tyr-r1

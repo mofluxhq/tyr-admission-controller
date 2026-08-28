@@ -43,6 +43,7 @@ import {
   CapacityAwareRouter,
   TYR_ROUTING_CAPACITY_PATH,
   type CapacityRoutingOptions,
+  type CapacityRoutingTopology,
   type InternalRouteClassification,
 } from "./routing.js";
 
@@ -153,7 +154,7 @@ export type GatewayOptions = {
   retryHint?: RetryHintOptions;
   /** Optional bearer token protecting /stats and /metrics. */
   operatorBearerToken?: string;
-  /** Optional static Tyr-to-Tyr capacity-aware request routing. */
+  /** Optional Tyr-to-Tyr capacity-aware request routing. */
   capacityRouting?: CapacityRoutingOptions;
   pools: PoolConfig[];
 };
@@ -162,6 +163,11 @@ export type GatewayOptions = {
  * Narrow runtime surface intended for an embedded or remote control-plane
  * agent. Request forwarding remains encapsulated inside the gateway.
  */
+export type TyrRoutingControlPlane = {
+  /** Applies a complete higher-revision routing-membership snapshot. */
+  applyTopology(topology: CapacityRoutingTopology): boolean;
+};
+
 export type TyrControlPlane = {
   /** Current per-pool admission snapshots. */
   limits(): Record<string, LLMAdmissionLimits>;
@@ -1357,6 +1363,14 @@ export function createGateway(opts: GatewayOptions) {
     return shuttingDown;
   }
 
-  return { server, control, telemetry, shutdown };
+  const routing: TyrRoutingControlPlane | undefined =
+    capacityRouter === undefined
+      ? undefined
+      : Object.freeze({
+          applyTopology: (topology: CapacityRoutingTopology) =>
+            capacityRouter.applyTopology(topology),
+        });
+
+  return { server, control, telemetry, routing, shutdown };
 }
 

@@ -6,6 +6,7 @@ import type { LLMAdmissionLimits } from "async-bulkhead-llm";
 import {
   createLatchfloManagedMode,
   LatchfloTyrAgent,
+  type LatchfloRoutingTopology,
 } from "../src/latchflo.js";
 import type {
   AdmissionProvenance,
@@ -70,12 +71,16 @@ function createControl(initial: LLMAdmissionLimits): {
   return { control, applied };
 }
 
-function desiredState(expiresAt: string): string {
+function desiredState(
+  expiresAt: string,
+  routingTopology?: LatchfloRoutingTopology,
+): string {
   return JSON.stringify({
     controllerEpoch: 7,
     serverTime: new Date().toISOString(),
     heartbeatIntervalMs: 10_000,
     pollIntervalMs: 10_000,
+    ...(routingTopology === undefined ? {} : { routingTopology }),
     grants: [
       {
         grantId: "00000000-0000-4000-8000-000000000007",
@@ -153,6 +158,103 @@ describe("Latchflo managed mode", () => {
       controllerEpoch: 7,
       revision: 11,
     });
+    agent.stop();
+  });
+
+  it("delivers validated Latchflo routing topology without requiring it from older controllers", async () => {
+    const { control } = createControl({
+      revision: 0,
+      maxConcurrent: 0,
+      maxQueue: 0,
+    });
+    const observed: LatchfloRoutingTopology[] = [];
+    let polls = 0;
+    const fetchStub: typeof globalThis.fetch = (input) => {
+      const url = String(input);
+      if (url.endsWith("/desired-state")) {
+        polls += 1;
+        return Promise.resolve(
+          new Response(
+            desiredState(
+              new Date(Date.now() + 10_000).toISOString(),
+              polls === 1
+                ? {
+                    revision: 3,
+                    members: [
+                      { instanceId: "tyr-a", endpoint: "http://tyr-a:8787/" },
+                      { instanceId: "tyr-b", endpoint: "http://tyr-b:8787" },
+                    ],
+                  }
+                : undefined,
+            ),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    };
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: fetchStub,
+      onRoutingTopology: (topology) => observed.push(topology),
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await agent.start();
+    expect(observed).toEqual([
+      {
+        revision: 3,
+        members: [
+          { instanceId: "tyr-a", endpoint: "http://tyr-a:8787" },
+          { instanceId: "tyr-b", endpoint: "http://tyr-b:8787" },
+        ],
+      },
+    ]);
+
+    await agent.pollNow();
+    expect(observed).toHaveLength(1);
+    agent.stop();
+  });
+
+  it("rejects malformed routing endpoints before applying desired-state grants", async () => {
+    const { control, applied } = createControl({
+      revision: 0,
+      maxConcurrent: 0,
+      maxQueue: 0,
+    });
+    const fetchStub: typeof globalThis.fetch = (input) => {
+      const url = String(input);
+      if (url.endsWith("/desired-state")) {
+        return Promise.resolve(
+          new Response(
+            desiredState(new Date(Date.now() + 10_000).toISOString(), {
+              revision: 1,
+              members: [
+                { instanceId: "tyr-b", endpoint: "file:///tmp/not-routable" },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    };
+    const agent = new LatchfloTyrAgent({
+      controlPlaneUrl: "http://latchflo.invalid",
+      instanceId: "tyr-a",
+      pools: ["openai-primary"],
+      agentToken: "persisted-token",
+      control,
+      fetch: fetchStub,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    await expect(agent.start()).rejects.toThrow(/must use http or https/);
+    expect(applied).toHaveLength(0);
     agent.stop();
   });
 

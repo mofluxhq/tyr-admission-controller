@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.27.0` admission-decision-instrumentation release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.28.0` dynamic-fleet-membership release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,7 +21,7 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.27.0
+## Current baseline: v0.28.0
 
 The current release provides:
 
@@ -60,9 +60,11 @@ The current release provides:
   audit events, operator-token protection, and a provisioned Grafana demo.
 - First-class JWT/JWKS request identity, role authorization for provider and
   operator routes, role-based high priority, and identity-attributed audit events.
-- Optional request-specific capacity-aware routing across statically configured
-  Tyr replicas, with protected short-lived capacity snapshots, one-hop forwarding,
-  local tie preference, and authoritative destination admission.
+- Optional request-specific capacity-aware routing with protected short-lived
+  capacity snapshots, one-hop forwarding, local tie preference, and authoritative
+  destination admission. In Latchflo managed mode, Latchflo 0.13+ supplies a
+  versioned fleet topology that Tyr can apply without restart; standalone routing
+  retains startup-configured peers.
 - Observed-completion-based retry hints for capacity rejection responses.
 
 Known commercial limitations include a single-controller SQLite control plane, no OTLP exporter or durable audit store, direct-JWKS-only identity configuration, limited protocol coverage, and no hardened multi-region deployment package.
@@ -444,20 +446,41 @@ Outcome:
 - The coordination claim can compare local Tyr decision cost against an
   immediate external coordinator while reporting queue contention separately.
 
-### v0.28.0 — Fleet coordination hardening
+### v0.28.0 — Dynamic fleet routing membership — shipped 2026-08-28
+
+- Consumes Latchflo 0.13+ versioned `routingTopology` snapshots from desired
+  state without adding a Latchflo call to the provider request path.
+- Applies only newer complete topology revisions and filters the local Tyr
+  instance from the routable peer set.
+- Immediately removes departed peers and their cached capacity; new members and
+  endpoint replacements must earn a fresh capacity snapshot before routing.
+- Starts and stops peer polling as membership changes, allowing a fleet to move
+  from zero startup peers to dynamically discovered peers without restart.
+- Preserves static peers as the standalone/older-controller fallback.
+- Requires routing and Latchflo managed mode to use the same `instanceId`.
+- Adds executable dynamic join/remove/stale-revision/replacement verification.
+
+Outcome:
+
+- A failed Tyr can be replaced by a new fleet member with a different identity or
+  endpoint and become routable through Latchflo membership propagation rather
+  than a coordinated static-config edit.
+- Autoscaling and rolling replacement no longer require every Tyr process to be
+  restarted solely to learn the current managed fleet topology.
+
+### v0.29.0 — Multi-controller coordination hardening
 
 **Target duration:** 4–6 weeks
-**Goal:** Harden Latchflo-managed capacity allocation across multiple Tyr replicas
-and remove the remaining single-controller operational dependency.
+**Goal:** Remove the remaining single-controller operational dependency while
+preserving fail-closed grant and membership semantics.
 
 Planned work:
 
-- Define and test multi-controller failover semantics for Latchflo grants.
-- Preserve monotonic controller epochs, revisions, and grant expiration across
-  failover.
+- Define and test multi-controller failover semantics for Latchflo grants and
+  routing topology.
+- Preserve monotonic controller epochs, revisions, topology revisions, and grant
+  expiration across failover.
 - Add allocator conflict, stale-leader, clock-skew, and network-partition tests.
-- Let Latchflo distribute and update the capacity-routing topology without putting
-  Latchflo on the per-request path.
 - Expose controller health, grant age, expiration, routing-snapshot age, conflict,
   and degraded-mode metrics.
 - Add multi-process Tyr and control-plane fault-injection tests.
@@ -467,8 +490,8 @@ Exit criteria:
 
 - Multiple Tyr replicas cannot collectively exceed the capacity assigned by the
   active Latchflo controller.
-- Controller failover cannot revive stale grants or create capacity.
-- Routing membership can change without restarting Tyr and without routing loops.
+- Controller failover cannot revive stale grants, stale topology, or create
+  capacity.
 - Operators can identify stale, expiring, conflicted, and unroutable grants from
   telemetry.
 
@@ -481,7 +504,7 @@ Non-goals:
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.28.0
+**Target duration:** 3–5 weeks after v0.29.0
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:

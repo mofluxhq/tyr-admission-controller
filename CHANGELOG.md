@@ -8,6 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-28
+
+### Added
+
+- Added Latchflo 0.13+ `routingTopology` desired-state parsing with strict
+  version, member-ID, and routable endpoint validation.
+- Added a narrow gateway routing control surface that applies complete topology
+  snapshots without exposing request forwarding or admission internals.
+- Added `verify:routing-topology`, which exercises the real desired-state parser
+  and gateway path for dynamic join, removal, stale-revision rejection, and a
+  replacement Tyr joining under a new identity.
+- Added managed-mode configuration validation requiring
+  `routing.capacityAware.instanceId` to equal `controlPlane.instanceId`.
+
+### Changed
+
+- Capacity-aware routing peers can now be replaced at runtime by a newer complete
+  Latchflo topology. The local member is filtered automatically.
+- Removed peers and endpoint replacements lose cached capacity immediately; a new
+  member or endpoint must publish a fresh authenticated capacity snapshot before
+  becoming routable.
+- Peer polling now starts and stops as dynamic membership transitions between an
+  empty and non-empty peer set.
+- Static `routing.capacityAware.peers` remain the startup/fallback topology for
+  standalone Tyr and for older Latchflo controllers that omit `routingTopology`.
+
+### Compatibility
+
+- Latchflo remains off the synchronous provider request path; topology arrives on
+  the existing desired-state poll.
+- The Tyr-to-Tyr routing secret remains local configuration and is never supplied
+  by Latchflo.
+- Existing static-routing deployments continue to behave as before when no
+  `routingTopology` is received.
+- Admission policy, upstream request/response semantics,
+  `tyr.admission-provenance.v1`, and runtime dependency versions are unchanged
+  from 0.27.0.
+
 ## [0.27.0] - 2026-08-25
 
 ### Added
@@ -1122,7 +1160,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.0...v0.25.1

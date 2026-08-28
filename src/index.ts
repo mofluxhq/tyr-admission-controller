@@ -14,12 +14,24 @@ const createdGateway = createGateway({
     ? {}
     : { isReady: () => managedMode?.ready() ?? false }),
 });
-const { server, control, telemetry, shutdown } = createdGateway;
+const { server, control, telemetry, routing, shutdown } = createdGateway;
 
 if (runtime.controlPlane !== undefined) {
   managedMode = createLatchfloManagedMode({
     config: runtime.controlPlane,
     control,
+    ...(routing === undefined
+      ? {}
+      : {
+          onRoutingTopology: (topology) =>
+            routing.applyTopology({
+              revision: topology.revision,
+              peers: topology.members.map((member) => ({
+                id: member.instanceId,
+                baseUrl: member.endpoint,
+              })),
+            }),
+        }),
     onFailure: (event) => telemetry.recordLatchfloFailure(event),
   });
 }

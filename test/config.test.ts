@@ -457,6 +457,37 @@ controlPlane:
     });
   });
 
+  it("requires routing and Latchflo managed mode to use the same instance ID", () => {
+    const path = tempConfig(`
+version: 1
+routing:
+  capacityAware:
+    instanceId: tyr-routing
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    peers: []
+upstreams:
+  openai: { baseUrl: http://mock-provider:9000 }
+pools:
+  - name: openai-primary
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 0
+    maxQueue: 0
+    limitsRevision: 0
+    admissionMode: enforce
+controlPlane:
+  type: latchflo
+  url: http://latchflo:8080
+  instanceId: tyr-control
+  pools: [openai-primary]
+`);
+    expect(() =>
+      loadRuntimeConfigFile(path, {
+        TYR_ROUTING_SECRET: "a-test-secret-with-32-characters",
+      }),
+    ).toThrow(/must match controlPlane\.instanceId/);
+  });
+
   it("rejects unknown or duplicate Latchflo pool references", () => {
     const unknown = tempConfig(`
 version: 1

@@ -1,4 +1,4 @@
-# Tyr 0.25 Latchflo managed-mode example.
+# Tyr 0.28 Latchflo managed-mode example.
 version: 1
 
 server:
@@ -51,6 +51,18 @@ pools:
         - admissionClass: premium
           roles: [tier.premium]
 
+# Latchflo 0.13+ supplies the complete routable fleet in desired state. The
+# shared Tyr-to-Tyr secret stays local; it is never distributed by Latchflo.
+routing:
+  capacityAware:
+    instanceId: tyr-a
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    pollIntervalMs: 100
+    staleAfterMs: 1000
+    probeTimeoutMs: 250
+    forwardTimeoutMs: 30000
+    peers: []
+
 controlPlane:
   type: latchflo
   url: http://latchflo-control-plane:8080
@@ -65,7 +77,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.27.0
+    version: 0.28.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo

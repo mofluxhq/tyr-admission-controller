@@ -16,7 +16,7 @@ services:
   tyr:
     build:
       context: ..
-    image: tyr-admission-controller:0.27.0-demo
+    image: tyr-admission-controller:0.28.0-demo
     environment:
       TYR_CONFIG_FILE: /etc/tyr/config.yaml
     volumes:

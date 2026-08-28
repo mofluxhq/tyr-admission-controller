@@ -78,12 +78,24 @@ type CapacityGrant = {
   readonly limits: TyrAdmissionLimits;
 };
 
+export type LatchfloRoutingMember = {
+  readonly instanceId: string;
+  readonly endpoint: string;
+};
+
+export type LatchfloRoutingTopology = {
+  readonly revision: number;
+  readonly members: readonly LatchfloRoutingMember[];
+};
+
 type AgentDesiredState = {
   readonly controllerEpoch: number;
   readonly serverTime: string;
   readonly heartbeatIntervalMs: number;
   readonly pollIntervalMs: number;
   readonly grants: readonly CapacityGrant[];
+  /** Present on Latchflo 0.13+. Absent on older compatible controllers. */
+  readonly routingTopology?: LatchfloRoutingTopology;
 };
 
 type RegistrationResponse = {
@@ -249,6 +261,8 @@ export type LatchfloTyrAgentOptions = {
     | Promise<readonly PoolDemandSnapshot[]>;
   /** Called only after Latchflo accepts the heartbeat carrying demand. */
   readonly onDemandAccepted?: () => void;
+  /** Receives complete versioned fleet membership from Latchflo 0.13+. */
+  readonly onRoutingTopology?: (topology: LatchfloRoutingTopology) => void;
   readonly onFailure?: (event: {
     operation: LatchfloFailureOperation;
     reason: LatchfloFailureReason;
@@ -490,6 +504,63 @@ function parseRegistration(value: unknown): RegistrationResponse {
   };
 }
 
+function routingEndpointValue(value: unknown, field: string): string {
+  const raw = stringValue(value, field);
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${field} must be a valid absolute URL`);
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${field} must use http or https`);
+  }
+  if (
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    (parsed.pathname !== "/" && parsed.pathname !== "")
+  ) {
+    throw new Error(
+      `${field} must not contain credentials, path, query, or fragment`,
+    );
+  }
+  return parsed.origin;
+}
+
+function parseRoutingTopology(value: unknown): LatchfloRoutingTopology {
+  const topology = objectValue(value, "desired-state response.routingTopology");
+  const revision = integerValue(
+    topology["revision"],
+    "desired-state response.routingTopology.revision",
+    0,
+  );
+  const rawMembers = topology["members"];
+  if (!Array.isArray(rawMembers)) {
+    throw new Error(
+      "desired-state response.routingTopology.members must be an array",
+    );
+  }
+  const seen = new Set<string>();
+  const members = rawMembers.map((value, index): LatchfloRoutingMember => {
+    const field = `desired-state response.routingTopology.members[${index}]`;
+    const member = objectValue(value, field);
+    const instanceId = stringValue(member["instanceId"], `${field}.instanceId`);
+    if (seen.has(instanceId)) {
+      throw new Error(
+        `desired-state response.routingTopology contains duplicate member ${instanceId}`,
+      );
+    }
+    seen.add(instanceId);
+    return {
+      instanceId,
+      endpoint: routingEndpointValue(member["endpoint"], `${field}.endpoint`),
+    };
+  });
+  return { revision, members };
+}
+
 function parseDesiredState(
   value: unknown,
   expectedInstanceId: string,
@@ -515,6 +586,10 @@ function parseDesiredState(
     "desired-state response.pollIntervalMs",
     1,
   );
+  const routingTopology =
+    state["routingTopology"] === undefined
+      ? undefined
+      : parseRoutingTopology(state["routingTopology"]);
   const rawGrants = state["grants"];
   if (!Array.isArray(rawGrants)) {
     throw new Error("desired-state response.grants must be an array");
@@ -575,6 +650,7 @@ function parseDesiredState(
     heartbeatIntervalMs,
     pollIntervalMs,
     grants,
+    ...(routingTopology === undefined ? {} : { routingTopology }),
   };
 }
 
@@ -1287,6 +1363,9 @@ export class LatchfloTyrAgent {
       );
     }
     this.#controllerEpoch = state.controllerEpoch;
+    if (state.routingTopology !== undefined) {
+      this.options.onRoutingTopology?.(state.routingTopology);
+    }
     await this.#applyDesiredState(state);
   }
 
@@ -1729,6 +1808,7 @@ export function createLatchfloManagedMode(options: {
     operation: LatchfloFailureOperation;
     reason: LatchfloFailureReason;
   }) => void;
+  readonly onRoutingTopology?: (topology: LatchfloRoutingTopology) => void;
 }): LatchfloManagedMode {
   const logger = options.logger ?? console;
   const env = options.env ?? process.env;
@@ -1762,6 +1842,9 @@ export function createLatchfloManagedMode(options: {
             persistAgentToken(options.config.agentTokenFile as string, token),
         }),
     logger,
+    ...(options.onRoutingTopology === undefined
+      ? {}
+      : { onRoutingTopology: options.onRoutingTopology }),
     ...(options.onFailure === undefined
       ? {}
       : { onFailure: options.onFailure }),

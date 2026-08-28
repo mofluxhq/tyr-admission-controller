@@ -24,12 +24,19 @@ export type CapacityRoutingPeer = Readonly<{
   baseUrl: string;
 }>;
 
+export type CapacityRoutingTopology = Readonly<{
+  /** Monotonic Latchflo routing-membership revision. */
+  revision: number;
+  /** Complete routable peer snapshot. The local instance is filtered on apply. */
+  peers: readonly CapacityRoutingPeer[];
+}>;
+
 export type CapacityRoutingOptions = Readonly<{
   /** Stable local replica identifier used for deterministic tie-breaking. */
   instanceId: string;
   /** Shared secret used only on Tyr-to-Tyr routing and capacity requests. */
   sharedSecret: string;
-  /** Static peers for this release. Latchflo may distribute this topology later. */
+  /** Startup/fallback peers. Managed mode may replace them from Latchflo. */
   peers: readonly CapacityRoutingPeer[];
   /** Peer snapshot refresh cadence. Default: 100ms. */
   pollIntervalMs?: number;
@@ -1073,6 +1080,8 @@ export class CapacityAwareRouter {
   readonly #pools: Pools;
   readonly #ready: () => boolean;
   readonly #peers: Map<string, CachedPeer>;
+  #topologyRevision: number | undefined;
+  #started = false;
   #interval: ReturnType<typeof setInterval> | undefined;
   #refreshing: Promise<void> | undefined;
 
@@ -1139,15 +1148,77 @@ export class CapacityAwareRouter {
   }
 
   start(): void {
-    if (this.#interval !== undefined || this.#peers.size === 0) return;
-    void this.refresh();
-    this.#interval = setInterval(() => void this.refresh(), this.pollIntervalMs);
-    this.#interval.unref();
+    if (this.#started) return;
+    this.#started = true;
+    this.#syncPolling();
   }
 
   stop(): void {
+    this.#started = false;
     if (this.#interval !== undefined) clearInterval(this.#interval);
     this.#interval = undefined;
+  }
+
+  /**
+   * Atomically replaces the routable peer set from a newer complete topology
+   * snapshot. Static startup peers remain in force until the first topology is
+   * applied, preserving compatibility with standalone Tyr and older Latchflo.
+   */
+  applyTopology(topology: CapacityRoutingTopology): boolean {
+    if (!Number.isSafeInteger(topology.revision) || topology.revision < 0) {
+      throw new Error("capacity routing topology revision must be a non-negative safe integer");
+    }
+    if (
+      this.#topologyRevision !== undefined &&
+      topology.revision <= this.#topologyRevision
+    ) {
+      return false;
+    }
+
+    const next = new Map<string, CachedPeer>();
+    for (const configured of topology.peers) {
+      const id = configured.id.trim();
+      if (id.length === 0) {
+        throw new Error("capacity routing topology peer id must be non-empty");
+      }
+      // Latchflo publishes a complete fleet snapshot, including this replica.
+      // Never add self as a forwarding target.
+      if (id === this.instanceId) continue;
+      if (next.has(id)) {
+        throw new Error(`duplicate capacity routing topology peer id: ${id}`);
+      }
+      const peer = Object.freeze({
+        id,
+        baseUrl: normalizeBaseUrl(configured.baseUrl),
+      });
+      const current = this.#peers.get(id);
+      if (current?.peer.baseUrl === peer.baseUrl) {
+        next.set(id, current);
+      } else {
+        // A new member or endpoint must earn a fresh capacity snapshot before
+        // it can receive traffic. Replacing the cache also prevents a removed
+        // endpoint from remaining routable under the same instance ID.
+        next.set(id, { peer });
+      }
+    }
+
+    this.#peers.clear();
+    for (const [id, cached] of next) this.#peers.set(id, cached);
+    this.#topologyRevision = topology.revision;
+    this.#syncPolling();
+    return true;
+  }
+
+  #syncPolling(): void {
+    if (!this.#started || this.#peers.size === 0) {
+      if (this.#interval !== undefined) clearInterval(this.#interval);
+      this.#interval = undefined;
+      return;
+    }
+    if (this.#interval !== undefined) return;
+    void this.refresh();
+    this.#interval = setInterval(() => void this.refresh(), this.pollIntervalMs);
+    this.#interval.unref();
   }
 
   snapshot(): RoutingCapacitySnapshot {

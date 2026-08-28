@@ -1590,6 +1590,15 @@ function normalizeFileConfiguration(
     pools,
     source.path,
   );
+  if (
+    controlPlane !== undefined &&
+    capacityRouting !== undefined &&
+    controlPlane.instanceId !== capacityRouting.instanceId
+  ) {
+    throw new Error(
+      "routing.capacityAware.instanceId must match controlPlane.instanceId in Latchflo managed mode",
+    );
+  }
 
   return {
     port,

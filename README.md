@@ -5,18 +5,40 @@ Completions. Before an upstream request begins, Tyr projects the request into a
 token reservation, evaluates current concurrency and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.27.0 is built on
+Tyr 0.28.0 is built on
 [`async-bulkhead-llm@3.16.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, bounded
 identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.27.0, identity-aware distributed admission data plane,
+> **Status:** v0.28.0, identity-aware distributed admission data plane,
 > proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
 > first-class Latchflo managed mode with configuration-driven registration,
 > expiring grants, readiness, persisted agent credentials, demand reporting,
 > and fail-closed expiration behavior.
+
+## What changed in v0.28.0
+
+- Added Latchflo-managed dynamic fleet membership for capacity-aware Tyr routing.
+  Latchflo 0.13+ may publish a complete versioned `routingTopology` in desired
+  state; Tyr applies only newer revisions and replaces its peer set atomically.
+- Removed peers become unroutable immediately and their cached capacity snapshots
+  are discarded. New members and endpoint replacements must earn a fresh capacity
+  snapshot before they can receive traffic.
+- Latchflo publishes the complete fleet including the local member; Tyr always
+  filters its own `instanceId`, rejects duplicate or malformed members, and ignores
+  stale or duplicate topology revisions.
+- Capacity polling now starts and stops as the dynamic peer set becomes non-empty
+  or empty. Latchflo remains off the synchronous provider request path.
+- Static `routing.capacityAware.peers` remain the startup/fallback topology for
+  standalone deployments and for managed deployments talking to an older Latchflo
+  that does not publish `routingTopology`.
+- Latchflo-managed routing requires `routing.capacityAware.instanceId` to match
+  `controlPlane.instanceId`, preventing a topology from accidentally routing back
+  to the same Tyr process under a different identity.
+- Added executable `verify:routing-topology` coverage for wire parsing, dynamic
+  join, removal, stale-revision rejection, and replacement discovery.
 
 ## What changed in v0.27.0
 
@@ -477,9 +499,12 @@ evaluate a request. Replicas sharing a pool name must use compatible request
 projection and estimator policy. Tyr refuses to route between token-aware and token-unaware definitions of the
 same pool. Schema-3 snapshots carry protected and borrowed capacity; when local
 floors are configured, schema-1/2 peers are excluded because they cannot prove
-equivalent enforcement. Peer membership remains static startup configuration. Latchflo 0.6 consumes
-demand snapshots for allocation but does not distribute Tyr routing topology or
-shared secrets.
+equivalent enforcement. In Latchflo managed mode, Latchflo 0.13+ may publish a
+complete versioned routing topology in desired state. Tyr applies only newer
+revisions, filters itself, drops removed-peer capacity immediately, and begins
+polling newly advertised peers without a restart. The Tyr-to-Tyr shared secret is
+never distributed by Latchflo and remains local configuration. Standalone Tyr, or
+managed Tyr connected to an older Latchflo, keeps the configured startup peer list.
 
 ```yaml
 routing:
@@ -874,7 +899,7 @@ pools:
 | `identity.roles.highPriority` | No | Any matching role receives `high` admission priority |
 | `routing.capacityAware.instanceId` | Routing only | Stable identifier for this Tyr replica |
 | `routing.capacityAware.sharedSecretEnv` | Routing only | Environment variable containing the shared Tyr-to-Tyr secret |
-| `routing.capacityAware.peers` | Routing only | Static peer IDs and base URLs; do not include the local instance |
+| `routing.capacityAware.peers` | Routing only | Startup/fallback peer IDs and base URLs; managed Latchflo 0.13+ topology replaces the set after the first newer topology snapshot |
 | `routing.capacityAware.pollIntervalMs` | No | Peer snapshot refresh cadence; default `100` |
 | `routing.capacityAware.staleAfterMs` | No | Maximum usable peer snapshot age; default `1000` |
 | `routing.capacityAware.probeTimeoutMs` | No | Peer capacity-probe deadline; default `250` |
@@ -937,6 +962,14 @@ File configuration can make Latchflo operation part of Tyr's normal process
 lifecycle. No package installation or `src/index.ts` modification is required.
 
 ```yaml
+routing:
+  capacityAware:
+    instanceId: tyr-a
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    # Empty is valid in Latchflo 0.13+ managed mode; desired-state topology
+    # supplies the routable fleet after startup.
+    peers: []
+
 controlPlane:
   type: latchflo
   url: http://latchflo-control-plane:8080
@@ -950,7 +983,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.27.0
+    version: 0.28.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -960,6 +993,13 @@ The bootstrap credential is read from the named environment variable only when
 no persisted agent token exists. After registration, Tyr writes the rotated
 agent token atomically with owner-only permissions. Relative token paths are
 resolved against the configuration file directory.
+
+When both managed mode and capacity-aware routing are enabled, the routing and
+control-plane `instanceId` values must match. Latchflo 0.13+ advertises active
+agents that have routing endpoints; Tyr treats each newer topology as the complete
+peer set. Older Latchflo responses omit `routingTopology`, in which case the
+startup `peers` list remains unchanged. `TYR_ROUTING_SECRET` is still provisioned
+directly to Tyr replicas and is not part of Latchflo desired state.
 
 Tyr opens its HTTP listener even when Latchflo is temporarily unavailable so
 `/healthz` can distinguish process health from control-plane readiness.
@@ -973,7 +1013,7 @@ bounded by `requestTimeoutMs`.
 ### Demand-aware Latchflo heartbeats
 
 Tyr automatically derives one snapshot per managed pool from its existing
-statistics. Tyr 0.27.0 carries forward bounded per-class demand in that additive
+statistics. Tyr 0.28.0 carries forward bounded per-class demand in that additive
 heartbeat while preserving the original pool-level fields:
 
 ```json
@@ -1028,7 +1068,7 @@ identity values never become heartbeat keys. `protected*` and `borrowed*` fields
 report current use of the active floor and shared remainder. They are telemetry,
 not a request for Tyr to resize its own limits.
 
-Tyr 0.27.0 advertises `admissionClassDemand: true`,
+Tyr 0.28.0 advertises `admissionClassDemand: true`,
 `grantOccupancyAck: true`, and the additive
 `admissionClassOccupancyAck: true` capability at registration. Older control
 planes that ignore unknown capability and nested evidence fields remain
@@ -1061,7 +1101,7 @@ The acknowledgement's `occupancy` object is additive observability evidence;
 Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
 post-ack heartbeat remains the authoritative proof used by that control plane.
 
-Tyr 0.27.0 applies the same ordering to restrictive class-only changes. When a
+Tyr 0.28.0 applies the same ordering to restrictive class-only changes. When a
 protected floor is restored, the newly protected capacity reduces the shared
 remainder. Tyr therefore keeps publishing bounded class evidence until the sum
 of `borrowedConcurrent` fits within the desired shared concurrency remainder and,
@@ -1183,7 +1223,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.27.0 .
+docker build -t tyr-admission-controller:0.28.0 .
 
 The source tree must include the committed `vendor/` directory. Run `npm run verify:vendor` before building or publishing a source archive.
 ```
@@ -1196,7 +1236,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.27.0
+  tyr-admission-controller:0.28.0
 ```
 
 Or use the included Compose example:
@@ -1307,7 +1347,7 @@ pool name, configured admission-class ID, provider shape, priority, status
 class, outcome, and enumerated reason. Model strings, request IDs, admission
 IDs, grant IDs, and tenant-supplied identity values never become metric labels.
 
-Tyr 0.27.0 adds two admission-path histograms.
+Tyr 0.28.0 carries forward two admission-path histograms.
 `tyr_admission_decision_seconds` measures synchronous local decision work and
 **excludes** the awaited local concurrency acquire.
 `tyr_admission_queue_wait_seconds` measures that acquire wait separately. Both
@@ -1341,13 +1381,14 @@ counted by `tyr_audit_write_failures_total`.
 - Latchflo coordination uses expiring partitioned grants rather than a strict
   distributed lease on every request. Capacity can be temporarily unavailable
   during safe lease handoff.
-- Capacity-routing peer membership is static and loaded only at startup. Peer
-  snapshots are advisory and can race with authoritative admission; stale or
-  unavailable peers are ignored, and a routed rejection is returned without a
-  second automatic attempt.
-- Routing, upstream, estimator, timeout, and admission-mode configuration is
-  loaded only at startup. Only the v3.15 admission-limit snapshot is remotely
-  replaceable at runtime.
+- Capacity snapshots are advisory and can race with authoritative admission;
+  stale or unavailable peers are ignored, and a routed rejection is returned
+  without a second automatic attempt. Managed peer membership is dynamic only
+  when Latchflo 0.13+ publishes `routingTopology`; standalone peer membership
+  remains startup configuration.
+- Upstream, estimator, timeout, routing-secret, and admission-mode configuration
+  is loaded only at startup. Admission-limit snapshots and managed routing
+  topology can be replaced at runtime.
 - Adaptive calibration is local, learned only from live observations, and is not
   persisted across restarts.
 - JWT identity currently supports direct JWKS URLs and RSA signatures; OIDC discovery, EC signatures, and durable identity-policy distribution remain external work.

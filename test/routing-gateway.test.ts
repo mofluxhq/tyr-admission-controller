@@ -151,6 +151,108 @@ describe("capacity-aware Tyr-to-Tyr routing", () => {
 
 
 
+  it("applies newer dynamic topology, removes stale peers immediately, and ignores older revisions", async () => {
+    const peer = createGateway({
+      openaiUpstreamUrl: upstream.url,
+      capacityRouting: {
+        instanceId: "tyr-dynamic-b",
+        sharedSecret: SECRET,
+        peers: [],
+        pollIntervalMs: 20,
+        staleAfterMs: 200,
+      },
+      pools: [
+        {
+          name: "interactive",
+          modelPrefixes: ["gpt"],
+          model: "gpt-4o",
+          maxConcurrent: 4,
+          budget: 10_000,
+        },
+      ],
+    });
+    const peerUrl = await listen(peer.server);
+
+    const ingress = createGateway({
+      openaiUpstreamUrl: upstream.url,
+      capacityRouting: {
+        instanceId: "tyr-dynamic-a",
+        sharedSecret: SECRET,
+        peers: [],
+        pollIntervalMs: 20,
+        staleAfterMs: 200,
+      },
+      pools: [
+        {
+          name: "interactive",
+          modelPrefixes: ["gpt"],
+          model: "gpt-4o",
+          maxConcurrent: 1,
+          budget: 500,
+        },
+      ],
+    });
+    const ingressUrl = await listen(ingress.server);
+
+    try {
+      expect(ingress.routing).toBeDefined();
+      expect(
+        ingress.routing?.applyTopology({
+          revision: 10,
+          peers: [
+            { id: "tyr-dynamic-a", baseUrl: ingressUrl },
+            { id: "tyr-dynamic-b", baseUrl: peerUrl },
+          ],
+        }),
+      ).toBe(true);
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const routed = await fetch(`${ingressUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: requestBody(),
+      });
+      expect(routed.status).toBe(200);
+      expect(routed.headers.get("x-tyr-routed-to")).toBe("tyr-dynamic-b");
+
+      expect(
+        ingress.routing?.applyTopology({
+          revision: 11,
+          peers: [{ id: "tyr-dynamic-a", baseUrl: ingressUrl }],
+        }),
+      ).toBe(true);
+
+      const afterRemoval = await fetch(`${ingressUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: requestBody(),
+      });
+      expect(afterRemoval.status).toBe(429);
+      expect(afterRemoval.headers.get("x-tyr-routed-to")).toBeNull();
+
+      expect(
+        ingress.routing?.applyTopology({
+          revision: 10,
+          peers: [{ id: "tyr-dynamic-b", baseUrl: peerUrl }],
+        }),
+      ).toBe(false);
+
+      const afterStaleRevision = await fetch(
+        `${ingressUrl}/v1/chat/completions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: requestBody(),
+        },
+      );
+      expect(afterStaleRevision.status).toBe(429);
+      expect(afterStaleRevision.headers.get("x-tyr-routed-to")).toBeNull();
+    } finally {
+      await ingress.shutdown();
+      await peer.shutdown();
+    }
+  });
+
   it("moves a request to a peer when the local replica becomes full", async () => {
     let releaseHeld: (() => void) | undefined;
     const controlledUpstream = createServer((req, res) => {
