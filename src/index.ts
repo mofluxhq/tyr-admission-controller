@@ -52,6 +52,9 @@ server.listen(port, () => {
     gateway.openaiUpstreamUrl
       ? `/v1/chat/completions -> ${gateway.openaiUpstreamUrl}`
       : undefined,
+    gateway.openaiUpstreamUrl
+      ? `/v1/responses -> ${gateway.openaiUpstreamUrl}`
+      : undefined,
   ].filter(Boolean);
   console.log(`tyr-admission-controller listening on :${port} (${routes.join(", ")})`);
   if (runtime.controlPlane !== undefined) {

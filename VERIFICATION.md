@@ -1,38 +1,69 @@
-# Tyr 0.28.0 verification
+# Tyr 0.29.0 verification
 
-Date: 2026-08-28
+Date: 2026-08-30
 
 ## Version alignment
 
-- Tyr package version: `0.28.0`
-- Runtime version constant: `0.28.0`
+- Tyr package version: `0.29.0`
+- Runtime version constant: `0.29.0`
 - Runtime dependency: `async-bulkhead-llm@3.16.0`
 - Transitive bulkhead dependency: `async-bulkhead-ts@1.0.1`
-- Vendored runtime artifacts remain unchanged:
+- Vendored runtime artifacts are unchanged:
   - `vendor/async-bulkhead-llm-3.16.0.tgz`
   - `vendor/async-bulkhead-ts-1.0.1.tgz`
   - `vendor/yaml-2.9.0.tgz`
 - Managed-mode examples, demo image tag, README examples, and telemetry build-info
-  assertions report `0.28.0`.
+  assertions report `0.29.0`.
 
-## Dynamic fleet-membership verification
+## OpenAI Responses verification
 
-Tyr 0.28.0 consumes the optional Latchflo 0.13+ `routingTopology` desired-state
-field. The topology is control-plane state only: Latchflo remains outside the
-synchronous provider request/admission path.
+Tyr 0.29.0 adds admission-gated `POST /v1/responses` beside the existing
+`POST /v1/chat/completions` route when the OpenAI upstream is configured. The
+request remains in native Responses API shape; Tyr creates a separate local
+admission projection and forwards the original request body upstream.
 
-`npm run verify:routing-topology` builds Tyr and exercises the real runtime
-surfaces. It proves that:
+`npm run verify:openai-responses` builds Tyr and exercises the real adapter and
+gateway path. It verifies that:
 
-- a versioned Latchflo desired-state topology is parsed and endpoint-normalized;
-- a Tyr with an empty startup peer list can discover a peer dynamically;
-- the local Tyr member is filtered rather than becoming a forwarding target;
-- a newer complete topology removes a peer immediately and its cached capacity
-  cannot continue routing requests;
-- a delayed older topology revision is ignored and cannot resurrect that peer;
-- a replacement Tyr with a new `instanceId` becomes routable after a newer
-  topology revision and a fresh authenticated capacity snapshot;
-- topology updates do not require a Latchflo call on each provider request.
+- string and message-array `input`, `instructions`, `max_output_tokens`,
+  multimodal input blocks, and request-visible function/custom tools contribute
+  to the local admission projection;
+- the request forwarded to the provider retains the original Responses wire
+  shape rather than the admission-only normalization;
+- `authorization`, `openai-organization`, and `openai-project` remain forwarded
+  by Tyr;
+- non-streaming `usage.input_tokens` / `usage.output_tokens` reconcile the local
+  reservation;
+- semantic Responses SSE lifecycle events reconcile final usage after
+  `response.completed`;
+- unsupported hidden/server-managed prompt state is rejected before upstream
+  invocation.
+
+### Initial token-safety boundary
+
+The 0.29.0 Responses path supports stateless synchronous and streaming requests.
+Tyr rejects the following request modes because they can introduce prompt or
+execution state that is not fully visible when Tyr must reserve tokens before
+calling the provider:
+
+- `previous_response_id`;
+- server-side `conversation` state;
+- stored `prompt` templates;
+- `item_reference` inputs;
+- `background: true`;
+- provider-managed retrieval/computer tools.
+
+Request-visible `function` and `custom` tools are supported. This boundary is
+intentional: Tyr does not silently label a hidden-state request token-safe when
+it cannot reserve for all of the provider-visible work.
+
+## Carried-forward dynamic fleet-membership verification
+
+The 0.28.0 Latchflo 0.13+ `routingTopology` behavior remains part of the 0.29.0
+release candidate. `npm run verify:routing-topology` still verifies versioned
+complete topology parsing, dynamic discovery, local-member filtering, removal,
+stale-revision rejection, replacement discovery, and the fact that Latchflo
+remains outside the synchronous provider request path.
 
 The normal static `routing.capacityAware.peers` list remains the startup/fallback
 set. If desired state omits `routingTopology` (for example, with an older
@@ -51,11 +82,12 @@ local configuration and is not accepted from desired state.
 
 ## Verification commands
 
-The following checks are expected for this release:
+The release gate is expected to include:
 
 - `npm run verify:vendor`
-- `npm run typecheck`
 - `npm run lint`
+- `npm run typecheck`
+- `npm test`
 - `npm run build`
 - `npm run smoke`
 - `npm run smoke:telemetry`
@@ -63,21 +95,22 @@ The following checks are expected for this release:
 - `npm run verify:admission-timing`
 - `npm run verify:routing`
 - `npm run verify:routing-topology`
+- `npm run verify:openai-responses`
 - `npm run verify:admission-classes`
 - `npm run verify:demand`
 - `npm run verify:handoff`
 - `npm run verify:class-handoff`
 - `npm run verify:progressive`
-- Validation of `config/tyr.example.yaml`
-- Validation of `config/tyr.latchflo.example.yaml`
+- validation of `config/tyr.example.yaml`
+- validation of `config/tyr.latchflo.example.yaml`
 - `git diff --check`
 - `npm pack --dry-run`
 
-Completed successfully in this review environment:
+Completed successfully in this review environment before final packaging:
 
 - `npm run verify:vendor`
-- `npm run typecheck`
 - `npm run lint`
+- `npm run typecheck`
 - `npm run build`
 - `npm run smoke`
 - `npm run smoke:telemetry`
@@ -85,35 +118,33 @@ Completed successfully in this review environment:
 - `npm run verify:admission-timing`
 - `npm run verify:routing`
 - `npm run verify:routing-topology`
+- `npm run verify:openai-responses`
 - `npm run verify:admission-classes`
 - `npm run verify:demand`
 - `npm run verify:handoff`
 - `npm run verify:class-handoff`
 - `npm run verify:progressive`
-- Validation of `config/tyr.example.yaml`
-- Validation of `config/tyr.latchflo.example.yaml` with the routing secret set
+- validation of `config/tyr.example.yaml`
+- validation of `config/tyr.latchflo.example.yaml` with `TYR_ROUTING_SECRET` set
 - `git diff --check`
-- `npm pack --dry-run` and `npm pack`: 46 packaged files, approximately
-  140.2 kB packed / 574.0 kB unpacked.
+- `npm pack --dry-run`: 48 packaged files, approximately 143.7 kB packed /
+  591.2 kB unpacked
 
-The generated npm package tarball has SHA-256
-`92fa8f3313fc9c29d207b5b4413197e3a125a54c8df93dd773866334e3f92132`.
-
-`npm test` was also invoked and failed during Vitest startup for the environment
-reason documented below; no test file executed, so it is not counted as a pass.
+`npm test` was also invoked but did not start Vitest because of the environment
+limitation documented in the next section. No Vitest test file executed, so the
+suite is **not** counted as passing.
 
 ## Full Vitest suite limitation in this review environment
 
 The uploaded repository contains a macOS-generated `node_modules`. In this Linux
 review environment, Vitest 4 cannot start because Rolldown's optional Linux
-native binding `@rolldown/binding-linux-x64-gnu` is absent. A clean `npm ci`
-cannot be completed here because the execution environment has no npm-registry
-network access.
+native binding `@rolldown/binding-linux-x64-gnu` is absent. Registry access is
+not available here to replace the uploaded dependency tree with a clean Linux
+install.
 
-This is an environment startup failure, not a passing test result. The release
-therefore keeps executable non-Vitest verification for the new topology behavior,
-and the full suite must still be run from a clean dependency install before a
-release tag is published:
+This is an environment startup failure, not a passing test result. Before a
+0.29.0 tag or publication, run the complete release gate from a clean dependency
+install on a supported environment:
 
 ```bash
 rm -rf node_modules
@@ -121,12 +152,13 @@ npm ci
 npm run release:check
 ```
 
-`release:check` includes `verify:routing-topology` in addition to the full Vitest
-suite and all existing release verifiers.
+`release:check` includes the new `verify:openai-responses` verifier as well as the
+existing full Vitest suite and release verifiers.
 
 ## Compatibility boundary
 
-Tyr 0.28.0 changes managed capacity-routing membership, not admission policy.
-Static/standalone routing remains supported. Upstream request/response semantics,
-`tyr.admission-provenance.v1`, admission timing, and the exact runtime dependency
-versions are unchanged from 0.27.0.
+Tyr 0.29.0 adds one OpenAI endpoint and intentionally does not translate between
+Responses and Chat Completions. Existing Anthropic Messages, OpenAI Chat
+Completions, identity, pool selection, capacity-aware routing, Latchflo desired
+state, admission provenance/timing, and static-routing behavior remain on their
+existing paths. Runtime dependency versions are unchanged from 0.28.0.

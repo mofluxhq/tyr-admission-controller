@@ -23,7 +23,12 @@ import {
   retryAfterSeconds,
   type RetryHintOptions,
 } from "./retry-hint.js";
-import { anthropicAdapter, openaiAdapter, type Adapter } from "./adapters.js";
+import {
+  anthropicAdapter,
+  openaiAdapter,
+  openaiResponsesAdapter,
+  type Adapter,
+} from "./adapters.js";
 import {
   hasAnyRole,
   normalizeRequestIdentity,
@@ -55,7 +60,8 @@ export type GatewayOptions = {
   upstreamUrl?: string;
   /**
    * OpenAI-shaped upstream base URL, e.g. "https://api.openai.com".
-   * Powers `POST /v1/chat/completions`. Omit to disable that route.
+   * Powers `POST /v1/chat/completions` and `POST /v1/responses`. Omit to
+   * disable both OpenAI routes.
    */
   openaiUpstreamUrl?: string;
   /**
@@ -1211,6 +1217,9 @@ export function createGateway(opts: GatewayOptions) {
   const handleOpenAI = openaiUpstream
     ? makeHandler(openaiAdapter, openaiUpstream)
     : undefined;
+  const handleOpenAIResponses = openaiUpstream
+    ? makeHandler(openaiResponsesAdapter, openaiUpstream)
+    : undefined;
 
   async function authorizeOperator(
     req: IncomingMessage,
@@ -1300,6 +1309,16 @@ export function createGateway(opts: GatewayOptions) {
         return;
       }
       void handleOpenAI(req, res).catch(() => {
+        if (!res.headersSent) sendJson(res, 500, { error: { type: "internal" } });
+      });
+      return;
+    }
+    if (req.method === "POST" && pathname === openaiResponsesAdapter.path) {
+      if (!handleOpenAIResponses) {
+        sendJson(res, 404, { error: { type: "route_not_configured" } });
+        return;
+      }
+      void handleOpenAIResponses(req, res).catch(() => {
         if (!res.headersSent) sendJson(res, 500, { error: { type: "internal" } });
       });
       return;

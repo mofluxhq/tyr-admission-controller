@@ -9,6 +9,7 @@ import type { LLMRequest, TokenUsage } from "async-bulkhead-llm";
 import { createAdmissionRequest } from "./admission.js";
 import { createSSEUsageExtractor, type UsageObservation } from "./sse.js";
 import { createOpenAISSEUsageExtractor } from "./sse-openai.js";
+import { createOpenAIResponsesSSEUsageExtractor } from "./sse-responses.js";
 import {
   isNonEmptyString,
   isPlainObject,
@@ -74,6 +75,134 @@ const OPENAI_ROLES = ["system", "user", "assistant", "tool", "function"] as cons
 // OpenAI assistant turns issuing tool calls (and tool-result turns) may
 // carry `content: null`.
 const OPENAI_NULLABLE_CONTENT_ROLES = ["assistant", "tool", "function"] as const;
+
+function isOpenAIResponsesTool(tool: unknown): boolean {
+  if (!isPlainObject(tool) || !isNonEmptyString(tool["type"])) return false;
+  // Tyr 0.29 supports request-visible tool definitions only. Provider-managed
+  // retrieval/computer tools can inject input tokens that are not observable
+  // at admission time and are rejected below rather than under-reserved.
+  if (tool["type"] !== "function" && tool["type"] !== "custom") return false;
+  return isNonEmptyString(tool["name"]);
+}
+
+const OPENAI_RESPONSES_ROLES = [
+  "user",
+  "assistant",
+  "system",
+  "developer",
+] as const;
+
+function validateResponsesContent(value: unknown, fieldName: string): string[] {
+  if (typeof value === "string") return [];
+  if (!Array.isArray(value)) {
+    return [`${fieldName} must be a string or an array of content blocks`];
+  }
+  const errors: string[] = [];
+  value.forEach((block, index) => {
+    if (!isPlainObject(block) || !isNonEmptyString(block["type"])) {
+      errors.push(`${fieldName}[${index}] must be an object with a non-empty type`);
+      return;
+    }
+    if (
+      (block["type"] === "input_text" || block["type"] === "text") &&
+      typeof block["text"] !== "string"
+    ) {
+      errors.push(`${fieldName}[${index}].text must be a string`);
+    }
+  });
+  return errors;
+}
+
+function validateResponsesInput(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (typeof value === "string") return [];
+  if (!Array.isArray(value)) {
+    return ["input must be a string or an array of response input items"];
+  }
+  const errors: string[] = [];
+  value.forEach((item, index) => {
+    if (!isPlainObject(item)) {
+      errors.push(`input[${index}] must be an object`);
+      return;
+    }
+    if (item["type"] === "item_reference") {
+      errors.push(
+        `input[${index}] item_reference is not supported because referenced prompt tokens are hidden at admission time`,
+      );
+      return;
+    }
+    const role = item["role"];
+    const isMessage = role !== undefined || item["type"] === "message";
+    if (isMessage) {
+      if (
+        typeof role !== "string" ||
+        !OPENAI_RESPONSES_ROLES.includes(
+          role as (typeof OPENAI_RESPONSES_ROLES)[number],
+        )
+      ) {
+        errors.push(
+          `input[${index}].role must be one of ${OPENAI_RESPONSES_ROLES.join(", ")}`,
+        );
+      }
+      errors.push(...validateResponsesContent(item["content"], `input[${index}].content`));
+      return;
+    }
+    if (!isNonEmptyString(item["type"])) {
+      errors.push(`input[${index}].type must be a non-empty string`);
+    }
+  });
+  return errors;
+}
+
+function responsesContentForAdmission(value: unknown): unknown {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value.map((block) => {
+    if (!isPlainObject(block)) return block;
+    if (block["type"] === "input_text" && typeof block["text"] === "string") {
+      return { ...block, type: "text" };
+    }
+    return block;
+  });
+}
+
+function projectResponsesInput(value: unknown): {
+  messages: unknown[];
+  extraItems: unknown[];
+  messageMetadata: unknown[];
+} {
+  if (typeof value === "string") {
+    return {
+      messages: [{ role: "user", content: value }],
+      extraItems: [],
+      messageMetadata: [],
+    };
+  }
+  if (!Array.isArray(value)) {
+    return { messages: [], extraItems: [], messageMetadata: [] };
+  }
+
+  const messages: unknown[] = [];
+  const extraItems: unknown[] = [];
+  const messageMetadata: unknown[] = [];
+  for (const item of value) {
+    if (!isPlainObject(item)) continue;
+    if (typeof item["role"] === "string" || item["type"] === "message") {
+      messages.push({
+        role: typeof item["role"] === "string" ? item["role"] : "",
+        content: responsesContentForAdmission(item["content"]),
+      });
+      const metadata: Record<string, unknown> = {};
+      for (const [key, child] of Object.entries(item)) {
+        if (key !== "role" && key !== "content") metadata[key] = child;
+      }
+      if (Object.keys(metadata).length > 0) messageMetadata.push(metadata);
+    } else {
+      extraItems.push(item);
+    }
+  }
+  return { messages, extraItems, messageMetadata };
+}
 
 export const anthropicAdapter: Adapter = {
   shape: "anthropic",
@@ -234,5 +363,121 @@ export const openaiAdapter: Adapter = {
   },
   createStreamExtractor(onUsage) {
     return createOpenAISSEUsageExtractor(onUsage);
+  },
+};
+
+export const openaiResponsesAdapter: Adapter = {
+  shape: "openai",
+  path: "/v1/responses",
+  forwardHeaders: [
+    "content-type",
+    "authorization",
+    "openai-organization",
+    "openai-project",
+  ],
+  validate(body, opts) {
+    const errors: string[] = [];
+    if (!isPlainObject(body)) {
+      return { ok: false, errors: ["request body must be a JSON object"] };
+    }
+    if (!isNonEmptyString(body["model"])) {
+      errors.push("model must be a non-empty string");
+    }
+    errors.push(...validateResponsesInput(body["input"]));
+    if (body["instructions"] !== undefined && typeof body["instructions"] !== "string") {
+      errors.push("instructions must be a string");
+    }
+    errors.push(
+      ...validateOutputLimit(
+        body["max_output_tokens"],
+        "max_output_tokens",
+        opts.maxOutputTokens,
+      ),
+    );
+    errors.push(...validateOptionalBoolean(body["stream"], "stream"));
+    errors.push(...validateOptionalBoolean(body["background"], "background"));
+    if (body["background"] === true) {
+      errors.push(
+        "background=true is not supported because provider execution continues after the HTTP response and cannot retain a bounded admission reservation",
+      );
+    }
+    if (body["previous_response_id"] !== undefined) {
+      errors.push(
+        "previous_response_id is not supported because prior response tokens are hidden at admission time",
+      );
+    }
+    if (body["conversation"] !== undefined) {
+      errors.push(
+        "conversation is not supported because server-side conversation tokens are hidden at admission time",
+      );
+    }
+    if (body["prompt"] !== undefined) {
+      errors.push(
+        "stored prompt templates are not supported because template tokens are hidden at admission time",
+      );
+    }
+    if (body["tools"] !== undefined) {
+      if (!Array.isArray(body["tools"])) {
+        errors.push("tools must be an array");
+      } else {
+        body["tools"].forEach((tool, index) => {
+          if (!isOpenAIResponsesTool(tool)) {
+            errors.push(
+              `tools[${index}] must be a request-visible function or custom tool`,
+            );
+          }
+        });
+      }
+    }
+    if (errors.length > 0) return { ok: false, errors };
+    return { ok: true, value: body };
+  },
+  toAdmissionRequest(body) {
+    const model = typeof body["model"] === "string" ? body["model"] : "";
+    const projected = projectResponsesInput(body["input"]);
+    return createAdmissionRequest({
+      model,
+      ...(typeof body["max_output_tokens"] === "number"
+        ? { maxTokens: body["max_output_tokens"] }
+        : {}),
+      messages: projected.messages,
+      ...(typeof body["instructions"] === "string"
+        ? { system: body["instructions"] }
+        : {}),
+      promptExtras: {
+        ...(projected.extraItems.length > 0
+          ? { response_input_items: projected.extraItems }
+          : {}),
+        ...(projected.messageMetadata.length > 0
+          ? { response_input_message_metadata: projected.messageMetadata }
+          : {}),
+        tools: body["tools"],
+        tool_choice: body["tool_choice"],
+        text: body["text"],
+        reasoning: body["reasoning"],
+      },
+    });
+  },
+  isStreamRequested(body) {
+    return body["stream"] === true;
+  },
+  parseUsage(json) {
+    if (json === null || typeof json !== "object") return undefined;
+    const parsed = json as {
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+    if (
+      typeof parsed.usage?.input_tokens === "number" &&
+      typeof parsed.usage?.output_tokens === "number"
+    ) {
+      return {
+        input: parsed.usage.input_tokens,
+        output: parsed.usage.output_tokens,
+      };
+    }
+    return undefined;
+  },
+  createStreamExtractor(onUsage) {
+    return createOpenAIResponsesSSEUsageExtractor(onUsage);
   },
 };

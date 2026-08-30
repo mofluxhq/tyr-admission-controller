@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-08-30
+
+### Added
+
+- Added admission-gated `POST /v1/responses` on the configured OpenAI upstream.
+  The route preserves the native Responses wire shape and shares Tyr's existing
+  pool selection, identity, admission-class, routing, telemetry, timeout, and
+  provider-header forwarding pipeline.
+- Added Responses admission projection for string/message-array `input`,
+  `instructions`, `max_output_tokens`, request-visible `function` and `custom`
+  tools, text/reasoning configuration, and multimodal `input_image` /
+  `input_file` blocks.
+- Added non-streaming `usage.input_tokens` / `usage.output_tokens` reconciliation
+  and semantic SSE usage extraction from Responses lifecycle events such as
+  `response.completed`.
+- Added `verify:openai-responses` executable coverage for projection, raw request
+  passthrough, OpenAI credential headers, non-streaming and streaming usage, and
+  conservative hidden-state rejection.
+
+### Safety
+
+- The initial Responses implementation rejects `previous_response_id`,
+  server-side `conversation`, stored `prompt` templates, `item_reference`,
+  `background: true`, and provider-managed retrieval/computer tools. Those modes
+  can add prompt or execution state that is not visible when Tyr must reserve
+  capacity before provider invocation; rejecting them avoids presenting an
+  under-reserved request as token-safe.
+
+### Documentation
+
+- Updated the README, route/configuration references, examples, container tags,
+  roadmap, and verification guide for 0.29.0.
+- Corrected stale wording that still described Latchflo 0.8.x as current and
+  moved multi-controller coordination hardening behind self-serve evaluation and
+  demonstrated deployment demand.
+
 ## [0.28.0] - 2026-08-28
 
 ### Added
@@ -71,8 +107,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admission timing is reported per outcome. `_sum` / `_count` are the intended
   headline aggregation; histogram buckets are diagnostic rather than a
   quantile-based headline.
-- Renumbered the planned fleet-coordination-hardening milestone from v0.27.0 to
-  v0.28.0.
+- At the time, renumbered the planned fleet-coordination-hardening milestone from
+  v0.27.0 to v0.28.0. The roadmap was subsequently reprioritized; v0.28.0
+  ultimately shipped dynamic fleet routing membership instead.
 
 ### Compatibility
 
@@ -242,7 +279,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failed heartbeat does not advance class counters, so a later retry carries all
   activity since the last heartbeat Latchflo actually accepted.
 - Tyr now advertises `capabilities.admissionClassDemand: true` alongside
-  `admissionClasses: true` when registering with Latchflo. Current Latchflo 0.8.x
+  `admissionClasses: true` when registering with Latchflo. The then-current Latchflo 0.8.x
   ignores the additive capability and nested heartbeat field; a class-demand-aware
   allocator can opt into the richer signal without changing Tyr's request path.
 - Extended executable demand verification and unit coverage for deterministic
@@ -1160,7 +1197,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.25.1...v0.26.0

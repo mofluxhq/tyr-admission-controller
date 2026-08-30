@@ -2,7 +2,7 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.28.0` dynamic-fleet-membership release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.29.0` OpenAI Responses release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
 
 ## Product direction
 
@@ -21,11 +21,11 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.28.0
+## Current baseline: v0.29.0
 
 The current release provides:
 
-- Anthropic Messages and OpenAI Chat Completions proxy routes.
+- Anthropic Messages, OpenAI Chat Completions, and stateless OpenAI Responses proxy routes.
 - Model-prefix routing to independently configured local pools.
 - A v3.16 pool policy runtime using exact reservation previews, native observe
   mode, and complete versioned admission-limit snapshots.
@@ -217,7 +217,7 @@ Delivered:
 
 Outcome:
 
-- A future central allocator can issue bounded, versioned grants without joining every request path.
+- This snapshot model established the bounded, versioned grant surface later consumed by Latchflo without joining every request path.
 - Tyr can safely reduce or restore local capacity without restarting or cancelling active work.
 - Delayed or duplicated control messages cannot overwrite a newer local revision.
 
@@ -341,7 +341,7 @@ Shipped:
 - Added per-class accepted-heartbeat checkpoints so failed control-plane calls do
   not lose demand evidence.
 - Advertised `capabilities.admissionClassDemand: true` while preserving wire
-  compatibility with Latchflo 0.8.x, which ignores the additive fields.
+  compatibility with the then-current Latchflo 0.8.x, which ignored the additive fields.
 - Kept lending policy out of Tyr: the gateway reports demand and continues to
   enforce only the complete higher-revision limit snapshots issued by Latchflo.
 
@@ -468,43 +468,62 @@ Outcome:
 - Autoscaling and rolling replacement no longer require every Tyr process to be
   restarted solely to learn the current managed fleet topology.
 
-### v0.29.0 — Multi-controller coordination hardening
+### v0.29.0 — OpenAI Responses API — shipped 2026-08-30
 
-**Target duration:** 4–6 weeks
-**Goal:** Remove the remaining single-controller operational dependency while
-preserving fail-closed grant and membership semantics.
+- Added `POST /v1/responses` on the existing OpenAI upstream configuration.
+- Added stateless request projection for `input`, `instructions`,
+  `max_output_tokens`, request-visible function/custom tools, structured text
+  configuration, reasoning configuration, and multimodal input blocks.
+- Added non-streaming Responses usage reconciliation and semantic SSE usage
+  extraction from final response lifecycle events.
+- Preserved raw OpenAI request passthrough and provider credential ownership.
+- Rejected hidden-state modes (`previous_response_id`, server-side
+  `conversation`, stored `prompt`, `item_reference`), `background: true`, and
+  provider-managed retrieval/computer tools until Tyr can reserve their unseen
+  capacity without undercounting.
+- Added executable Responses compatibility verification and corrected stale
+  current-state documentation.
+
+Outcome:
+
+- New OpenAI applications can use the recommended Responses endpoint through Tyr
+  without falling back to Chat Completions for admission control.
+- Tyr keeps its pre-upstream token-reservation guarantee explicit rather than
+  pretending unseen provider-managed state can be estimated safely.
+
+### v0.30.0 — Self-serve evaluation path
+
+**Goal:** Make it possible for an engineer to prove Tyr's value against a real
+OpenAI workload without a design-partner engagement or custom deployment work.
 
 Planned work:
 
-- Define and test multi-controller failover semantics for Latchflo grants and
-  routing topology.
-- Preserve monotonic controller epochs, revisions, topology revisions, and grant
-  expiration across failover.
-- Add allocator conflict, stale-leader, clock-skew, and network-partition tests.
-- Expose controller health, grant age, expiration, routing-snapshot age, conflict,
-  and degraded-mode metrics.
-- Add multi-process Tyr and control-plane fault-injection tests.
-- Publish conservative fail-closed deployment and recovery guidance.
+- Publish a minimal OpenAI SDK quickstart for both `responses.create(...)` and
+  Chat Completions with Tyr as the base URL.
+- Provide a single-node evaluation configuration with interactive/batch admission
+  classes, Prometheus metrics, and explicit cost controls.
+- Add a small live-provider Responses compatibility check to MoFlux Bench rather
+  than another broad benchmark campaign.
+- Tighten deployment/readiness documentation and produce a short evaluation
+  checklist that can be completed before introducing Latchflo.
 
 Exit criteria:
 
-- Multiple Tyr replicas cannot collectively exceed the capacity assigned by the
-  active Latchflo controller.
-- Controller failover cannot revive stale grants, stale topology, or create
-  capacity.
-- Operators can identify stale, expiring, conflicted, and unroutable grants from
-  telemetry.
+- A new evaluator can launch Tyr, point an OpenAI SDK at it, run a protected
+  interactive-versus-batch workload, and inspect the resulting admission metrics
+  without modifying Tyr source code.
+- The evaluation path does not require Kubernetes or Latchflo.
 
 Non-goals:
 
-- Embedding a second coordination system directly in Tyr.
-- Automatically discovering provider quotas.
-- Making Kubernetes the source of admission correctness.
+- Multi-controller control-plane hardening without a demonstrated deployment
+  requirement.
+- A management UI.
 
 
 ### v1.0.0 — Supported production release
 
-**Target duration:** 3–5 weeks after v0.29.0
+**Timing:** After v0.30.0 and sufficient design-partner validation.
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:
@@ -550,59 +569,8 @@ These items are valuable but should follow demonstrated customer demand.
 
 ### Coordination
 
-1. A small centralized capacity coordinator when Redis operational or consistency limits become material.
-2. Provider-quota allocation issued to replicas when Tyr has enough provider-specific quota data to rebalance intelligently.
-3. Kubernetes-aware dynamic partitioning as an optional degraded or Redis-free mode, not the default distributed correctness mechanism.
-
-## Explicitly out of scope before v1.0
-
-- Competing with broad gateways on provider count.
-- A full identity provider or API-key management platform.
-- A general-purpose billing system.
-- A proprietary observability dashboard before exported telemetry proves insufficient.
-- Response caching or stochastic-request deduplication by default.
-- Automatic retries after an upstream request may have begun.
-- An unbounded admission queue.
-
-## Commercial validation plan
-
-Engineering milestones do not establish market viability on their own. Each design partner should have concurrent LLM workloads and an observable saturation problem, such as provider throttling, retry storms, unpredictable latency, GPU exhaustion, or interactive traffic being starved by batch work.
-
-Track these outcomes during pilots:
-
-- Provider `429` and timeout rate before and after Tyr.
-- Requests rejected locally before upstream execution.
-- Completion rate of high-priority traffic during saturation.
-- Estimated versus actual token error distribution.
-- Capacity utilization and reservation refund rate.
-- User-visible tail latency.
-- Operational incidents attributable to gateway or coordinator failure.
-- Willingness to pay for distributed coordination, tenant policy, audit, or support.
-
-The roadmap should be reconsidered if pilots do not show that early rejection protects more valuable work or reduces saturation incidents. In that case, Tyr should remain a focused open-source library and sidecar rather than expand into a standalone commercial platform.
-
-## Release decision rules
-
-A milestone may ship only when:
-
-- New behavior has unit, integration, and failure-path coverage.
-- Admission behavior remains fail-safe under malformed inputs and dependency failures.
-- New metrics have bounded cardinality.
-- Security-sensitive defaults require explicit opt-in to weaken.
-- Upgrade and rollback behavior is documented.
-- The release notes distinguish admission-time guarantees from post-admission usage overruns.
-
-Timeline estimates are directional and should be revised after each design-partner milestone. Customer evidence may reorder protocol and integration work after v0.11.0, but observability, trustworthy identity, and distributed correctness remain prerequisites for a production product.
-
-
-## Shipped in v0.23.0
-
-- Protected identity-aware admission classes using
-  `async-bulkhead-llm@3.15.1`.
-- First-match claim rules, class-aware schema-3 routing, bounded telemetry, and
-  fixed-key runtime class-limit updates.
-- Latchflo-distributed class ceilings and protected floors with atomic grant
-  application and shrink-by-attrition restoration.
-- Bounded per-class demand heartbeats with accepted-heartbeat delta retention,
-  protected/borrowed utilization, and additive capability signaling for future
-  demand-aware class-floor lending.
+1. Multi-controller Latchflo failover and fencing hardening when a real deployment
+   requires removal of the single-controller operational dependency.
+2. A small centralized capacity coordinator when Redis operational or consistency limits become material.
+3. Provider-quota allocation issued to replicas when Tyr has enough provider-specific quota data to rebalance intelligently.
+4. Kubernetes-aware dynamic partitioning as an optional degraded or Redis-free mode, not the default distributed correctness mechanism.

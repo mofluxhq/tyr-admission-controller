@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { LLMRequest } from "async-bulkhead-llm";
-import { anthropicAdapter, openaiAdapter } from "../src/adapters.js";
+import {
+  anthropicAdapter,
+  openaiAdapter,
+  openaiResponsesAdapter,
+} from "../src/adapters.js";
 import {
   createAdmissionTokenEstimator,
   OPAQUE_MEDIA_INPUT_TOKENS,
@@ -82,6 +86,43 @@ describe("v3.11 admission projection", () => {
     expect(withToolCall.extraInputTokens).toBeGreaterThan(
       basic.extraInputTokens ?? 0,
     );
+  });
+
+  it("projects OpenAI Responses input, instructions, tools, and media for admission", () => {
+    const request = openaiResponsesAdapter.toAdmissionRequest({
+      model: "gpt-5.6",
+      max_output_tokens: 128,
+      instructions: "follow policy",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: "describe this" },
+            { type: "input_image", image_url: "https://example.test/x.png" },
+          ],
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          name: "lookup",
+          parameters: { type: "object", properties: { query: { type: "string" } } },
+        },
+      ],
+    });
+
+    expect(request.system).toBe("follow policy");
+    expect(request.max_tokens).toBe(128);
+    expect(request.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "describe this" },
+          { type: "input_image", image_url: "https://example.test/x.png" },
+        ],
+      },
+    ]);
+    expect(request.extraInputTokens).toBeGreaterThan(0);
   });
 
   it("uses v3.11 opaqueBlockTokens and permits an operator override", () => {

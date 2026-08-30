@@ -168,13 +168,75 @@ function startMockOpenAIUpstream(): Promise<{ server: Server; url: string }> {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
     req.on("end", () => {
-      const body = JSON.parse(Buffer.concat(chunks).toString()) as {
-        stream?: boolean;
-        messages: { content: string }[];
-      };
-      const slow = body.messages[0]?.content.includes("slow") ?? false;
+      const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>;
+      const pathname = new URL(req.url ?? "/", "http://mock").pathname;
+      const messages = Array.isArray(body["messages"])
+        ? (body["messages"] as Array<Record<string, unknown>>)
+        : [];
+      const input = body["input"];
+      const visibleText =
+        typeof input === "string"
+          ? input
+          : messages.length > 0 && typeof messages[0]?.["content"] === "string"
+            ? String(messages[0]?.["content"])
+            : JSON.stringify(input ?? "");
+      const slow = visibleText.includes("slow");
+      const stream = body["stream"] === true;
 
-      if (body.stream) {
+      if (pathname === "/v1/responses") {
+        if (stream) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(
+            `event: response.created\ndata: ${JSON.stringify({
+              type: "response.created",
+              response: { id: "resp_mock", status: "in_progress", usage: null },
+            })}\n\n`,
+          );
+          res.write(
+            `event: response.output_text.delta\ndata: ${JSON.stringify({
+              type: "response.output_text.delta",
+              delta: "hello",
+            })}\n\n`,
+          );
+          const finish = () => {
+            res.write(
+              `event: response.completed\ndata: ${JSON.stringify({
+                type: "response.completed",
+                response: {
+                  id: "resp_mock",
+                  status: "completed",
+                  usage: { input_tokens: 20, output_tokens: 40, total_tokens: 60 },
+                },
+              })}\n\n`,
+            );
+            res.end();
+          };
+          setTimeout(finish, slow ? 500 : 5);
+        } else {
+          const wait = slow ? 300 : 0;
+          setTimeout(() => {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(
+              JSON.stringify({
+                id: "resp_mock",
+                object: "response",
+                status: "completed",
+                output: [
+                  {
+                    type: "message",
+                    role: "assistant",
+                    content: [{ type: "output_text", text: "hello" }],
+                  },
+                ],
+                usage: { input_tokens: 20, output_tokens: 30, total_tokens: 50 },
+              }),
+            );
+          }, wait);
+        }
+        return;
+      }
+
+      if (stream) {
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.write(
           `data: ${JSON.stringify({
@@ -1295,7 +1357,7 @@ describe("admission-gateway", () => {
         "text/plain; version=0.0.4",
       );
       const metrics = await metricsResponse.text();
-      expect(metrics).toContain('tyr_build_info{version="0.28.0"} 1');
+      expect(metrics).toContain('tyr_build_info{version="0.29.0"} 1');
       expect(metrics).toContain(
         'tyr_admission_decisions_total{admission_class="none",outcome="admitted",pool="test-pool",priority="normal"} 1',
       );
@@ -1706,6 +1768,119 @@ describe("admission-gateway", () => {
     }
   });
 
+  it("proxies OpenAI Responses requests and reconciles non-streaming usage", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    try {
+      const res = await fetch(`${gw.url}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          input: "hi",
+          max_output_tokens: 100,
+        }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { id: string };
+      expect(body.id).toBe("resp_mock");
+
+      const stats = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
+        string,
+        { tokenBudget: { totalConsumed: number; totalRefunded: number; inFlightTokens: number } }
+      >;
+      const tb = stats["test-pool"]!.tokenBudget;
+      expect(tb.totalConsumed).toBe(50);
+      expect(tb.totalRefunded).toBeGreaterThan(0);
+      expect(tb.inFlightTokens).toBe(0);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("streams OpenAI Responses semantic SSE and reconciles final usage", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    try {
+      const res = await fetch(`${gw.url}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          input: "hi",
+          max_output_tokens: 100,
+          stream: true,
+        }),
+      });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toContain("response.output_text.delta");
+      expect(text).toContain("response.completed");
+
+      const stats = (await (await fetch(`${gw.url}/stats`)).json()) as Record<
+        string,
+        { tokenBudget: { inFlightTokens: number; totalConsumed: number } }
+      >;
+      expect(stats["test-pool"]!.tokenBudget.inFlightTokens).toBe(0);
+      expect(stats["test-pool"]!.tokenBudget.totalConsumed).toBe(60);
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("rejects Responses modes whose hidden provider state cannot be token-safe at admission", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    try {
+      for (const extra of [
+        { previous_response_id: "resp_previous" },
+        { conversation: "conv_previous" },
+        { prompt: { id: "pmpt_hidden" } },
+        { background: true },
+        { tools: [{ type: "web_search" }] },
+      ]) {
+        const res = await fetch(`${gw.url}/v1/responses`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            model: "gpt-4o",
+            input: "hi",
+            max_output_tokens: 100,
+            ...extra,
+          }),
+        });
+        expect(res.status).toBe(400);
+        const body = (await res.json()) as { error: { type: string; errors: string[] } };
+        expect(body.error.type).toBe("invalid_request");
+        expect(body.error.errors.length).toBeGreaterThan(0);
+      }
+    } finally {
+      gw.server.close();
+    }
+  });
+
+  it("accepts request-visible Responses function tools", async () => {
+    const gw = await startGateway({ maxConcurrent: 4, budget: 5000 });
+    try {
+      const res = await fetch(`${gw.url}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "gpt-4o",
+          input: [{ role: "user", content: [{ type: "input_text", text: "weather" }] }],
+          max_output_tokens: 100,
+          tools: [
+            {
+              type: "function",
+              name: "weather",
+              parameters: { type: "object", properties: {} },
+            },
+          ],
+        }),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      gw.server.close();
+    }
+  });
+
   it("returns 504 response_timeout when responseTimeoutMs elapses before upstream sends headers", async () => {
     const gw = await startGateway(
       { maxConcurrent: 4, budget: 5000 },
@@ -1979,6 +2154,12 @@ describe("admission-gateway", () => {
         body: JSON.stringify(msg("hi", { model: "gpt-4o" })),
       });
       expect(res.status).toBe(404);
+      const responses = await fetch(`${url}/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "gpt-4o", input: "hi" }),
+      });
+      expect(responses.status).toBe(404);
     } finally {
       server.close();
     }

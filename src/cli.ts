@@ -45,6 +45,7 @@ try {
     runtime.gateway.openaiUpstreamUrl !== undefined
       ? "/v1/chat/completions"
       : undefined,
+    runtime.gateway.openaiUpstreamUrl !== undefined ? "/v1/responses" : undefined,
   ].filter((route): route is string => route !== undefined);
 
   console.log("configuration valid");

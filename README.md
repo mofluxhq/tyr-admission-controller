@@ -1,22 +1,50 @@
 # Tyr Admission Controller
 
-Tyr is an admission-first proxy for Anthropic Messages and OpenAI Chat
-Completions. Before an upstream request begins, Tyr projects the request into a
-token reservation, evaluates current concurrency and token pressure, and either
+Tyr is an admission-first proxy for Anthropic Messages, OpenAI Chat
+Completions, and the OpenAI Responses API. Before an upstream request begins,
+Tyr projects the request into a token reservation, evaluates current concurrency
+and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.28.0 is built on
+Tyr 0.29.0 is built on
 [`async-bulkhead-llm@3.16.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, bounded
 identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.28.0, identity-aware distributed admission data plane,
+> **Status:** v0.29.0, identity-aware distributed admission data plane,
 > proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
 > first-class Latchflo managed mode with configuration-driven registration,
 > expiring grants, readiness, persisted agent credentials, demand reporting,
 > and fail-closed expiration behavior.
+
+## What changed in v0.29.0
+
+- Added `POST /v1/responses` on the configured OpenAI upstream, alongside the
+  existing Chat Completions route. Requests are proxied in their native OpenAI
+  shape; Tyr does not translate between API formats.
+- Added token-aware projection for Responses `input`, `instructions`,
+  `max_output_tokens`, request-visible function/custom tool definitions, text
+  configuration, reasoning configuration, and multimodal `input_image` /
+  `input_file` blocks. `input_text` blocks are normalized only inside the
+  admission projection; the upstream receives the original request bytes.
+- Added non-streaming usage reconciliation from `usage.input_tokens` /
+  `usage.output_tokens` and semantic SSE reconciliation from Responses lifecycle
+  events such as `response.completed`.
+- Preserved OpenAI credential ownership and forwards `authorization`,
+  `openai-organization`, and `openai-project` on both OpenAI routes.
+- Kept the initial Responses boundary deliberately token-safe. Tyr rejects
+  `previous_response_id`, server-side `conversation`, stored `prompt` templates,
+  `item_reference`, `background: true`, and provider-managed retrieval/computer
+  tools because those modes can introduce prompt or execution state that is not
+  visible when Tyr must make its pre-upstream reservation. Request-visible
+  `function` and `custom` tools are supported.
+- Reprioritized multi-controller Latchflo hardening behind self-serve evaluation
+  and demonstrated deployment demand rather than treating it as the automatic
+  next release.
+- Corrected stale current-state documentation while preserving historical
+  release/version references where they describe the software that actually ran.
 
 ## What changed in v0.28.0
 
@@ -151,11 +179,11 @@ identity-aware admission classes, and bounded drain results.
 - Added per-class accepted-heartbeat checkpoints and `lastRequestAt` tracking, so
   failed heartbeats cannot discard class demand before Latchflo sees it.
 - Added `capabilities.admissionClassDemand: true` during Latchflo registration.
-  The extension is additive: current Latchflo 0.8.x ignores the nested class
-  demand field while continuing to consume the existing pool-level snapshot.
-- Kept policy ownership explicit. Tyr observes and reports class demand; it does
-  not autonomously lend protected floors. A future class-demand-aware Latchflo
-  allocator can resize floors through the existing higher-revision grant path.
+  The extension was additive: the then-current Latchflo 0.8.x ignored the nested
+  class-demand field while continuing to consume the existing pool-level snapshot.
+- Kept policy ownership explicit. Tyr observes and reports class demand; later
+  Latchflo releases can resize protected floors through the existing
+  higher-revision grant path.
 - Runtime dependencies remain `async-bulkhead-llm@3.15.1` and its
   `async-bulkhead-ts@1.0.1` dependency.
 
@@ -546,6 +574,7 @@ not for representing actual upstream load while bypasses are running.
 |---|---|---|
 | `POST` | `/v1/messages` | Identity-authorized, admission-gated Anthropic Messages proxy |
 | `POST` | `/v1/chat/completions` | Identity-authorized, admission-gated OpenAI Chat Completions proxy |
+| `POST` | `/v1/responses` | Identity-authorized, admission-gated OpenAI Responses proxy |
 | `GET` | `/stats` | Live per-pool statistics; optional operator JWT role or bearer token |
 | `GET` | `/metrics` | Prometheus text; optional operator JWT role or bearer token |
 | `GET` | `/healthz` | Process liveness |
@@ -722,10 +751,31 @@ curl -i http://127.0.0.1:8787/v1/chat/completions \
   }'
 ```
 
-For OpenAI streaming requests, set
+OpenAI Responses (recommended for new OpenAI integrations):
+
+```bash
+curl -i http://127.0.0.1:8787/v1/responses \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer YOUR_OPENAI_API_KEY' \
+  --data '{
+    "model": "gpt-5.6",
+    "max_output_tokens": 512,
+    "input": "Explain admission control."
+  }'
+```
+
+Tyr 0.29.0 supports stateless synchronous and streaming Responses requests. To
+keep pre-admission token reservations bounded from request-visible state, it
+rejects `previous_response_id`, server-side `conversation`, stored `prompt`
+templates, `item_reference`, `background: true`, and provider-managed
+retrieval/computer tools. Request-visible `function` and `custom` tools are
+supported.
+
+For OpenAI Chat Completions streaming requests, set
 `stream_options: { "include_usage": true }` when supported so Tyr can reconcile
-usage from the final stream chunk. Anthropic streaming usage is extracted from
-supported `message_start` and `message_delta` events.
+usage from the final stream chunk. Responses streams reconcile cumulative usage
+from semantic lifecycle events such as `response.completed`. Anthropic streaming
+usage is extracted from supported `message_start` and `message_delta` events.
 
 ## File configuration
 
@@ -878,7 +928,7 @@ pools:
 | `server.maxRequestBodyBytes` | No | Maximum buffered request body; default 1 MiB |
 | `server.maxOutputTokens` | No | Validation ceiling for request output-limit fields; default `200000` |
 | `upstreams.anthropic.baseUrl` | One upstream required | Enables `POST /v1/messages` |
-| `upstreams.openai.baseUrl` | One upstream required | Enables `POST /v1/chat/completions` |
+| `upstreams.openai.baseUrl` | One upstream required | Enables `POST /v1/chat/completions` and `POST /v1/responses` |
 | `timeouts.responseHeadersMs` | No | Maximum wait for upstream response headers |
 | `timeouts.streamIdleMs` | No | Maximum gap between upstream stream chunks |
 | `timeouts.clientStallMs` | No | Maximum wait for a backpressured client to drain |
@@ -983,7 +1033,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.28.0
+    version: 0.29.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -1013,7 +1063,7 @@ bounded by `requestTimeoutMs`.
 ### Demand-aware Latchflo heartbeats
 
 Tyr automatically derives one snapshot per managed pool from its existing
-statistics. Tyr 0.28.0 carries forward bounded per-class demand in that additive
+statistics. Tyr 0.29.0 carries forward bounded per-class demand in that additive
 heartbeat while preserving the original pool-level fields:
 
 ```json
@@ -1068,7 +1118,7 @@ identity values never become heartbeat keys. `protected*` and `borrowed*` fields
 report current use of the active floor and shared remainder. They are telemetry,
 not a request for Tyr to resize its own limits.
 
-Tyr 0.28.0 advertises `admissionClassDemand: true`,
+Tyr 0.29.0 advertises `admissionClassDemand: true`,
 `grantOccupancyAck: true`, and the additive
 `admissionClassOccupancyAck: true` capability at registration. Older control
 planes that ignore unknown capability and nested evidence fields remain
@@ -1101,7 +1151,7 @@ The acknowledgement's `occupancy` object is additive observability evidence;
 Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
 post-ack heartbeat remains the authoritative proof used by that control plane.
 
-Tyr 0.28.0 applies the same ordering to restrictive class-only changes. When a
+Tyr 0.29.0 applies the same ordering to restrictive class-only changes. When a
 protected floor is restored, the newly protected capacity reduces the shared
 remainder. Tyr therefore keeps publishing bounded class evidence until the sum
 of `borrowedConcurrent` fits within the desired shared concurrency remainder and,
@@ -1223,7 +1273,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.28.0 .
+docker build -t tyr-admission-controller:0.29.0 .
 
 The source tree must include the committed `vendor/` directory. Run `npm run verify:vendor` before building or publishing a source archive.
 ```
@@ -1236,7 +1286,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.28.0
+  tyr-admission-controller:0.29.0
 ```
 
 Or use the included Compose example:
@@ -1248,9 +1298,10 @@ docker compose -f compose.example.yaml up --build
 Pin production deployments to a released version or image digest rather than a
 mutable `latest` tag.
 
-An OpenAI SDK can point its base URL at `http://tyr:8787/v1`. An Anthropic client
-can send Messages requests to `http://tyr:8787/v1/messages`. In both cases, the
-application continues to own and send its provider credentials.
+An OpenAI SDK can point its base URL at `http://tyr:8787/v1` and use either
+`responses.create(...)` or Chat Completions within the supported request boundary.
+An Anthropic client can send Messages requests to `http://tyr:8787/v1/messages`.
+In all cases, the application continues to own and send its provider credentials.
 
 ## Legacy environment mode
 
@@ -1347,7 +1398,7 @@ pool name, configured admission-class ID, provider shape, priority, status
 class, outcome, and enumerated reason. Model strings, request IDs, admission
 IDs, grant IDs, and tenant-supplied identity values never become metric labels.
 
-Tyr 0.28.0 carries forward two admission-path histograms.
+Tyr 0.29.0 carries forward two admission-path histograms.
 `tyr_admission_decision_seconds` measures synchronous local decision work and
 **excludes** the awaited local concurrency acquire.
 `tyr_admission_queue_wait_seconds` measures that acquire wait separately. Both
@@ -1398,6 +1449,10 @@ counted by `tyr_audit_write_failures_total`.
 - Upstream response headers are not generally passed through; Tyr returns the
   upstream status and body with a normalized content type.
 - There is no Anthropic/OpenAI format translation.
+- Responses support is intentionally stateless in v0.29.0: hidden server-side
+  conversation/prompt references, background execution, and provider-managed
+  retrieval/computer tools are rejected until Tyr can reserve their capacity
+  without undercounting unseen state.
 - There is no active-stream termination policy for post-admission usage
   overruns.
 - Multi-controller Latchflo failover, tenant policy, and supported Helm packaging
@@ -1418,19 +1473,20 @@ src/
   index.ts          validated process entrypoint and managed-mode lifecycle
   latchflo.ts        built-in Latchflo agent, retry, readiness, demand heartbeat, and token persistence
   demand.ts          accepted-heartbeat demand deltas derived from live pool statistics
-  pools.ts          v3.15 policy runtime, progressive reconciliation, versioned limits, observe mode, and drain
+  pools.ts          v3.16 policy runtime, progressive reconciliation, versioned limits, observe mode, and drain
   routing.ts        protected peer snapshots and request-specific replica selection
   server.ts         HTTP proxy, routing, admission, telemetry, timeouts, and shutdown
   telemetry.ts      Prometheus metrics and structured admission audit events
   sse.ts            Anthropic streaming usage extraction
-  sse-openai.ts     OpenAI streaming usage extraction
+  sse-openai.ts     OpenAI Chat Completions streaming usage extraction
+  sse-responses.ts  OpenAI Responses semantic streaming usage extraction
   validation.ts     provider-agnostic request shape validation
 test/
   admission.test.ts request projection and estimator regression tests
   config.test.ts    file-schema and environment compatibility tests
   gateway.test.ts   gateway end-to-end tests
   routing.test.ts   request-specific replica-scoring regression tests
-  demand.test.ts    Latchflo 0.6 demand snapshot and checkpoint regression tests
+  demand.test.ts    managed demand snapshot and checkpoint regression tests
   routing-gateway.test.ts authenticated one-hop routing integration tests
   latchflo.test.ts  managed-agent, readiness, persistence, and expiration tests
   pools-v311.test.ts v3.11 preview, exact admission provenance, observe, reconfiguration, and drain tests
@@ -1449,6 +1505,8 @@ npm test
 npm run build
 npm run smoke
 npm run verify:routing
+npm run verify:routing-topology
+npm run verify:openai-responses
 npm run verify:demand
 npm run verify:admission-provenance
 npm run release:check
