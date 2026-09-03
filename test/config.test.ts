@@ -157,6 +157,9 @@ pools:
           maxConcurrent: 3
           protectedInFlightTokens: 2000
           maxInFlightTokens: 6000
+          borrowedAdmissionSlot:
+            releaseMechanism: deadline_abandonment
+            deadlineMs: 25000
         premium:
           protectedConcurrent: 2
           maxConcurrent: 4
@@ -171,6 +174,10 @@ pools:
           maxConcurrent: 3,
           protectedInFlightTokens: 2_000,
           maxInFlightTokens: 6_000,
+          borrowedAdmissionSlot: {
+            releaseMechanism: "deadline_abandonment",
+            deadlineMs: 25_000,
+          },
         },
         premium: {
           protectedConcurrent: 2,

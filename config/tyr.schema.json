@@ -593,6 +593,26 @@
         "maxInFlightTokens": {
           "type": "integer",
           "minimum": 0
+        },
+        "borrowedAdmissionSlot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "releaseMechanism",
+            "deadlineMs"
+          ],
+          "properties": {
+            "releaseMechanism": {
+              "const": "deadline_abandonment",
+              "description": "Returns Tyr's borrowed local concurrency slot when its wall-clock lease expires."
+            },
+            "deadlineMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647,
+              "description": "Post-admission wall-clock lease for borrowed local concurrency only; not an upstream reclamation guarantee."
+            }
+          }
         }
       }
     },

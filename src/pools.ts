@@ -3,6 +3,8 @@ import {
   createLLMBulkhead,
   type AdaptiveModelCorrection,
   type LLMAdmissionClassLimits,
+  type LLMAdmissionResources,
+  type LLMBorrowedConcurrencyAbandonCause,
   type LLMAdmissionLimits,
   type LLMAdmissionMode,
   type LLMApplyLimitsResult,
@@ -32,6 +34,8 @@ import {
 import {
   normalizeAdmissionClassesConfig,
   resolveAdmissionClass,
+  llmAdmissionClassLimits,
+  type BorrowedAdmissionSlotPolicy,
   type AdmissionClassesConfig,
 } from "./admission-policy.js";
 import type { TyrRequestIdentity } from "./identity.js";
@@ -82,6 +86,8 @@ export type TyrAdmissionProvenanceEvent = {
   readonly admissionClass?: string;
   readonly limitRevision: number;
   readonly reservedTokens: number;
+  /** Exact local slot/token borrowing attribution at admission time. */
+  readonly resources: LLMAdmissionResources;
   /** Exact applied limits observed at the admission linearization point. */
   readonly limits: LLMAdmissionLimits;
   /** Exact Latchflo grant associated with limitRevision, when managed. */
@@ -178,6 +184,10 @@ export type AdmissionPreparation = {
 export type AdmissionRunContext = {
   readonly admissionId: string;
   readonly reservation: LLMReservationEstimate | null;
+  /** Exact local slot/token borrowing attribution for this admission. */
+  readonly resources: LLMAdmissionResources;
+  /** Present only when this callback holds a deadline-governed borrowed slot. */
+  readonly borrowedAdmissionSlot?: BorrowedAdmissionSlotPolicy;
   /** Whether this callback holds capacity or is a native observe bypass. */
   readonly admission: LLMRunAdmission;
   /** Limit revision in effect when the callback began. */
@@ -231,6 +241,30 @@ export type TyrPoolStats = LLMStats & {
       nextSequence: number;
       events: TyrAdmissionProvenanceEvent[];
     };
+    restoration: {
+      admissionSlots: {
+        releaseMechanism: "deadline_abandonment";
+        enforceability: "enforced";
+        configuredDeadlinesMs: Readonly<Record<string, number>>;
+        /** Local slots returned early, whichever cause returned them. */
+        released: number;
+        /**
+         * Split by cause. Only `deadline` reflects an expired lease, so a
+         * rising `deadline` share means the configured lease is too tight.
+         * Tyr never abandons manually, so `manual` stays absent unless an
+         * embedder calls `abandonBorrowedConcurrency()` itself.
+         */
+        releasedByCause: Readonly<
+          Partial<Record<LLMBorrowedConcurrencyAbandonCause, number>>
+        >;
+      };
+      upstreamCapacity: {
+        releaseMechanism: "abort_signal";
+        enforceability: "unverified";
+        cancellationRequested: number;
+        activeAccountingHolds: number;
+      };
+    };
   };
 };
 
@@ -269,6 +303,11 @@ export type Pool = {
   ): Promise<T>;
   stats(): TyrPoolStats;
   close(): void;
+  /**
+   * Waits for base concurrency and final LLM token settlement. After a
+   * borrowed slot deadline, an omitted timeout can remain pending until the
+   * detached callback settles; pass a timeout to bound the wait.
+   */
   drain(timeoutMs?: number): Promise<LLMDrainResult>;
 };
 
@@ -314,7 +353,10 @@ export type Pools = {
    */
   applyLimits(updates: readonly PoolLimitsUpdate[]): PoolsApplyLimitsResult;
   close(): void;
-  /** Stops admission and waits for in-flight work, optionally with a bound. */
+  /**
+   * Stops admission and waits for base concurrency plus final LLM token
+   * settlement, optionally with a bound.
+   */
   drain(timeoutMs?: number): Promise<PoolsDrainResult>;
 };
 
@@ -652,7 +694,14 @@ function createPool(
       : {
           admissionClasses: {
             defaultClass: admissionClasses.defaultClass,
-            classes: admissionClasses.classes,
+            classes: Object.freeze(
+              Object.fromEntries(
+                Object.entries(admissionClasses.classes).map(([name, limits]) => [
+                  name,
+                  llmAdmissionClassLimits(limits),
+                ]),
+              ),
+            ),
           },
         }),
   });
@@ -751,6 +800,7 @@ function createPool(
         : { admissionClass: event.admissionClass }),
       limitRevision: event.limitRevision,
       reservedTokens: event.reservedTokens,
+      resources: event.resources,
       limits,
       ...(grant === undefined ? {} : { grant }),
     });
@@ -849,6 +899,11 @@ function createPool(
         `${config.name} admission class changed between prepare() and run()`,
       );
     }
+    const borrowedAdmissionSlot =
+      effectiveAdmissionClass === undefined
+        ? undefined
+        : admissionClasses?.classes[effectiveAdmissionClass]
+            ?.borrowedAdmissionSlot;
     return bulkhead.run(
       request,
       (signal, context) => {
@@ -868,12 +923,17 @@ function createPool(
         return fn(signal, {
           admissionId: context.admissionId,
           reservation: context.reservation,
+          resources: context.resources,
           admission: context.admission,
           limitRevision: context.limitRevision,
           ...(context.admissionClass === undefined
             ? {}
             : { admissionClass: context.admissionClass }),
           ...(provenance !== undefined ? { provenance } : {}),
+          ...(context.resources.borrowedConcurrency &&
+          borrowedAdmissionSlot !== undefined
+            ? { borrowedAdmissionSlot }
+            : {}),
           ...(context.bypassReason !== undefined
             ? { bypassReason: context.bypassReason }
             : {}),
@@ -902,6 +962,12 @@ function createPool(
           ? { reservation: preparation.reservation }
           : {}),
         ...(opts.getUsage !== undefined ? { getUsage: opts.getUsage } : {}),
+        ...(borrowedAdmissionSlot === undefined
+          ? {}
+          : {
+              borrowedConcurrencyDeadlineMs:
+                borrowedAdmissionSlot.deadlineMs,
+            }),
       },
     );
   }
@@ -949,6 +1015,39 @@ function createPool(
           captureFailures: admissionProvenanceCaptureFailures,
           nextSequence: admissionProvenanceNextSequence,
           events: admissionProvenanceEvents.map((event) => ({ ...event })),
+        },
+        restoration: {
+          admissionSlots: {
+            releaseMechanism: "deadline_abandonment",
+            enforceability: "enforced",
+            configuredDeadlinesMs: Object.freeze(
+              Object.fromEntries(
+                Object.entries(admissionClasses?.classes ?? {}).flatMap(
+                  ([name, limits]) =>
+                    limits.borrowedAdmissionSlot === undefined
+                      ? []
+                      : [[name, limits.borrowedAdmissionSlot.deadlineMs]],
+                ),
+              ),
+            ),
+            released: snapshot.llm.borrowedConcurrencyAbandoned,
+            releasedByCause: Object.freeze({
+              ...snapshot.llm.borrowedConcurrencyAbandonedByCause,
+            }),
+          },
+          upstreamCapacity: {
+            releaseMechanism: "abort_signal",
+            enforceability: "unverified",
+            // Only deadline expiry aborts the callback signal. A manual
+            // abandonment returns the local slot without asking upstream to
+            // stop, so it must not be counted as a cancellation request.
+            cancellationRequested:
+              snapshot.llm.borrowedConcurrencyAbandonedByCause.deadline ?? 0,
+            activeAccountingHolds: Math.max(
+              0,
+              snapshot.llm.inFlight - snapshot.bulkhead.inFlight,
+            ),
+          },
         },
       },
     };

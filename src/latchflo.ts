@@ -1065,6 +1065,11 @@ export class LatchfloTyrAgent {
             // this additive capability; Latchflo 0.11 can require it before
             // committing class capacity ahead of lease expiry.
             admissionClassOccupancyAck: true,
+            // Tyr 0.30 can enforce a post-admission wall-clock lease on local
+            // concurrency borrowed by a configured admission class. This says
+            // nothing about provider-side reclamation; older Latchflo versions
+            // ignore the additive capability.
+            borrowedAdmissionSlotDeadlines: true,
           },
         }),
       });

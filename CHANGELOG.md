@@ -8,6 +8,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-03
+
+### Added
+
+- Added optional per-class `borrowedAdmissionSlot` policy with the explicit
+  `deadline_abandonment` release mechanism and a bounded post-admission
+  `deadlineMs`.
+- Added exact concurrency/token borrowing attribution to admission contexts,
+  successful-admission provenance, response headers, and audit events.
+- Added `504 borrowed_admission_deadline` responses that state the released
+  local resource, cancellation request, deadline, and unverified upstream
+  reclamation status.
+- Added resource-specific restoration state to `/stats` and bounded Prometheus
+  series for local slot releases, upstream cancellation requests, unsettled
+  admitted work, and per-class borrowed-slot deadline counts.
+- Added `tyr.restoration.admissionSlots.releasedByCause`, splitting early slot
+  returns into `deadline` (expired lease) and `manual` (explicit
+  `abandonBorrowedConcurrency()`), so a lease configured too tight is
+  distinguishable from deliberate shedding.
+- Added `verify:borrowed-restoration` and integration coverage for split local
+  slot/token release, protected-class admission after restoration, drain, HTTP,
+  audit, metrics, and invalid policy rejection.
+- Added the additive Latchflo registration capability
+  `borrowedAdmissionSlotDeadlines: true`.
+- Added `verify:vendor-provenance`, an online CI check that each vendored
+  tarball is the artifact npm published for that exact `name@version`. The
+  existing offline `verify:vendor` compares a tarball to its lockfile entry,
+  and the two can be regenerated together from a local `npm pack`, so it
+  cannot detect a pre-release build claiming a released version.
+
+### Changed
+
+- Updated the exact vendored runtime dependency from
+  `async-bulkhead-llm@3.16.0` to `async-bulkhead-llm@3.17.0`.
+- Scoped the upstream cancellation-request count and
+  `tyr_pool_borrowed_admission_slot_deadlines_total` to deadline expiries.
+  Only an expired lease aborts the callback signal, so a manual abandonment is
+  no longer reported as a cancellation request. The local-slot release series
+  still counts every early return, and the per-class counter keeps counting
+  every early return because upstream exposes no per-class cause split.
+- Kept Tyr-only deadline policy fixed in local configuration while Latchflo
+  continues to replace numeric admission-class grants atomically.
+
+### Fixed
+
+- Re-vendored all three runtime tarballs from the npm registry so each is
+  byte-identical to its published release. The previously committed
+  `async-bulkhead-llm@3.17.0` tarball was a pre-release build missing the
+  published release's `cause` split on borrowed-slot abandonment; the
+  `async-bulkhead-ts` and `yaml` tarballs were repacks that differed in
+  packaging only.
+
+### Safety
+
+- Deadline expiry returns only borrowed Tyr-local concurrency. The linked
+  callback receives an abort signal, while its token reservation remains held
+  until local callback settlement.
+- No-timeout drain waits for that final settlement after the local slot is
+  returned. A callback that never settles can therefore hold unbounded shutdown
+  open; `shutdown.drainTimeoutMs` reports it as outstanding and bounds Tyr's
+  wait without claiming that upstream execution stopped.
+- Upstream cancellation is reported as `unverified`, never as reclaimed
+  capacity. Protecting provider account limits, model queues, or accelerators
+  still requires an unlent floor or another independently enforceable release
+  mechanism.
+
+### Compatibility
+
+- Classes without `borrowedAdmissionSlot` retain non-preemptive drain behavior.
+- The new Latchflo capability, provenance fields, headers, audit fields, stats,
+  and metrics are additive. Existing provider routes and request wire shapes are
+  unchanged.
+
 ## [0.29.0] - 2026-08-30
 
 ### Added
@@ -1197,7 +1270,8 @@ Recommended rollout:
 - Test/build configuration: excluded `dist` from the test glob and scoped the
   build output to `src` only.
 
-[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.26.0...v0.27.0
@@ -1221,5 +1295,5 @@ Recommended rollout:
 [0.4.1]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/janbalangue/tyr-admission-controller/releases/tag/v0.2.0
+[0.2.0]: https://github.com/mofluxhq/tyr-admission-controller/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mofluxhq/tyr-admission-controller/compare/72236af...96e0097

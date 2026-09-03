@@ -36,8 +36,11 @@ function poolStats(input: {
       totalReleased: 0,
     },
     llm: {
+      inFlight: input.inFlight ?? 0,
       admitted: input.admitted ?? 0,
       released: 0,
+      borrowedConcurrencyAbandoned: 0,
+      borrowedConcurrencyAbandonedByCause: {},
       rejected: input.rejected ?? 0,
       rejectedByReason: {
         budget_limit: input.budgetRejected ?? 0,
@@ -88,6 +91,21 @@ function poolStats(input: {
         captureFailures: 0,
         nextSequence: 1,
         events: [],
+      },
+      restoration: {
+        admissionSlots: {
+          releaseMechanism: "deadline_abandonment",
+          enforceability: "enforced",
+          configuredDeadlinesMs: {},
+          released: 0,
+          releasedByCause: {},
+        },
+        upstreamCapacity: {
+          releaseMechanism: "abort_signal",
+          enforceability: "unverified",
+          cancellationRequested: 0,
+          activeAccountingHolds: 0,
+        },
       },
     },
   };
@@ -148,6 +166,7 @@ function classPoolStats(input: {
           borrowedInFlightTokens: 500,
           admitted: input.premiumAdmitted ?? 0,
           released: 0,
+          borrowedConcurrencyAbandoned: 0,
           rejected: input.premiumRejected ?? 0,
           rejectedByReason: {
             budget_limit: input.premiumBudgetRejected ?? 0,
@@ -175,6 +194,7 @@ function classPoolStats(input: {
           borrowedInFlightTokens: 0,
           admitted: input.noisyAdmitted ?? 0,
           released: 0,
+          borrowedConcurrencyAbandoned: 0,
           rejected: input.noisyRejected ?? 0,
           rejectedByReason: {},
           totalReserved: 0,

@@ -6,18 +6,46 @@ Tyr projects the request into a token reservation, evaluates current concurrency
 and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.29.0 is built on
-[`async-bulkhead-llm@3.16.0`](https://www.npmjs.com/package/async-bulkhead-llm).
+Tyr 0.30.0 is built on
+[`async-bulkhead-llm@3.17.0`](https://www.npmjs.com/package/async-bulkhead-llm).
+Release `async-bulkhead-llm@3.17.0` before tagging or publishing Tyr 0.30.0.
+The committed lockfile uses the matching vendored tarball so Tyr's release gate
+remains reproducible before or without registry access.
 The pool runtime uses complete versioned limit snapshots, immutable reservation
 previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, bounded
 identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.29.0, identity-aware distributed admission data plane,
+> **Status:** v0.30.0, identity-aware distributed admission data plane,
 > proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
 > first-class Latchflo managed mode with configuration-driven registration,
 > expiring grants, readiness, persisted agent credentials, demand reporting,
 > and fail-closed expiration behavior.
+
+## What changed in v0.30.0
+
+- Added an optional per-admission-class `borrowedAdmissionSlot` policy. When an
+  admission actually borrows local concurrency, Tyr starts the configured
+  wall-clock deadline after admission and returns that local slot when the
+  deadline expires.
+- Made restoration contracts resource-specific. Deadline expiry releases Tyr's
+  local admission slot with `deadline_abandonment` and requests upstream
+  cancellation with an abort signal, but explicitly reports upstream reclamation
+  as `unverified`.
+- Kept token accounting separate from local concurrency. Abandoning a borrowed
+  slot does not release its token reservation; the remaining accounting hold is
+  retained until the local upstream callback settles.
+- Added exact borrowed-resource attribution to admission context, provenance,
+  response headers, audit events, `/stats`, and bounded-cardinality Prometheus
+  metrics.
+- Added the `504 borrowed_admission_deadline` response contract and executable
+  verification proving that protected local work can enter after slot
+  restoration while borrowed token accounting remains conservative.
+- Added the additive Latchflo registration capability
+  `borrowedAdmissionSlotDeadlines: true`. Numeric admission-class grants remain
+  dynamically managed while the deadline policy stays local to Tyr.
+- Updated and vendored `async-bulkhead-llm@3.17.0`; the transitive
+  `async-bulkhead-ts@1.0.1` dependency is unchanged.
 
 ## What changed in v0.29.0
 
@@ -451,6 +479,9 @@ pools:
           maxConcurrent: 32
           protectedInFlightTokens: 100000
           maxInFlightTokens: 300000
+          borrowedAdmissionSlot:
+            releaseMechanism: deadline_abandonment
+            deadlineMs: 30000
         premium:
           protectedConcurrent: 8
           maxConcurrent: 24
@@ -476,11 +507,27 @@ floor borrows from the shared remainder left after every configured floor. A
 request must fit the physical pool, its hard class ceiling, and the currently
 available shared remainder.
 
-Protected floors are strict local reservations. An idle floor is not
-implicitly lent to another class; Latchflo can implement demand-aware lending by
-issuing a newer atomic class-limit snapshot. Increasing or shrinking a floor or
-ceiling never cancels running work: new borrowing pauses and normal completion
-restores the requested protection by attrition.
+Protected floors are strict within the active local limit snapshot. An idle
+floor is not implicitly lent to another class; Latchflo can implement
+demand-aware lending by issuing a newer atomic class-limit snapshot. Increasing
+or shrinking a floor or ceiling stops unsafe new borrowing, but existing work
+otherwise restores protection by attrition.
+
+`borrowedAdmissionSlot` places a post-admission wall-clock lease on local
+concurrency borrowed by that class. It does not apply when the admission fits
+inside the class's own protected concurrency. At expiry Tyr returns the borrowed
+local slot, aborts the linked callback signal, and returns
+`504 borrowed_admission_deadline` to a caller whose response has not started.
+The admission's token reservation remains held until the local callback settles,
+so returning one resource cannot falsely return another.
+
+That deadline is an enforceable restoration bound only for Tyr's local admission
+slot. A provider may continue generating after client cancellation, so Tyr
+reports upstream cancellation as requested and upstream reclamation as
+unverified. If an account quota, model-side queue, or accelerator is the
+constrained resource, retain an unlent floor or an independently enforceable
+provider partition for the protected workload. A Tyr deadline alone is not that
+upstream guarantee.
 
 Class selection uses authenticated identity produced by Tyr's identity layer.
 Without identity, all requests use the configured default class. Programmatic
@@ -610,6 +657,9 @@ Every validated, pool-routed request includes an advisory snapshot:
 | `x-admission-id` | Bulkhead UUID, or `shadow-...` for an observe-mode bypass |
 | `x-admission-outcome` | `admitted` or native v3.12 `bypassed` outcome |
 | `x-admission-revision` | Revision active when execution began; immediate rejections use the preview revision |
+| `x-admission-slot-borrowed` | `true` when this admission used shared rather than class-protected local concurrency |
+| `x-admission-borrowed-tokens` | Tokens attributed to the shared rather than class-protected token remainder |
+| `x-admission-slot-deadline-ms` | Configured local borrowed-slot deadline when it applies; repeated on deadline errors |
 | `x-admission-bypass-reason` | Capacity reason simulated by an observe-mode bypass |
 | `x-latchflo-grant-id` | Exact Latchflo capacity grant associated with `x-admission-revision`, when present |
 | `x-latchflo-controller-epoch` | Latchflo fencing epoch that issued the associated grant |
@@ -661,7 +711,8 @@ admission, and a retry hint is an estimate rather than a reservation.
 | `502` | `upstream_error` or `routing_peer_unavailable` | The provider or selected Tyr peer failed before a valid response was returned. A routed request is not automatically replayed. |
 | `503` | `identity_unavailable` | Tyr cannot currently verify identity because the verifier or JWKS endpoint is unavailable; retry with backoff. |
 | `503` | `admission_rejected` with reason `shutdown` | This Tyr instance is draining and no longer accepts admissions; retry another instance or retry with backoff. |
-| `504` | `response_timeout`, `idle_timeout`, `routing_peer_timeout`, or `admission_rejected` with reason `timeout` | A provider, selected Tyr peer, stream-idle, or admission deadline expired; retry only according to the operation's idempotency policy. |
+| `504` | `borrowed_admission_deadline` | Tyr returned a borrowed local slot and requested upstream cancellation. The body reports local release as enforced and upstream reclamation as unverified; retry only when the operation is safe to repeat. |
+| `504` | `response_timeout`, `idle_timeout`, `routing_peer_timeout`, or `admission_rejected` with reason `timeout` | A provider, selected Tyr peer, stream-idle, or queued-admission deadline expired; retry only according to the operation's idempotency policy. |
 
 Admission rejection bodies include the pool name and the bounded capacity detail
 reported by `async-bulkhead-llm`. Identity errors use `error.type` and do not
@@ -764,7 +815,7 @@ curl -i http://127.0.0.1:8787/v1/responses \
   }'
 ```
 
-Tyr 0.29.0 supports stateless synchronous and streaming Responses requests. To
+Tyr 0.30.0 supports stateless synchronous and streaming Responses requests. To
 keep pre-admission token reservations bounded from request-visible state, it
 rejects `previous_response_id`, server-side `conversation`, stored `prompt`
 templates, `item_reference`, `background: true`, and provider-managed
@@ -799,7 +850,8 @@ configuration documented in [`.env.example`](.env.example).
 
 ## Progressive streaming reconciliation
 
-Tyr 0.22 uses `async-bulkhead-llm@3.15.1` to account for the work still ahead
+Progressive reconciliation, introduced in Tyr 0.22, uses the current
+`async-bulkhead-llm@3.17.0` runtime to account for the work still ahead
 instead of retaining tokens the provider has already processed. For a
 streaming request, the first cumulative input report returns the completed
 input reservation. Later cumulative output reports shrink the remaining
@@ -820,7 +872,7 @@ pools:
 coalescing, and early-release counters. Disable the block explicitly to retain
 the conservative 3.12 hold behavior. Streams without cumulative provider usage
 remain conservative automatically. The repository lockfile resolves the bundled
-`vendor/async-bulkhead-llm-3.15.1.tgz` and
+`vendor/async-bulkhead-llm-3.17.0.tgz` and
 `vendor/async-bulkhead-ts-1.0.1.tgz`, so the release can be built before those
 artifacts are fetched from a public registry.
 
@@ -976,6 +1028,8 @@ pools:
 | `pools[].adaptiveEstimation.maxModels` | No | Maximum tracked model keys; default `64` |
 | `pools[].admissionClasses.defaultClass` | Classes only | Configured class used when no ordered identity rule matches |
 | `pools[].admissionClasses.classes` | Classes only | Fixed map of at most 64 class IDs to optional protected floors and hard concurrency/token ceilings |
+| `pools[].admissionClasses.classes.<id>.borrowedAdmissionSlot.releaseMechanism` | No | Must be `deadline_abandonment`; releases only borrowed local concurrency |
+| `pools[].admissionClasses.classes.<id>.borrowedAdmissionSlot.deadlineMs` | With borrowed-slot policy | Post-admission local slot lease from `1` through `2147483647` ms; not an upstream reclamation guarantee |
 | `pools[].admissionClasses.rules` | No | Up to 256 ordered mappings from trusted subject, tenant, application, or role claims to fixed class IDs |
 
 Identity verification remains fail closed when no usable key is cached. A fresh
@@ -1002,9 +1056,13 @@ accounts for that cost.
 custom exact tokenizer is already supplying reservations or when deterministic
 estimates across process restarts are more important than local calibration.
 
-`shutdown.drainTimeoutMs` uses the v3.12 bounded drain result. When the deadline
+`shutdown.drainTimeoutMs` uses the bounded drain result. When the deadline
 expires, Tyr records the outstanding count, closes remaining HTTP connections,
-and returns the snapshot from `shutdown()`.
+and returns the snapshot from `shutdown()`. If it is omitted, shutdown waits
+for final token settlement as well as local concurrency. A callback that remains
+unsettled after its borrowed slot was returned can therefore keep an unbounded
+shutdown pending; configure the timeout when process termination must be
+bounded. Expiry bounds Tyr's wait, not upstream provider execution.
 
 ## Latchflo managed mode
 
@@ -1033,7 +1091,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.29.0
+    version: 0.30.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -1063,7 +1121,7 @@ bounded by `requestTimeoutMs`.
 ### Demand-aware Latchflo heartbeats
 
 Tyr automatically derives one snapshot per managed pool from its existing
-statistics. Tyr 0.29.0 carries forward bounded per-class demand in that additive
+statistics. Tyr 0.30.0 carries forward bounded per-class demand in that additive
 heartbeat while preserving the original pool-level fields:
 
 ```json
@@ -1118,9 +1176,9 @@ identity values never become heartbeat keys. `protected*` and `borrowed*` fields
 report current use of the active floor and shared remainder. They are telemetry,
 not a request for Tyr to resize its own limits.
 
-Tyr 0.29.0 advertises `admissionClassDemand: true`,
-`grantOccupancyAck: true`, and the additive
-`admissionClassOccupancyAck: true` capability at registration. Older control
+Tyr 0.30.0 advertises `admissionClassDemand: true`,
+`grantOccupancyAck: true`, `admissionClassOccupancyAck: true`, and the additive
+`borrowedAdmissionSlotDeadlines: true` capability at registration. Older control
 planes that ignore unknown capability and nested evidence fields remain
 compatible. Latchflo 0.10.0 continues to use the physical-pool proof introduced
 in Tyr 0.24; Latchflo 0.11+ can require the class capability before committing a
@@ -1151,7 +1209,7 @@ The acknowledgement's `occupancy` object is additive observability evidence;
 Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
 post-ack heartbeat remains the authoritative proof used by that control plane.
 
-Tyr 0.29.0 applies the same ordering to restrictive class-only changes. When a
+Tyr 0.30.0 applies the same ordering to restrictive class-only changes. When a
 protected floor is restored, the newly protected capacity reduces the shared
 remainder. Tyr therefore keeps publishing bounded class evidence until the sum
 of `borrowedConcurrent` fits within the desired shared concurrency remainder and,
@@ -1273,9 +1331,10 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.29.0 .
+docker build -t tyr-admission-controller:0.30.0 .
 
 The source tree must include the committed `vendor/` directory. Run `npm run verify:vendor` before building or publishing a source archive.
+It is an offline check: it proves each tarball matches the lockfile. Because a tarball and its lockfile entry can be regenerated together from a local `npm pack`, CI also runs `npm run verify:vendor-provenance`, which compares each vendored tarball against the artifact npm published for that exact `name@version`. That online check is what stops a local pre-release build from shipping under a released version number; run it whenever you re-vendor a dependency.
 ```
 
 Run it with a read-only mounted configuration:
@@ -1286,7 +1345,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.29.0
+  tyr-admission-controller:0.30.0
 ```
 
 Or use the included Compose example:
@@ -1372,19 +1431,36 @@ during shutdown receive `503` with `x-admission-reason: shutdown`. When
 `shutdown.drainTimeoutMs` is configured, Tyr closes remaining connections after
 the bounded v3.12 drain snapshot reports outstanding work.
 
+Without `shutdown.drainTimeoutMs`, drain also waits for final token settlement
+after a borrowed local slot has been returned. A callback that never settles
+therefore keeps shutdown pending even though interactive local concurrency is
+already restored. The bounded form reports that admission as outstanding and
+allows Tyr to finish closing connections; it does not establish that upstream
+work stopped.
+
 `/stats` exposes the live bulkhead statistics plus a `tyr` object for each pool.
 That object contains admission mode, advisory admit/reject counts, observe-mode
 bypass counts, adaptive correction snapshots, progressive-reconciliation
 statistics, current Latchflo provenance, and bounded exact admission provenance.
 When configured, the underlying snapshot also contains bounded per-class limits
-and live usage.
+and live usage. `tyr.restoration` states the release mechanism and enforceability
+separately for local admission slots and upstream capacity, lists configured
+class deadlines, counts slot releases and cancellation requests, and reports
+local work whose slot has been returned while its accounting has not settled.
+`admissionSlots.releasedByCause` splits those releases into `deadline` (an
+expired lease) and `manual` (an explicit `abandonBorrowedConcurrency()` call).
+Tyr never abandons manually, so a non-zero `manual` count only appears when an
+embedder returns a slot itself. Only `deadline` expiry aborts the callback
+signal, so `upstreamCapacity.cancellationRequested` counts that cause alone; a
+rising `deadline` share means the configured lease is too tight.
 
 `tyr.admissionProvenance` is a fixed-size 512-event ring for successful,
 capacity-holding admissions only; observe-mode bypasses are intentionally absent.
 Each event uses schema `tyr.admission-provenance.v1` and includes a pool-local
 monotonic `sequence`, `admittedAt`, Tyr-generated `admissionId`, `pool`,
 `priority`, optional `admissionClass`, `limitRevision`, `reservedTokens`, the
-exact applied `limits` snapshot, and the matching managed `grant` when one
+exact `resources` borrowing attribution, the applied `limits` snapshot, and the
+matching managed `grant` when one
 exists. The wrapper also reports `retained`, `dropped`, `captureFailures`, and
 `nextSequence`. Benchmark consumers should require `captureFailures == 0` and
 track `sequence` gaps before treating the retained events as complete evidence.
@@ -1398,7 +1474,7 @@ pool name, configured admission-class ID, provider shape, priority, status
 class, outcome, and enumerated reason. Model strings, request IDs, admission
 IDs, grant IDs, and tenant-supplied identity values never become metric labels.
 
-Tyr 0.29.0 carries forward two admission-path histograms.
+Tyr 0.30.0 carries forward two admission-path histograms.
 `tyr_admission_decision_seconds` measures synchronous local decision work and
 **excludes** the awaited local concurrency acquire.
 `tyr_admission_queue_wait_seconds` measures that acquire wait separately. Both
@@ -1409,6 +1485,18 @@ admitted and rejected decisions because their mixes can differ across arms. The
 decision histogram uses 5 µs–50 ms diagnostic buckets, while queue wait reuses
 the normal duration buckets. A precheck rejection contributes exactly zero to
 queue-wait sum.
+
+Borrowed-slot restoration is exposed through
+`tyr_resource_release_events_total`,
+`tyr_pool_borrowed_admission_slot_deadlines_total`,
+`tyr_pool_admission_class_borrowed_slot_deadlines_total`, and
+`tyr_pool_work_in_flight`. The resource metric intentionally emits an enforced
+local-slot release series and a separate unverified upstream cancellation-request
+series; neither the label nor the count claims that provider capacity was
+reclaimed. The local-slot series counts every early return, while the upstream
+series and `tyr_pool_borrowed_admission_slot_deadlines_total` count deadline
+expiries only. The per-class counter has no upstream cause split, so it counts
+every early return for the class.
 
 For coordination comparisons, Tyr's decision duration is the local decision
 cost to compare with an external coordinator that grants/refuses immediately;
@@ -1432,6 +1520,10 @@ counted by `tyr_audit_write_failures_total`.
 - Latchflo coordination uses expiring partitioned grants rather than a strict
   distributed lease on every request. Capacity can be temporarily unavailable
   during safe lease handoff.
+- Borrowed-slot deadlines enforce reclamation of Tyr-local concurrency only.
+  Provider cancellation may be best-effort, so upstream account, queue, or
+  accelerator protection still requires an unlent floor or another release
+  mechanism that can be proven to reclaim that resource.
 - Capacity snapshots are advisory and can race with authoritative admission;
   stale or unavailable peers are ignored, and a routed rejection is returned
   without a second automatic attempt. Managed peer membership is dynamic only
@@ -1449,7 +1541,7 @@ counted by `tyr_audit_write_failures_total`.
 - Upstream response headers are not generally passed through; Tyr returns the
   upstream status and body with a normalized content type.
 - There is no Anthropic/OpenAI format translation.
-- Responses support is intentionally stateless in v0.29.0: hidden server-side
+- Responses support is intentionally stateless in v0.30.0: hidden server-side
   conversation/prompt references, background execution, and provider-managed
   retrieval/computer tools are rejected until Tyr can reserve their capacity
   without undercounting unseen state.
@@ -1507,6 +1599,7 @@ npm run smoke
 npm run verify:routing
 npm run verify:routing-topology
 npm run verify:openai-responses
+npm run verify:borrowed-restoration
 npm run verify:demand
 npm run verify:admission-provenance
 npm run release:check

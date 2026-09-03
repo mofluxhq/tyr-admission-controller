@@ -11,11 +11,14 @@ import {
 } from "./identity.js";
 import type { PoolConfig } from "./pools.js";
 import {
+  BORROWED_ADMISSION_SLOT_RELEASE_MECHANISM,
   MAX_ADMISSION_CLASSES,
   MAX_ADMISSION_CLASS_RULES,
   MAX_ADMISSION_IDENTIFIER_LENGTH,
   MAX_ADMISSION_RULE_VALUES,
+  MAX_BORROWED_ADMISSION_SLOT_DEADLINE_MS,
   normalizeAdmissionClassId,
+  type AdmissionClassConfig,
   type AdmissionClassesConfig,
 } from "./admission-policy.js";
 import type { GatewayOptions } from "./server.js";
@@ -980,15 +983,7 @@ function normalizeAdmissionClasses(
       `${field}.classes must contain at most ${MAX_ADMISSION_CLASSES} classes`,
     );
   }
-  const classes: Record<
-    string,
-    {
-      protectedConcurrent?: number;
-      maxConcurrent?: number;
-      protectedInFlightTokens?: number;
-      maxInFlightTokens?: number;
-    }
-  > = {};
+  const classes: Record<string, AdmissionClassConfig> = {};
   let protectedConcurrentTotal = 0;
   let protectedInFlightTokensTotal = 0;
   for (const [rawClassId, rawLimits] of classEntries) {
@@ -1007,6 +1002,7 @@ function normalizeAdmissionClasses(
         "maxConcurrent",
         "protectedInFlightTokens",
         "maxInFlightTokens",
+        "borrowedAdmissionSlot",
       ],
       classField,
     );
@@ -1062,6 +1058,30 @@ function normalizeAdmissionClasses(
         `${classField}.maxInFlightTokens requires inFlightTokenBudget`,
       );
     }
+    const rawBorrowedAdmissionSlot = limits["borrowedAdmissionSlot"];
+    let borrowedAdmissionSlot: AdmissionClassConfig["borrowedAdmissionSlot"];
+    if (rawBorrowedAdmissionSlot !== undefined) {
+      const borrowedField = `${classField}.borrowedAdmissionSlot`;
+      const policy = objectValue(rawBorrowedAdmissionSlot, borrowedField);
+      assertKnownKeys(policy, ["releaseMechanism", "deadlineMs"], borrowedField);
+      const releaseMechanism = requiredString(
+        policy["releaseMechanism"],
+        `${borrowedField}.releaseMechanism`,
+      );
+      if (releaseMechanism !== BORROWED_ADMISSION_SLOT_RELEASE_MECHANISM) {
+        throw new Error(
+          `${borrowedField}.releaseMechanism must be ${JSON.stringify(BORROWED_ADMISSION_SLOT_RELEASE_MECHANISM)}`,
+        );
+      }
+      borrowedAdmissionSlot = {
+        releaseMechanism: BORROWED_ADMISSION_SLOT_RELEASE_MECHANISM,
+        deadlineMs: requiredInteger(
+          policy["deadlineMs"],
+          `${borrowedField}.deadlineMs`,
+          { min: 1, max: MAX_BORROWED_ADMISSION_SLOT_DEADLINE_MS },
+        ),
+      };
+    }
     protectedConcurrentTotal += protectedConcurrent ?? 0;
     protectedInFlightTokensTotal += protectedInFlightTokens ?? 0;
     classes[classId] = {
@@ -1073,6 +1093,7 @@ function normalizeAdmissionClasses(
         ? {}
         : { protectedInFlightTokens }),
       ...(maxInFlightTokens === undefined ? {} : { maxInFlightTokens }),
+      ...(borrowedAdmissionSlot === undefined ? {} : { borrowedAdmissionSlot }),
     };
   }
   if (protectedConcurrentTotal > maxConcurrent) {

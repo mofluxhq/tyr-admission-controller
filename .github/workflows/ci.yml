@@ -31,6 +31,15 @@ jobs:
       - name: Install
         run: npm ci
 
+      # Offline guard: vendored tarballs match the lockfile.
+      - name: Verify vendored artifacts
+        run: npm run verify:vendor
+
+      # Online guard: those tarballs are the artifacts npm actually published,
+      # so a local pre-release build cannot ship under a released version.
+      - name: Verify vendored artifact provenance
+        run: npm run verify:vendor-provenance
+
       - name: Lint
         run: npm run lint
 

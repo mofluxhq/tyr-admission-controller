@@ -2,7 +2,11 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.29.0` OpenAI Responses release to a commercially credible product. It assumes one experienced TypeScript/backend engineer, automated tests and documentation for every milestone, and no custom management UI before `v1.0.0`.
+This roadmap prioritizes the shortest path from the current `v0.30.0`
+resource-specific restoration release to a commercially credible product. It
+assumes one experienced TypeScript/backend engineer, automated tests and
+documentation for every milestone, and no custom management UI before
+`v1.0.0`.
 
 ## Product direction
 
@@ -21,14 +25,16 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.29.0
+## Current baseline: v0.30.0
 
 The current release provides:
 
 - Anthropic Messages, OpenAI Chat Completions, and stateless OpenAI Responses proxy routes.
 - Model-prefix routing to independently configured local pools.
-- A v3.16 pool policy runtime using exact reservation previews, native observe
+- A v3.17 pool policy runtime using exact reservation previews, native observe
   mode, and complete versioned admission-limit snapshots.
+- Optional wall-clock leases for borrowed local admission slots, with split
+  concurrency/token accounting and resource-specific restoration evidence.
 - Tyr-local all-or-nothing runtime updates across named pools, with stale
   revision protection and shrink-by-attrition semantics.
 - First-class Latchflo-managed operation with registration, persisted credentials,
@@ -66,6 +72,8 @@ The current release provides:
   versioned fleet topology that Tyr can apply without restart; standalone routing
   retains startup-configured peers.
 - Observed-completion-based retry hints for capacity rejection responses.
+- Explicit upstream-cancellation uncertainty: deadline-based local slot release
+  is never presented as provider-capacity reclamation.
 
 Known commercial limitations include a single-controller SQLite control plane, no OTLP exporter or durable audit store, direct-JWKS-only identity configuration, limited protocol coverage, and no hardened multi-region deployment package.
 
@@ -491,7 +499,31 @@ Outcome:
 - Tyr keeps its pre-upstream token-reservation guarantee explicit rather than
   pretending unseen provider-managed state can be estimated safely.
 
-### v0.30.0 — Self-serve evaluation path
+### v0.30.0 — Resource-specific restoration contracts — shipped 2026-09-03
+
+- Added an optional post-admission wall-clock deadline for concurrency actually
+  borrowed by a configured admission class.
+- Split local concurrency release from token accounting: expiry abandons the
+  borrowed Tyr slot, while the token hold remains until local work settles.
+- Added explicit resource attribution and restoration evidence to headers,
+  errors, audit events, provenance, `/stats`, and Prometheus metrics.
+- Classified local slot release as enforced and upstream abort-signal
+  cancellation as unverified.
+- Advertised deadline support to Latchflo without allowing numeric grant updates
+  to replace the local deadline policy.
+- Added executable verification covering local restoration, protected admission,
+  conservative token accounting, final drain, and ignored cancellation.
+
+Outcome:
+
+- Borrowing policy now states who borrows, which local resource is borrowed, and
+  the deadline/release mechanism for restoring that resource.
+- Tyr does not convert client-side abandonment into a false claim that provider
+  quota, model queues, or accelerator capacity was reclaimed.
+- Operators have a concrete reason to retain an unlent upstream floor wherever
+  provider-side termination cannot be proven.
+
+### v0.31.0 — Self-serve evaluation path
 
 **Goal:** Make it possible for an engineer to prove Tyr's value against a real
 OpenAI workload without a design-partner engagement or custom deployment work.
@@ -523,7 +555,7 @@ Non-goals:
 
 ### v1.0.0 — Supported production release
 
-**Timing:** After v0.30.0 and sufficient design-partner validation.
+**Timing:** After v0.31.0 and sufficient design-partner validation.
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:

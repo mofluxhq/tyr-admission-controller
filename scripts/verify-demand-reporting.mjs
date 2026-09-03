@@ -417,6 +417,7 @@ try {
     admissionClassDemand: true,
     grantOccupancyAck: true,
     admissionClassOccupancyAck: true,
+    borrowedAdmissionSlotDeadlines: true,
   });
   assert.equal(mode.ready(), true);
   assert.deepEqual(

@@ -5,6 +5,9 @@ export const MAX_ADMISSION_CLASSES = 64;
 export const MAX_ADMISSION_CLASS_RULES = 256;
 export const MAX_ADMISSION_RULE_VALUES = 256;
 export const MAX_ADMISSION_IDENTIFIER_LENGTH = 256;
+export const MAX_BORROWED_ADMISSION_SLOT_DEADLINE_MS = 2_147_483_647;
+export const BORROWED_ADMISSION_SLOT_RELEASE_MECHANISM =
+  "deadline_abandonment" as const;
 
 const RESERVED_ADMISSION_CLASS_IDS = new Set([
   "__proto__",
@@ -20,9 +23,21 @@ export type AdmissionClassRule = Readonly<{
   roles?: readonly string[];
 }>;
 
+/** Enforceable wall-clock restoration contract for a borrowed Tyr slot. */
+export type BorrowedAdmissionSlotPolicy = Readonly<{
+  releaseMechanism: typeof BORROWED_ADMISSION_SLOT_RELEASE_MECHANISM;
+  deadlineMs: number;
+}>;
+
+export type AdmissionClassConfig = Readonly<
+  LLMAdmissionClassLimits & {
+    borrowedAdmissionSlot?: BorrowedAdmissionSlotPolicy;
+  }
+>;
+
 export type AdmissionClassesConfig = Readonly<{
   defaultClass: string;
-  classes: Readonly<Record<string, LLMAdmissionClassLimits>>;
+  classes: Readonly<Record<string, AdmissionClassConfig>>;
   /** First matching rule wins; selectors within one rule are ANDed. */
   rules?: readonly AdmissionClassRule[];
 }>;
@@ -87,10 +102,10 @@ function optionalMatchValues(
 }
 
 function normalizeLimits(
-  value: LLMAdmissionClassLimits,
+  value: AdmissionClassConfig,
   field: string,
   tokenBudgetEnabled: boolean,
-): LLMAdmissionClassLimits {
+): AdmissionClassConfig {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`${field} must be an object`);
   }
@@ -101,6 +116,7 @@ function normalizeLimits(
       "maxConcurrent",
       "protectedInFlightTokens",
       "maxInFlightTokens",
+      "borrowedAdmissionSlot",
     ],
     field,
   );
@@ -108,6 +124,7 @@ function normalizeLimits(
   const maxConcurrent = value.maxConcurrent;
   const protectedInFlightTokens = value.protectedInFlightTokens;
   const maxInFlightTokens = value.maxInFlightTokens;
+  const rawBorrowedAdmissionSlot = value.borrowedAdmissionSlot;
   for (const [name, candidate] of [
     ["protectedConcurrent", protectedConcurrent],
     ["maxConcurrent", maxConcurrent],
@@ -147,6 +164,43 @@ function normalizeLimits(
   if (!tokenBudgetEnabled && maxInFlightTokens !== undefined) {
     throw new Error(`${field}.maxInFlightTokens requires an in-flight token budget`);
   }
+  let borrowedAdmissionSlot: BorrowedAdmissionSlotPolicy | undefined;
+  if (rawBorrowedAdmissionSlot !== undefined) {
+    if (
+      typeof rawBorrowedAdmissionSlot !== "object" ||
+      rawBorrowedAdmissionSlot === null ||
+      Array.isArray(rawBorrowedAdmissionSlot)
+    ) {
+      throw new Error(`${field}.borrowedAdmissionSlot must be an object`);
+    }
+    assertKnownKeys(
+      rawBorrowedAdmissionSlot,
+      ["releaseMechanism", "deadlineMs"],
+      `${field}.borrowedAdmissionSlot`,
+    );
+    if (
+      rawBorrowedAdmissionSlot.releaseMechanism !==
+      BORROWED_ADMISSION_SLOT_RELEASE_MECHANISM
+    ) {
+      throw new Error(
+        `${field}.borrowedAdmissionSlot.releaseMechanism must be ${JSON.stringify(BORROWED_ADMISSION_SLOT_RELEASE_MECHANISM)}`,
+      );
+    }
+    if (
+      !Number.isSafeInteger(rawBorrowedAdmissionSlot.deadlineMs) ||
+      rawBorrowedAdmissionSlot.deadlineMs < 1 ||
+      rawBorrowedAdmissionSlot.deadlineMs >
+        MAX_BORROWED_ADMISSION_SLOT_DEADLINE_MS
+    ) {
+      throw new Error(
+        `${field}.borrowedAdmissionSlot.deadlineMs must be a safe integer from 1 through ${MAX_BORROWED_ADMISSION_SLOT_DEADLINE_MS}`,
+      );
+    }
+    borrowedAdmissionSlot = Object.freeze({
+      releaseMechanism: BORROWED_ADMISSION_SLOT_RELEASE_MECHANISM,
+      deadlineMs: rawBorrowedAdmissionSlot.deadlineMs,
+    });
+  }
   return Object.freeze({
     ...(protectedConcurrent === undefined ? {} : { protectedConcurrent }),
     ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
@@ -154,6 +208,27 @@ function normalizeLimits(
       ? {}
       : { protectedInFlightTokens }),
     ...(maxInFlightTokens === undefined ? {} : { maxInFlightTokens }),
+    ...(borrowedAdmissionSlot === undefined ? {} : { borrowedAdmissionSlot }),
+  });
+}
+
+/** Strip Tyr-only restoration metadata before configuring async-bulkhead-llm. */
+export function llmAdmissionClassLimits(
+  value: AdmissionClassConfig,
+): LLMAdmissionClassLimits {
+  return Object.freeze({
+    ...(value.protectedConcurrent === undefined
+      ? {}
+      : { protectedConcurrent: value.protectedConcurrent }),
+    ...(value.maxConcurrent === undefined
+      ? {}
+      : { maxConcurrent: value.maxConcurrent }),
+    ...(value.protectedInFlightTokens === undefined
+      ? {}
+      : { protectedInFlightTokens: value.protectedInFlightTokens }),
+    ...(value.maxInFlightTokens === undefined
+      ? {}
+      : { maxInFlightTokens: value.maxInFlightTokens }),
   });
 }
 
@@ -187,7 +262,7 @@ export function normalizeAdmissionClassesConfig(
       `${field}.classes must contain at most ${MAX_ADMISSION_CLASSES} classes`,
     );
   }
-  const classes: Record<string, LLMAdmissionClassLimits> = {};
+  const classes: Record<string, AdmissionClassConfig> = {};
   for (const [rawId, limits] of classEntries) {
     const id = normalizeAdmissionClassId(rawId, `${field} class id`);
     if (Object.hasOwn(classes, id)) {

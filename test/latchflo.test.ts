@@ -879,6 +879,7 @@ describe("Latchflo admission-class grants", () => {
         admissionClassDemand: true,
         grantOccupancyAck: true,
         admissionClassOccupancyAck: true,
+        borrowedAdmissionSlotDeadlines: true,
       },
     });
     agent.stop();

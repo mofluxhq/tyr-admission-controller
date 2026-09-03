@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import {
+  LLMBorrowedConcurrencyDeadlineError,
   LLMBulkheadRejectedError,
   type LLMRejectReason,
   type LLMPriority,
@@ -116,7 +117,8 @@ export type GatewayOptions = {
   /**
    * Maximum graceful-drain wait during shutdown. When the deadline expires,
    * Tyr reports outstanding work and closes remaining HTTP connections.
-   * Omit for the previous unbounded drain behavior.
+   * Omit for an unbounded drain, which waits for final token settlement even
+   * after a borrowed local slot was returned by deadline abandonment.
    */
   shutdownDrainTimeoutMs?: number;
   /**
@@ -864,6 +866,7 @@ export function createGateway(opts: GatewayOptions) {
       const abort = new AbortController();
       const admissionSignal: AbortSignal = abort.signal;
       let failureKind:
+        | "borrowed_admission_deadline"
         | "response_timeout"
         | "idle_timeout"
         | "client_disconnect"
@@ -892,12 +895,14 @@ export function createGateway(opts: GatewayOptions) {
       const emitAdmissionAudit = (
         settlement: TyrAuditSettlement,
         usage?: TokenUsage,
+        restoration?: TyrAdmissionAuditEvent["restoration"],
       ): void => {
         if (admissionAudit === undefined) return;
         telemetry.emitAdmissionAudit({
           ...admissionAudit,
           settlement,
           ...(usage === undefined ? {} : { usage }),
+          ...(restoration === undefined ? {} : { restoration }),
         });
         admissionAudit = undefined;
       };
@@ -928,6 +933,20 @@ export function createGateway(opts: GatewayOptions) {
               res.setHeader("x-admission-id", ctx.admissionId);
               res.setHeader("x-admission-outcome", ctx.admission);
               res.setHeader("x-admission-revision", String(ctx.limitRevision));
+              res.setHeader(
+                "x-admission-slot-borrowed",
+                String(ctx.resources.borrowedConcurrency),
+              );
+              res.setHeader(
+                "x-admission-borrowed-tokens",
+                String(ctx.resources.borrowedTokens),
+              );
+              if (ctx.borrowedAdmissionSlot !== undefined) {
+                res.setHeader(
+                  "x-admission-slot-deadline-ms",
+                  String(ctx.borrowedAdmissionSlot.deadlineMs),
+                );
+              }
               if (ctx.admissionClass !== undefined) {
                 res.setHeader("x-admission-class", ctx.admissionClass);
               }
@@ -964,6 +983,7 @@ export function createGateway(opts: GatewayOptions) {
                 ...(ctx.reservation === null
                   ? {}
                   : { reservedTokens: ctx.reservation.reserved }),
+                resources: ctx.resources,
                 ...(ctx.provenance === undefined
                   ? {}
                   : { grant: ctx.provenance }),
@@ -972,6 +992,16 @@ export function createGateway(opts: GatewayOptions) {
 
             const upstreamStartedAt = performance.now();
             let upstreamMetricOutcome = "upstream_error";
+            const noteBorrowedDeadline = (): void => {
+              if (
+                signal?.aborted === true &&
+                signal.reason instanceof LLMBorrowedConcurrencyDeadlineError
+              ) {
+                failureKind = "borrowed_admission_deadline";
+              }
+            };
+            if (signal?.aborted === true) noteBorrowedDeadline();
+            else signal?.addEventListener("abort", noteBorrowedDeadline, { once: true });
             try {
               // Response timeout bounds how long fetch waits for upstream
               // response headers. It is cleared as soon as headers arrive.
@@ -1064,6 +1094,7 @@ export function createGateway(opts: GatewayOptions) {
               }
               return { usage: observedUsage, status: upstreamRes.status };
             } finally {
+              signal?.removeEventListener("abort", noteBorrowedDeadline);
               if (failureKind !== undefined) {
                 upstreamMetricOutcome = failureKind;
               }
@@ -1094,6 +1125,51 @@ export function createGateway(opts: GatewayOptions) {
         recordRequest(requestOutcomeForStatus(result.status));
         emitAdmissionAudit("completed", result.usage);
       } catch (err) {
+        if (err instanceof LLMBorrowedConcurrencyDeadlineError) {
+          failureKind = "borrowed_admission_deadline";
+          const restoration = {
+            admissionSlot: {
+              releaseMechanism: "deadline_abandonment" as const,
+              enforceability: "enforced" as const,
+              outcome: "released" as const,
+              deadlineMs: err.deadlineMs,
+            },
+            upstreamCapacity: {
+              releaseMechanism: "abort_signal" as const,
+              enforceability: "unverified" as const,
+              outcome: "cancellation_requested" as const,
+            },
+          };
+          recordRequest("borrowed_admission_deadline");
+          emitAdmissionAudit(
+            "borrowed_admission_deadline",
+            observedUsage,
+            restoration,
+          );
+
+          if (res.headersSent) {
+            res.destroy();
+            return;
+          }
+          res.setHeader("x-admission-reason", "borrowed_admission_deadline");
+          res.setHeader(
+            "x-admission-slot-deadline-ms",
+            String(err.deadlineMs),
+          );
+          sendJson(res, 504, {
+            error: {
+              type: "borrowed_admission_deadline",
+              message: `borrowed admission slot deadline expired after ${err.deadlineMs}ms`,
+              resource: "admission_slot",
+              releaseMechanism: "deadline_abandonment",
+              localSlotReleased: true,
+              upstreamCancellation: "requested",
+              upstreamReclamation: "unverified",
+              resources: err.resources,
+            },
+          });
+          return;
+        }
         if (err instanceof LLMBulkheadRejectedError) {
           const status = rejectStatus(err.reason);
           const rejectionRevision =
@@ -1354,7 +1430,8 @@ export function createGateway(opts: GatewayOptions) {
 
   /**
    * Stops new admissions immediately, closes the HTTP listener, and drains
-   * pool work. With `shutdownDrainTimeoutMs`, the library returns an outstanding-work
+   * pool work, including token settlement after borrowed-slot abandonment.
+   * With `shutdownDrainTimeoutMs`, the library returns an outstanding-work
    * snapshot at the deadline; Tyr then closes remaining connections so process
    * termination is bounded instead of waiting forever on a dead stream.
    */
@@ -1392,4 +1469,3 @@ export function createGateway(opts: GatewayOptions) {
 
   return { server, control, telemetry, routing, shutdown };
 }
-

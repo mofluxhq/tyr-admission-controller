@@ -26,7 +26,7 @@ timeouts:
   clientStallMs: 30000
 
 shutdown:
-  # Uses async-bulkhead-llm v3.16.0 bounded drain. At the deadline Tyr reports
+  # Uses async-bulkhead-llm v3.17.0 bounded drain. At the deadline Tyr reports
   # outstanding work and closes remaining HTTP connections. Omit to wait
   # indefinitely, preserving the previous behavior.
   drainTimeoutMs: 30000
@@ -146,6 +146,12 @@ pools:
           maxConcurrent: 32
           protectedInFlightTokens: 100000
           maxInFlightTokens: 300000
+          # Enforces restoration only for a borrowed Tyr concurrency slot.
+          # Upstream reclamation remains unverified; retain a real unlent
+          # provider/token floor when cancellation cannot release it.
+          borrowedAdmissionSlot:
+            releaseMechanism: deadline_abandonment
+            deadlineMs: 30000
         premium:
           protectedConcurrent: 8
           maxConcurrent: 24

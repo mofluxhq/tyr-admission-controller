@@ -1,4 +1,9 @@
-import type { LLMPriority, LLMRejectReason, TokenUsage } from "async-bulkhead-llm";
+import type {
+  LLMAdmissionResources,
+  LLMPriority,
+  LLMRejectReason,
+  TokenUsage,
+} from "async-bulkhead-llm";
 import type { ApiShape } from "./adapters.js";
 import type { TyrRequestIdentity } from "./identity.js";
 import type { AdmissionProvenance, TyrPoolStats } from "./pools.js";
@@ -11,6 +16,7 @@ export type TyrRequestOutcome =
   | "upstream_4xx"
   | "upstream_5xx"
   | "admission_rejected"
+  | "borrowed_admission_deadline"
   | "response_timeout"
   | "idle_timeout"
   | "client_disconnect"
@@ -20,6 +26,7 @@ export type TyrRequestOutcome =
 export type TyrAuditSettlement =
   | "completed"
   | "rejected"
+  | "borrowed_admission_deadline"
   | "response_timeout"
   | "idle_timeout"
   | "client_disconnect"
@@ -41,6 +48,20 @@ export type TyrAdmissionAuditEvent = {
   readonly admissionId?: string;
   readonly reason?: LLMRejectReason;
   readonly reservedTokens?: number;
+  readonly resources?: LLMAdmissionResources;
+  readonly restoration?: {
+    readonly admissionSlot: {
+      readonly releaseMechanism: "deadline_abandonment";
+      readonly enforceability: "enforced";
+      readonly outcome: "released";
+      readonly deadlineMs: number;
+    };
+    readonly upstreamCapacity: {
+      readonly releaseMechanism: "abort_signal";
+      readonly enforceability: "unverified";
+      readonly outcome: "cancellation_requested";
+    };
+  };
   readonly grant?: AdmissionProvenance;
   readonly usage?: TokenUsage;
   readonly identity?: TyrRequestIdentity;
@@ -386,6 +407,36 @@ export class TyrTelemetry {
     );
     addCounterSeries(lines, "tyr_admission_rejections_total", this.#rejections);
 
+    addMetricHeader(
+      lines,
+      "tyr_resource_release_events_total",
+      "counter",
+      "Resource-specific borrowed-slot deadline events; unverified upstream series are not reclamation claims.",
+    );
+    for (const pool of Object.keys(stats).sort()) {
+      const llm = stats[pool]?.llm;
+      // Every abandonment returns the local slot, but only deadline expiry
+      // aborts the callback signal, so the upstream series counts that cause
+      // alone rather than reusing the aggregate.
+      const released = llm?.borrowedConcurrencyAbandoned ?? 0;
+      const deadlineReleased =
+        llm?.borrowedConcurrencyAbandonedByCause.deadline ?? 0;
+      addSample(lines, "tyr_resource_release_events_total", released, {
+        pool,
+        resource: "admission_slot",
+        release_mechanism: "deadline_abandonment",
+        enforceability: "enforced",
+        outcome: "released",
+      });
+      addSample(lines, "tyr_resource_release_events_total", deadlineReleased, {
+        pool,
+        resource: "upstream_capacity",
+        release_mechanism: "abort_signal",
+        enforceability: "unverified",
+        outcome: "cancellation_requested",
+      });
+    }
+
     addMetricHeader(lines, "tyr_requests_total", "counter", "Completed gateway requests by bounded outcome.");
     addCounterSeries(lines, "tyr_requests_total", this.#requests);
 
@@ -472,6 +523,12 @@ export class TyrTelemetry {
         value: (snapshot) => snapshot.bulkhead.inFlight,
       },
       {
+        name: "tyr_pool_work_in_flight",
+        type: "gauge",
+        help: "Admitted work awaiting final local settlement, including work whose borrowed slot was abandoned.",
+        value: (snapshot) => snapshot.llm.inFlight,
+      },
+      {
         name: "tyr_pool_pending",
         type: "gauge",
         help: "Requests currently waiting in the bounded queue.",
@@ -494,6 +551,13 @@ export class TyrTelemetry {
         type: "counter",
         help: "Released capacity-holding admissions.",
         value: (snapshot) => snapshot.llm.released,
+      },
+      {
+        name: "tyr_pool_borrowed_admission_slot_deadlines_total",
+        type: "counter",
+        help: "Borrowed local admission slots returned by enforced wall-clock deadlines.",
+        value: (snapshot) =>
+          snapshot.llm.borrowedConcurrencyAbandonedByCause.deadline ?? 0,
       },
       {
         name: "tyr_pool_rejected_total",
@@ -713,6 +777,15 @@ export class TyrTelemetry {
         type: "counter",
         help: "Released admissions attributed to a bounded admission class.",
         value: (snapshot) => snapshot.released,
+      },
+      {
+        name: "tyr_pool_admission_class_borrowed_slot_deadlines_total",
+        type: "counter",
+        // Per-class stats carry no cause split upstream, so this counts every
+        // early slot return for the class. Tyr never abandons manually, so
+        // that equals the deadline count unless an embedder abandons itself.
+        help: "Borrowed local admission slots returned before settlement for this bounded class.",
+        value: (snapshot) => snapshot.borrowedConcurrencyAbandoned,
       },
       {
         name: "tyr_pool_admission_class_rejected_total",

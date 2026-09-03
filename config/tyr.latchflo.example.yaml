@@ -1,4 +1,4 @@
-# Tyr 0.28 Latchflo managed-mode example.
+# Tyr 0.30 Latchflo managed-mode example.
 version: 1
 
 server:
@@ -44,6 +44,10 @@ pools:
         standard:
           protectedConcurrent: 0
           maxConcurrent: 0
+          # Local policy remains fixed while Latchflo changes numeric grants.
+          borrowedAdmissionSlot:
+            releaseMechanism: deadline_abandonment
+            deadlineMs: 30000
         premium:
           protectedConcurrent: 0
           maxConcurrent: 0
@@ -77,7 +81,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.29.0
+    version: 0.30.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo

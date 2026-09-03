@@ -1,9 +1,17 @@
 {
   "name": "tyr-admission-controller",
-  "version": "0.29.0",
+  "version": "0.30.0",
   "private": true,
   "license": "SEE LICENSE IN LICENSE.txt",
   "description": "Tyr is a capacity guard for LLM traffic that reserves expected token capacity before execution, sheds requests that would overcommit a model pool, and reconciles reservations from live provider usage.",
+  "homepage": "https://github.com/mofluxhq/tyr-admission-controller#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/mofluxhq/tyr-admission-controller.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mofluxhq/tyr-admission-controller/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -18,7 +26,7 @@
     "validate:config": "node dist/cli.js validate",
     "prepack": "npm run build",
     "smoke": "node --input-type=module -e \"await import('./dist/server.js'); await import('./dist/adapters.js');\"",
-    "release:check": "npm run verify:vendor && npm run lint && npm run typecheck && npm test && npm run verify:admission-provenance && npm run verify:admission-timing && npm run verify:routing && npm run verify:routing-topology && npm run verify:openai-responses && npm run verify:admission-classes && npm run verify:demand && npm run verify:handoff && npm run verify:class-handoff && npm run verify:progressive && npm run smoke && npm pack --dry-run",
+    "release:check": "npm run verify:vendor && npm run lint && npm run typecheck && npm test && npm run verify:admission-provenance && npm run verify:admission-timing && npm run verify:routing && npm run verify:routing-topology && npm run verify:openai-responses && npm run verify:admission-classes && npm run verify:borrowed-restoration && npm run verify:demand && npm run verify:handoff && npm run verify:class-handoff && npm run verify:progressive && npm run smoke && npm pack --dry-run",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix",
     "demo:up": "docker compose -f demo/compose.metrics.yaml up --build",
@@ -30,16 +38,18 @@
     "verify:demand": "npm run build && node scripts/verify-demand-reporting.mjs",
     "verify:progressive": "npm run build && node scripts/verify-progressive-reconciliation.mjs",
     "verify:admission-classes": "npm run build && node scripts/verify-admission-classes.mjs",
+    "verify:borrowed-restoration": "npm run build && node scripts/verify-borrowed-restoration.mjs",
     "verify:handoff": "npm run build && node scripts/verify-capacity-handoff.mjs",
     "verify:class-handoff": "npm run build && node scripts/verify-class-handoff.mjs",
     "verify:vendor": "node scripts/verify-vendor.mjs",
+    "verify:vendor-provenance": "node scripts/verify-vendor-provenance.mjs",
     "verify:admission-provenance": "npm run build && node scripts/verify-admission-provenance.mjs",
     "verify:admission-timing": "npm run build && node scripts/verify-admission-timing.mjs",
     "verify:routing-topology": "npm run build && node scripts/verify-dynamic-routing-topology.mjs",
     "verify:openai-responses": "npm run build && node scripts/verify-openai-responses.mjs"
   },
   "dependencies": {
-    "async-bulkhead-llm": "3.16.0",
+    "async-bulkhead-llm": "3.17.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
