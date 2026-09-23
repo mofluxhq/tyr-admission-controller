@@ -1,11 +1,11 @@
-# Tyr 0.32.0 verification
+# Tyr 0.33.0 verification
 
-Date: 2026-09-22
+Date: 2026-09-23
 
 ## Version alignment
 
-- Tyr package version: `0.32.0`
-- Runtime version constant: `0.32.0`
+- Tyr package version: `0.33.0`
+- Runtime version constant: `0.33.0`
 - Runtime dependency: `async-bulkhead-llm@3.17.0`
 - Transitive bulkhead dependency: `async-bulkhead-ts@1.0.1`
 - Vendored runtime artifacts:
@@ -16,11 +16,41 @@ Date: 2026-09-22
 
 ## Required release order
 
-`async-bulkhead-llm@3.17.0` was published for Tyr 0.30.0; 0.32.0 uses the same
+`async-bulkhead-llm@3.17.0` was published for Tyr 0.30.0; 0.33.0 uses the same
 release. Tyr's committed lockfile intentionally resolves the exact bundled
 `vendor/async-bulkhead-llm-3.17.0.tgz`, so the Tyr build is reproducible while
 the dependency release is staged; the vendor artifact is not a substitute for
 publishing the declared public package version.
+
+## Self-serve evaluation (0.33.0)
+
+`npm run verify:eval` runs the evaluation for 5 seconds per phase and passes
+only if the direct phase shows contention, every interactive request completes
+through Tyr, the provider rejects nothing behind Tyr, and Tyr rejects batch
+work. It is part of `release:check` and runs in CI on Node 20, 22, and 24.
+
+A full `npm run eval` on the development Mac completed 12 of 188 interactive
+requests (6%) directly and 60 of 60 through Tyr. The provider rejected 1,380
+requests directly and none behind Tyr, and Tyr rejected 1,387 batch requests
+with `concurrency_limit`. Batch throughput fell from 14.9 to 9.8 requests per
+second. Provider peak concurrency was 8 of 8 in both phases.
+
+With `npm run eval:serve` running, `eval/sdk/quickstart.mjs` (openai-node
+7.23.0) and `eval/sdk/quickstart.py` (openai-python 3.19.1) each completed
+`responses.create(...)` and a Chat Completions call through Tyr and reported
+`class=interactive outcome=admitted`. Interrupting the runner stopped all three
+processes and freed ports 8787, 9101, and 9102.
+
+Against the evaluation stack, a request without an identity token returned
+`401`, and `max_completion_tokens: 1000` returned `400` because it exceeds
+`server.maxOutputTokens: 256`. `/metrics` is readable without an operator token.
+A model outside the pool's prefixes stopped the run at the first `422`, and the
+runner shut the stack down.
+
+Live mode refuses to start without `OPENAI_API_KEY`, `--model`, and
+`--confirm-live`. Run with an invalid key, Tyr forwarded the request over HTTPS
+to api.openai.com, OpenAI returned `401 invalid_api_key`, and the runner stopped
+at that first error. A billed run against OpenAI was not performed.
 
 ## Apache-2.0 license and Korrx removal (0.32.0)
 
@@ -132,7 +162,7 @@ still has no synchronous control-plane call.
 
 ## Carried-forward compatibility
 
-Tyr 0.32.0 retains the native Anthropic Messages, OpenAI Chat Completions, and
+Tyr 0.33.0 retains the native Anthropic Messages, OpenAI Chat Completions, and
 stateless OpenAI Responses routes from 0.29.0. Existing identity, routing,
 managed-mode, provenance, timing, retry-hint, and progressive-reconciliation
 paths remain intact. Classes without `borrowedAdmissionSlot` keep the existing

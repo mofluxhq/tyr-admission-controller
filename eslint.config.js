@@ -9,7 +9,7 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["demo/**/*.mjs", "scripts/**/*.mjs"],
+    files: ["demo/**/*.mjs", "scripts/**/*.mjs", "eval/**/*.mjs"],
     languageOptions: {
       globals: {
         Buffer: "readonly",
@@ -18,6 +18,7 @@ export default [
         performance: "readonly",
         process: "readonly",
         setTimeout: "readonly",
+        URL: "readonly",
       },
     },
   },

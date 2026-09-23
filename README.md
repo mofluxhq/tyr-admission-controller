@@ -1,433 +1,91 @@
 # Tyr Admission Controller
 
 Tyr is an admission-first proxy for Anthropic Messages, OpenAI Chat
-Completions, and the OpenAI Responses API. Before an upstream request begins,
-Tyr projects the request into a token reservation, evaluates current concurrency
-and token pressure, and either
-enforces or observes the resulting admission decision.
+Completions, and the OpenAI Responses API. Before a request reaches the
+provider, Tyr reserves the tokens it will need and checks them against the
+concurrency and token capacity you configured. It then admits the request,
+rejects it with a retry hint, or, in observe mode, records what it would have
+done. Admission classes keep one workload, such as a batch job, from taking the
+capacity another depends on, such as user-facing traffic.
 
-Tyr 0.32.0 is built on
-[`async-bulkhead-llm@3.17.0`](https://www.npmjs.com/package/async-bulkhead-llm),
-unchanged from 0.31.0.
-The committed lockfile uses the matching vendored tarball so Tyr's release gate
-remains reproducible before or without registry access.
-The pool runtime uses complete versioned limit snapshots, immutable reservation
-previews, native observe mode, per-model adaptive estimation, stable admission
-identities, streaming usage reconciliation, priority reserves, bounded
-identity-aware admission classes, and bounded drain results.
+Tyr runs on its own. Latchflo, a separately licensed control plane, can
+coordinate one capacity envelope across many Tyr replicas; see
+[Latchflo managed mode](#latchflo-managed-mode).
 
-> **Status:** v0.32.0, identity-aware distributed admission data plane,
-> licensed under Apache-2.0. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
-> first-class Latchflo managed mode with configuration-driven registration,
-> expiring grants, readiness, persisted agent credentials, demand reporting,
-> and fail-closed expiration behavior.
+> **Status:** v0.33.0, pre-1.0, licensed under Apache-2.0 (see
+> [`LICENSE.txt`](LICENSE.txt)). Built on
+> [`async-bulkhead-llm@3.17.0`](https://www.npmjs.com/package/async-bulkhead-llm).
 
-## What changed in v0.32.0
+## Evaluate Tyr in five minutes
 
-- Tyr is now open source under the Apache License, Version 2.0. The container
-  image and npm package carry `LICENSE.txt`, `NOTICE.txt` and
-  `THIRD_PARTY_NOTICES.txt`. Latchflo, which managed mode talks to, remains
-  separately licensed.
-- The deprecated `x-korrx-grant-id` and `x-korrx-controller-epoch` response
-  headers are removed. Read `x-latchflo-grant-id` and
-  `x-latchflo-controller-epoch`, which carry the same values.
-- Admission provenance must use `source: "latchflo"`; the deprecated
-  `source: "korrx"` is rejected. Managed mode therefore requires Latchflo 0.4.0
-  or later.
-- No admission, configuration or dependency change.
+You need Node.js 20 or newer. You do not need an API key, Docker, Kubernetes,
+or Latchflo.
 
-## What changed in v0.31.0
-
-- A `502 upstream_error` now names the transport failure. Node's `fetch`
-  reports every connection failure as `fetch failed`. Tyr now walks the error's
-  cause chain and adds a bounded `cause: { name, code }` to the response body,
-  for example `ECONNREFUSED`, `ECONNRESET` or `UND_ERR_SOCKET`. The cause
-  message is not returned, because it can contain internal host addresses.
-- Every upstream failure, including a stream torn after headers were sent, is
-  counted in `tyr_upstream_failures_total{pool,provider,code}`. It also emits one
-  `tyr.diagnostic.v1` `upstream_failure` JSON line on stderr, with the code,
-  syscall and bounded detail. This line is independent of
-  `telemetry.audit.enabled`. Embedders can redirect it with
-  `telemetry.diagnosticSink`.
-- No admission, configuration, or Latchflo wire change.
-
-## What changed in v0.30.0
-
-- Added an optional per-admission-class `borrowedAdmissionSlot` policy. When an
-  admission actually borrows local concurrency, Tyr starts the configured
-  wall-clock deadline after admission and returns that local slot when the
-  deadline expires.
-- Made restoration contracts resource-specific. Deadline expiry releases Tyr's
-  local admission slot with `deadline_abandonment` and requests upstream
-  cancellation with an abort signal, but explicitly reports upstream reclamation
-  as `unverified`.
-- Kept token accounting separate from local concurrency. Abandoning a borrowed
-  slot does not release its token reservation; the remaining accounting hold is
-  retained until the local upstream callback settles.
-- Added exact borrowed-resource attribution to admission context, provenance,
-  response headers, audit events, `/stats`, and bounded-cardinality Prometheus
-  metrics.
-- Added the `504 borrowed_admission_deadline` response contract and executable
-  verification proving that protected local work can enter after slot
-  restoration while borrowed token accounting remains conservative.
-- Added the additive Latchflo registration capability
-  `borrowedAdmissionSlotDeadlines: true`. Numeric admission-class grants remain
-  dynamically managed while the deadline policy stays local to Tyr.
-- Updated and vendored `async-bulkhead-llm@3.17.0`; the transitive
-  `async-bulkhead-ts@1.0.1` dependency is unchanged.
-
-## What changed in v0.29.0
-
-- Added `POST /v1/responses` on the configured OpenAI upstream, alongside the
-  existing Chat Completions route. Requests are proxied in their native OpenAI
-  shape; Tyr does not translate between API formats.
-- Added token-aware projection for Responses `input`, `instructions`,
-  `max_output_tokens`, request-visible function/custom tool definitions, text
-  configuration, reasoning configuration, and multimodal `input_image` /
-  `input_file` blocks. `input_text` blocks are normalized only inside the
-  admission projection; the upstream receives the original request bytes.
-- Added non-streaming usage reconciliation from `usage.input_tokens` /
-  `usage.output_tokens` and semantic SSE reconciliation from Responses lifecycle
-  events such as `response.completed`.
-- Preserved OpenAI credential ownership and forwards `authorization`,
-  `openai-organization`, and `openai-project` on both OpenAI routes.
-- Kept the initial Responses boundary deliberately token-safe. Tyr rejects
-  `previous_response_id`, server-side `conversation`, stored `prompt` templates,
-  `item_reference`, `background: true`, and provider-managed retrieval/computer
-  tools because those modes can introduce prompt or execution state that is not
-  visible when Tyr must make its pre-upstream reservation. Request-visible
-  `function` and `custom` tools are supported.
-- Reprioritized multi-controller Latchflo hardening behind self-serve evaluation
-  and demonstrated deployment demand rather than treating it as the automatic
-  next release.
-- Corrected stale current-state documentation while preserving historical
-  release/version references where they describe the software that actually ran.
-
-## What changed in v0.28.0
-
-- Added Latchflo-managed dynamic fleet membership for capacity-aware Tyr routing.
-  Latchflo 0.13+ may publish a complete versioned `routingTopology` in desired
-  state; Tyr applies only newer revisions and replaces its peer set atomically.
-- Removed peers become unroutable immediately and their cached capacity snapshots
-  are discarded. New members and endpoint replacements must earn a fresh capacity
-  snapshot before they can receive traffic.
-- Latchflo publishes the complete fleet including the local member; Tyr always
-  filters its own `instanceId`, rejects duplicate or malformed members, and ignores
-  stale or duplicate topology revisions.
-- Capacity polling now starts and stops as the dynamic peer set becomes non-empty
-  or empty. Latchflo remains off the synchronous provider request path.
-- Static `routing.capacityAware.peers` remain the startup/fallback topology for
-  standalone deployments and for managed deployments talking to an older Latchflo
-  that does not publish `routingTopology`.
-- Latchflo-managed routing requires `routing.capacityAware.instanceId` to match
-  `controlPlane.instanceId`, preventing a topology from accidentally routing back
-  to the same Tyr process under a different identity.
-- Added executable `verify:routing-topology` coverage for wire parsing, dynamic
-  join, removal, stale-revision rejection, and replacement discovery.
-
-## What changed in v0.27.0
-
-- Added direct local admission-decision timing from `async-bulkhead-llm@3.16.0`
-  without adding any control-plane round trip to the request path.
-- Added `tyr_admission_decision_seconds`, which measures synchronous admission
-  work while explicitly excluding time spent awaiting local concurrency
-  capacity. The histogram is split by bounded `pool`, `outcome`
-  (`admitted`/`rejected`), and configured admission class.
-- Added `tyr_admission_queue_wait_seconds`, which separately measures the full
-  local concurrency-acquire wait using the same bounded dimensions.
-- Admission-decision buckets start at 5 microseconds and extend through 50 ms;
-  the release headline is intended to use histogram `_sum` / `_count`, with
-  buckets reserved for distribution diagnostics.
-- Observe-mode bypasses are excluded from both timing metrics. Precheck
-  rejections preserve an exact zero queue wait.
-- `tyr.admission-provenance.v1` is unchanged. Timing remains Prometheus
-  telemetry and does not alter the exact successful-admission proof schema.
-- Updated and vendored the exact runtime dependency to
-  `async-bulkhead-llm@3.16.0`; `async-bulkhead-ts@1.0.1` remains unchanged.
-
-## What shipped in v0.26.0
-
-- Added exact, bounded successful-admission provenance to each pool's `GET /stats`
-  payload. Tyr records the event synchronously from async-bulkhead-llm's
-  admission event, after concurrency/token capacity is held and before the
-  upstream callback starts.
-- Each `tyr.admissionProvenance.events[]` record carries the Tyr-generated
-  `admissionId`, a pool-local monotonic sequence, admission timestamp, priority,
-  optional admission class, exact limit revision, reserved tokens, an immutable
-  copy of the applied limit snapshot, and the matching Latchflo grant provenance
-  when the revision is managed.
-- The per-pool ring is bounded at 512 events and reports `retained`, `dropped`,
-  `captureFailures`, and `nextSequence` so benchmark tooling can detect both
-  retention loss and an internal revision-evidence failure instead of silently
-  treating incomplete evidence as proof.
-- Admission provenance deliberately excludes request bodies, model prompts,
-  authenticated identity, and client-supplied request IDs. Grant IDs, admission
-  IDs, and revisions remain excluded from Prometheus labels.
-- Admission policy, Latchflo wire behavior, and runtime dependency versions are
-  unchanged from 0.25.1.
-
-## What shipped in v0.25.1
-
-- Restored the three vendored runtime tarballs required by the committed lockfile
-  and Dockerfile. Clean source-tree Docker builds no longer fail with
-  `ENOENT /app/vendor/*.tgz` during `npm ci`.
-- Added `npm run verify:vendor`, which checks every `file:vendor/*.tgz` lockfile
-  entry for presence and exact SHA-512 integrity and verifies the Dockerfile copies
-  `vendor/` into the build context before installing dependencies.
-- Runtime behavior and dependency versions are unchanged from 0.25.0.
-
-## What shipped in v0.25.0
-
-- Extended Tyr 0.24's acknowledged drain proof to restrictive admission-class
-  transitions. Restoring a protected class floor now shrinks the shared
-  concurrency/token remainder by attrition rather than waiting silently for the
-  ordinary managed-mode heartbeat cadence.
-- Added additive `capabilities.admissionClassOccupancyAck: true` registration
-  metadata. Successful grant acknowledgements now include deterministic bounded
-  class occupancy, including protected use, shared borrowing, hard ceilings, and
-  token occupancy when configured.
-- Added active `maxConcurrent` and `maxInFlightTokens` to bounded class demand
-  snapshots so Latchflo can prove a fresh post-apply snapshot corresponds to the
-  desired class table.
-- A higher-revision class grant that restores protected floors or lowers a hard
-  class ceiling triggers an immediate post-ack demand heartbeat. If the exact
-  sent snapshot still exceeds the new shared remainder or class ceiling, Tyr
-  temporarily uses the existing bounded 500 ms evidence cadence until attrition
-  makes the transition safe.
-- Active work is never cancelled or preempted. Latchflo 0.10 remains compatible
-  by ignoring the additive fields; Latchflo 0.11+ can use them to commit
-  class-only handoffs before lease expiry.
-- Runtime dependencies remain `async-bulkhead-llm@3.15.1` and its
-  `async-bulkhead-ts@1.0.1` dependency.
-
-## What shipped in v0.24.0
-
-- Added acknowledged capacity-handoff evidence for Latchflo-managed physical
-  pool shrinks. After Tyr installs a lower complete grant and Latchflo accepts
-  the normal `applied` acknowledgement, Tyr immediately publishes a distinct
-  post-ack demand heartbeat instead of waiting for the ordinary heartbeat
-  cadence.
-- Added additive `capabilities.grantOccupancyAck: true` registration metadata
-  and bounded occupancy evidence on successful grant acknowledgements
-  (`appliedAt`, `inFlight`, `pending`, and `inFlightTokens` when available).
-  Latchflo 0.10.0 ignores these unknown additive fields and continues to use
-  the existing acknowledgement plus fresh-heartbeat proof.
-- While a successfully acknowledged shrink remains above its new concurrency or
-  token ceiling, Tyr temporarily publishes demand at a bounded 500 ms cadence.
-  It automatically returns to Latchflo's configured heartbeat cadence after an
-  exact published snapshot proves the drain target is safe.
-- Serialized managed-mode heartbeats so a post-ack proof cannot collapse into a
-  pre-ack request. Drain completion is evaluated against the exact occupancy
-  snapshot actually sent, avoiding races when local work finishes while a
-  heartbeat response is in flight.
-- Active work is never cancelled or preempted. Shrinks still use the existing
-  attrition semantics, and Latchflo lease expiry remains the conservative
-  control-plane fallback when an acknowledgement or fresh proof cannot be
-  obtained.
-- Runtime dependencies remain `async-bulkhead-llm@3.15.1` and its
-  `async-bulkhead-ts@1.0.1` dependency.
-
-## What shipped in v0.23.0
-
-- Added bounded per-admission-class demand snapshots to managed-mode Latchflo
-  heartbeats. Each configured class reports live in-flight work, accepted-
-  heartbeat admission/rejection deltas, budget/concurrency rejection pressure,
-  protected utilization, and shared-capacity borrowing.
-- Added per-class accepted-heartbeat checkpoints and `lastRequestAt` tracking, so
-  failed heartbeats cannot discard class demand before Latchflo sees it.
-- Added `capabilities.admissionClassDemand: true` during Latchflo registration.
-  The extension was additive: the then-current Latchflo 0.8.x ignored the nested
-  class-demand field while continuing to consume the existing pool-level snapshot.
-- Kept policy ownership explicit. Tyr observes and reports class demand; later
-  Latchflo releases can resize protected floors through the existing
-  higher-revision grant path.
-- Runtime dependencies remain `async-bulkhead-llm@3.15.1` and its
-  `async-bulkhead-ts@1.0.1` dependency.
-
-## What shipped in v0.22.0
-
-- Added strict protected concurrency and in-flight token floors for bounded
-  admission classes. Every floor and the aggregate floor set are validated
-  against the class ceilings and physical pool envelope.
-- Added protected, borrowed, and shared-capacity statistics plus bounded
-  Prometheus series. Raw tenant/application identities remain excluded.
-- Updated Latchflo grant handling so per-replica class partitions may resize
-  protected floors atomically without revoking active work.
-- Upgraded capacity-aware routing snapshots to schema version 3. Routing now
-  predicts protection-layer rejection and excludes older peers when a request
-  depends on protected-floor semantics.
-- Updated the exact runtime dependency to `async-bulkhead-llm@3.15.1`.
-
-## What shipped in v0.20.0
-
-- Added bounded per-pool admission classes with independent concurrency and
-  in-flight token ceilings. The fixed class table is validated at startup and
-  cannot grow from tenant churn.
-- Added ordered rules that map trusted JWT subject, tenant, application, and
-  role claims to configured class IDs. First matching rule wins; selector
-  categories within one rule are ANDed and values within one category are ORed.
-- Added `x-admission-class`, class attribution in structured audit events,
-  bounded `admission_class` decision labels, and live per-class capacity
-  gauges/counters. Raw identity values remain excluded from metrics.
-- Added class-aware capacity routing. A request is not forwarded to a replica
-  whose selected class is unavailable or exhausted, even when the physical pool
-  still has global headroom.
-- Added atomic runtime updates for class ceilings with fixed-key validation and
-  shrink-by-attrition behavior through `async-bulkhead-llm@3.14.0`.
-- Latchflo continues to own the physical fleet grant. Tyr preserves its local
-  class table across grant updates and grant-expiration kill-switch revisions.
-
-## What shipped in v0.17.0
-
-- Added optional capacity-aware routing across statically configured Tyr
-  replicas. The ingress ranks fresh, ready candidates using request-specific
-  concurrency and priority-adjusted token headroom.
-- Added a shared-secret-protected internal capacity snapshot endpoint and
-  asynchronous peer polling outside the provider request path.
-- Added authenticated, single-hop Tyr-to-Tyr forwarding. The destination Tyr
-  remains the authoritative admission controller, and routed requests are never
-  automatically retried after dispatch.
-- Added strict routing topology validation, spoofed-header rejection, bounded
-  probe and forwarding deadlines, and response headers identifying the ingress
-  and serving replica.
-- Latchflo is unchanged in this release. Peer membership is static startup
-  configuration and can be distributed by Latchflo in a later release.
-
-## What shipped in v0.16.0
-
-- Added completion-informed retry guidance for capacity rejections through the
-  precise `x-admission-retry-after-ms` header and standards-based `Retry-After`
-  when whole-second precision is appropriate.
-- Added bounded retry-hint configuration without changing admission limits or
-  automatically retrying provider requests inside Tyr.
-
-## What shipped in v0.15.0
-
-- Added first-class immutable request identity with `subject`, optional tenant and
-  application attribution, and bounded roles.
-- Added RS256/RS384/RS512 JWT verification against a cached JWKS endpoint, with
-  issuer, audience, expiration, not-before, issued-at, algorithm, key-ID, size,
-  timeout, and key-rotation validation.
-- Provider requests are authenticated and role-authorized before Tyr buffers or
-  parses their bodies. Identity uses `x-tyr-identity-token` by default so OpenAI
-  and Anthropic provider credentials in `Authorization` remain untouched.
-- Added any-of role policy for provider invocation, operator endpoints, and
-  high-priority token-reserve access. When identity is enabled, raw
-  `x-priority` cannot override verified role policy.
-- Upgraded structured admission audit events to
-  `tyr.admission-audit.v2`; admitted, observe-bypassed, and rejected decisions
-  now include their authenticated identity without adding tenant-supplied values
-  to Prometheus labels.
-
-## What shipped in v0.14.0
-
-- Added a native Prometheus text exporter at `GET /metrics` with bounded labels
-  for admission decisions, rejections, request outcomes, upstream status,
-  durations, pool capacity, token accounting, readiness, grant expiration, and
-  Latchflo integration failures.
-- Added optional structured JSON admission audit events. Each admitted,
-  observe-bypassed, or rejected decision records its pool, provider, priority,
-  model, exact limit revision, reservation, grant provenance, settlement, and
-  final provider usage when available. Request, admission, model, and grant IDs
-  are never used as metric labels.
-- Added optional bearer-token protection for both `/stats` and `/metrics` through
-  `TYR_OPERATOR_BEARER_TOKEN`; liveness and readiness probes remain public.
-- Added a zero-cost Docker Compose demo with a mock OpenAI-compatible provider,
-  Prometheus, an automatically provisioned Grafana dashboard, and repeatable
-  normal-load and overload generators.
-- Added Latchflo startup, poll, heartbeat, acknowledgement, and expiration
-  failure counters without changing fail-closed grant enforcement.
-
-## What shipped in v0.13.0
-
-- Added first-class `controlPlane.type: latchflo` file configuration. Tyr now
-  registers itself, polls desired state, applies complete higher-revision grant
-  snapshots, acknowledges results, and retries startup without source edits.
-- Added `/readyz`, which returns `503` until every managed pool has a valid,
-  unexpired Latchflo grant. `/healthz` remains a process-liveness probe.
-- Added atomic persistence of rotated per-instance agent tokens with `0600`
-  permissions and graceful agent shutdown before gateway drain.
-- Managed pools now start with `maxConcurrent: 0`, `maxQueue: 0`, revision
-  `0`, and enforcement enabled. This requires `async-bulkhead-llm` 3.12.0 and
-  ensures Tyr is fail closed before its first valid grant arrives.
-- Added runtime validation for desired-state identities, epochs, revisions,
-  timestamps, duplicate pools, and token-budget relationships. A stale persisted
-  credential is re-registered once on `401` when a bootstrap token is available.
-- Latchflo provenance emitted by the built-in agent now uses
-  `source: "latchflo"`. Deprecated `x-korrx-*` response aliases remain for
-  downstream migration.
-
-## What shipped in v0.12.0
-
-- Accepted `source: "latchflo"` on admission provenance alongside the legacy
-  `source: "korrx"`, so Tyr and the control plane can be rolled out in either
-  order during the Latchflo rebrand.
-- Added `x-latchflo-grant-id` and `x-latchflo-controller-epoch` response
-  headers, emitted alongside the existing `x-korrx-*` pair with identical
-  values.
-
-## What shipped in v0.11.1
-
-- Corrected the embedded-agent contract to accept Korrx provenance with
-  `source: "korrx"`.
-- Renamed grant-attribution headers to `x-korrx-grant-id` and
-  `x-korrx-controller-epoch`.
-- Added regression tests across the real pool-validation and gateway-response
-  paths for admitted, bypassed, and rejected decisions.
-
-## What shipped in v0.11.0
-
-- Upgraded and pinned `async-bulkhead-llm` to exactly 3.11.1.
-- Added complete per-pool snapshots covering concurrency, queue capacity, token
-  budget, and high-priority reserve.
-- Added strictly increasing revisions and stale-update rejection.
-- Added Tyr-local all-or-nothing batch application across named pools.
-- Added a narrow `control` interface from `createGateway()` for an embedded
-  control-plane agent.
-- Delegated observe-mode execution and accounting to the library's native v3.11
-  implementation, including bypass identities and bypass release usage.
-- Added request headers for preview and authoritative limit revisions.
-- Added immutable Korrx grant provenance keyed by the exact admission revision,
-  with grant and controller-epoch response headers.
-- Added queue and initial-revision startup configuration.
-- Corrected CI to validate Tyr's actual flat ESM/declaration package layout.
-
-See [`CHANGELOG.md`](CHANGELOG.md) for the complete release history and
-[`ROADMAP.md`](ROADMAP.md) for planned work.
-
-## Latchflo managed-mode overview
-
-Use [`config/tyr.latchflo.example.yaml`](config/tyr.latchflo.example.yaml) as the
-starting point. Managed pools must begin closed:
-
-```yaml
-pools:
-  - name: openai-primary
-    modelPrefixes: [gpt]
-    estimatorModel: gpt-4o
-    maxConcurrent: 0
-    maxQueue: 0
-    limitsRevision: 0
-    admissionMode: enforce
-
-controlPlane:
-  type: latchflo
-  url: http://latchflo-control-plane:8080
-  instanceId: tyr-a
-  pools: [openai-primary]
-  bootstrapTokenEnv: LATCHFLO_AGENT_BOOTSTRAP_TOKEN
-  agentTokenFile: /var/lib/tyr/latchflo-agent.token
+```bash
+git clone https://github.com/mofluxhq/tyr-admission-controller.git
+cd tyr-admission-controller
+npm ci
+npm run eval
 ```
 
-`/healthz` reports process liveness. `/readyz` returns `503` until all managed
-pools hold valid grants and returns to `503` when a grant expires. The listener
-may therefore remain observable while admission remains safely closed.
+`npm run eval` starts three local processes: a mock OpenAI provider that serves
+8 requests at a time and answers 429 beyond that, a local token issuer, and Tyr
+with [`eval/tyr.eval.yaml`](eval/tyr.eval.yaml). It sends the same workload
+twice, straight to the provider and then through Tyr. One run printed:
 
-With Latchflo 0.6 or newer, the same authenticated heartbeat also carries a
-bounded demand snapshot for every managed pool. No additional endpoint or
-request-path callback is required. Latchflo can use these observations for
-work-conserving capacity groups while continuing to fence all allocations with
-expiring grants.
+```text
+Interactive and batch traffic sharing a provider that serves 8 requests at a time
+  3 interactive callers (250 ms pause between requests) and 24 batch callers (no pause); every caller waits 200 ms after a 429.
+
+                                    Direct to provider      Through Tyr
+  Interactive requests completed    12 / 188 (6%)           60 / 60 (100%)
+  Interactive p95 latency           0.51 s                  0.57 s
+  Batch requests completed          228 (14.9/s)            150 (9.8/s)
+  Rejected by the provider (429)    1,380                   0
+  Rejected by Tyr (429)             —                       interactive 0, batch 1,387
+  Provider peak concurrency         8 of 8                  8 of 8
+```
+
+The evaluation config gives interactive traffic three protected slots and holds
+batch to a ceiling of five, so the provider never goes over capacity. The cost
+is batch throughput: slots reserved for interactive traffic sometimes sit idle.
+
+To point the OpenAI SDK at Tyr, keep the stack running with `npm run eval:serve`
+and, in another terminal, run the quickstart:
+
+```bash
+npm --prefix eval/sdk install && node eval/sdk/quickstart.mjs
+```
+
+The only changes a client needs are the base URL and Tyr's identity header. The
+client keeps sending its own provider key; Tyr forwards it and never stores it.
+
+```js
+const client = new OpenAI({
+  baseURL: "http://127.0.0.1:8787/v1",
+  apiKey: process.env.OPENAI_API_KEY,
+  // Selects the admission class. The evaluation issues these tokens locally.
+  defaultHeaders: { "x-tyr-identity-token": `Bearer ${token}` },
+});
+const response = await client.responses.create({ model, input: "Hello", max_output_tokens: 64 });
+```
+
+[`eval/sdk/quickstart.py`](eval/sdk/quickstart.py) does the same with the Python
+SDK. To run the workload against OpenAI instead of the mock, which is billed and
+capped at 40 requests of 16 output tokens:
+
+```bash
+OPENAI_API_KEY=... npm run eval -- --upstream=openai --model=<model> --confirm-live
+```
+
+[`EVALUATION.md`](EVALUATION.md) is the checklist for the next step: measuring
+your own traffic in observe mode before enforcing anything.
+
+## Requirements
+
+- Node.js 20 or newer.
+- At least one Anthropic-shaped or OpenAI-shaped upstream.
+- Provider credentials supplied by the calling client.
 
 ## Request lifecycle
 
@@ -572,65 +230,6 @@ Latchflo 0.7 and newer may distribute the per-replica class limit table on each
 grant. Tyr 0.22 applies protected floors and hard ceilings atomically with the
 physical pool revision while keeping identity-to-class rules local.
 
-## Capacity-aware replica routing
-
-Tyr can optionally route an external request to another Tyr replica before
-admission. Each replica publishes a shared-secret-protected capacity snapshot
-and polls its configured peers outside the request path. For each validated
-request, the ingress replica computes the exact local reservation and ranks
-fresh, ready replicas by the capacity that would remain after admitting it:
-
-- immediate physical-pool concurrency headroom;
-- priority-adjusted physical-pool token headroom when configured;
-- selected admission-class concurrency and token headroom;
-- shared capacity remaining after protected class floors; and
-- the tightest normalized constraint, so global capacity cannot hide a hard
-  class ceiling or protection-layer rejection.
-
-Equal candidates prefer the local replica to avoid an unnecessary hop.
-Observe-mode pools stay local and are never selected as remote destinations, so
-shadow evaluation cannot silently change the request topology or bypass an
-enforce-mode ingress decision. A forwarded request carries an authenticated one-hop marker and the selected
-bounded admission-class ID under the same shared secret. The class cannot be
-reclassified by a drifting destination policy, and the request can never be
-forwarded again, preventing routing loops. The destination Tyr remains the
-authoritative admission controller and may still reject if capacity changed
-after the last snapshot. Tyr never retries a request after forwarding it.
-
-This does not replace Latchflo. Latchflo still owns bounded fleet-wide grants;
-capacity-aware routing only chooses which current grant partition should
-evaluate a request. Replicas sharing a pool name must use compatible request
-projection and estimator policy. Tyr refuses to route between token-aware and token-unaware definitions of the
-same pool. Schema-3 snapshots carry protected and borrowed capacity; when local
-floors are configured, schema-1/2 peers are excluded because they cannot prove
-equivalent enforcement. In Latchflo managed mode, Latchflo 0.13+ may publish a
-complete versioned routing topology in desired state. Tyr applies only newer
-revisions, filters itself, drops removed-peer capacity immediately, and begins
-polling newly advertised peers without a restart. The Tyr-to-Tyr shared secret is
-never distributed by Latchflo and remains local configuration. Standalone Tyr, or
-managed Tyr connected to an older Latchflo, keeps the configured startup peer list.
-
-```yaml
-routing:
-  capacityAware:
-    instanceId: tyr-r1
-    sharedSecretEnv: TYR_ROUTING_SECRET
-    pollIntervalMs: 100
-    staleAfterMs: 1000
-    probeTimeoutMs: 250
-    forwardTimeoutMs: 30000
-    peers:
-      - id: tyr-r2
-        baseUrl: http://tyr-r2:8787
-      - id: tyr-r3
-        baseUrl: http://tyr-r3:8787
-```
-
-Set the same random `TYR_ROUTING_SECRET` on every listed replica. Keep peer
-URLs on a trusted private network and use TLS whenever that network is not
-cryptographically isolated. Successful forwarding adds `x-tyr-routed-by` and
-`x-tyr-routed-to` to the client response.
-
 ## Admission modes
 
 `enforce` is the default and returns the normal `429`/`503` admission response.
@@ -746,60 +345,6 @@ reported by `async-bulkhead-llm`. Identity errors use `error.type` and do not
 include admission-capacity details. Only `401` identity responses include a
 `WWW-Authenticate` challenge; `503 identity_unavailable` deliberately does not.
 
-## Requirements
-
-- Node.js 20 or newer.
-- At least one Anthropic-shaped or OpenAI-shaped upstream.
-- Provider credentials supplied by the calling client.
-
-## Quick start
-
-Install dependencies and run the release checks:
-
-```bash
-npm ci
-npm run release:check
-
-# Zero-cost metrics demonstration
-npm run demo:up
-npm run demo:normal
-npm run demo:overload
-npm run demo:down
-```
-
-Copy the example configuration:
-
-```bash
-cp config/tyr.example.yaml tyr.yaml
-```
-
-Edit `tyr.yaml`, then validate it without opening a listener:
-
-```bash
-npm run validate:config -- --config ./tyr.yaml
-```
-
-Successful validation prints the resolved file path, schema version, SHA-256
-configuration fingerprint, port, pool names, and enabled routes.
-
-Start Tyr:
-
-```bash
-TYR_CONFIG_FILE=./tyr.yaml npm start
-```
-
-At startup, Tyr validates the entire file before calling `server.listen()`.
-Unreadable files, malformed YAML, unknown properties, invalid URLs, duplicate
-pool names or model prefixes, unsafe numeric values, and invalid reserve
-relationships terminate the process with a nonzero exit code.
-
-Startup configuration seeds pool routing, estimator policy, timeout behavior,
-and the initial admission-limit snapshot. Routing and estimator changes still
-require a restart. Concurrency, queue capacity, token budget, and high-priority
-reserve can be replaced at runtime through the versioned `control` interface;
-existing work drains under the new ceilings and is never cancelled merely
-because a limit shrank.
-
 ## Example requests
 
 Anthropic Messages:
@@ -842,7 +387,7 @@ curl -i http://127.0.0.1:8787/v1/responses \
   }'
 ```
 
-Tyr 0.32.0 supports stateless synchronous and streaming Responses requests. To
+Tyr 0.33.0 supports stateless synchronous and streaming Responses requests. To
 keep pre-admission token reservations bounded from request-visible state, it
 rejects `previous_response_id`, server-side `conversation`, stored `prompt`
 templates, `item_reference`, `background: true`, and provider-managed
@@ -902,7 +447,6 @@ remain conservative automatically. The repository lockfile resolves the bundled
 `vendor/async-bulkhead-llm-3.17.0.tgz` and
 `vendor/async-bulkhead-ts-1.0.1.tgz`, so the release can be built before those
 artifacts are fetched from a public registry.
-
 
 ## Configuration schema
 
@@ -1091,207 +635,6 @@ unsettled after its borrowed slot was returned can therefore keep an unbounded
 shutdown pending; configure the timeout when process termination must be
 bounded. Expiry bounds Tyr's wait, not upstream provider execution.
 
-## Latchflo managed mode
-
-File configuration can make Latchflo operation part of Tyr's normal process
-lifecycle. No package installation or `src/index.ts` modification is required.
-
-```yaml
-routing:
-  capacityAware:
-    instanceId: tyr-a
-    sharedSecretEnv: TYR_ROUTING_SECRET
-    # Empty is valid in Latchflo 0.13+ managed mode; desired-state topology
-    # supplies the routable fleet after startup.
-    peers: []
-
-controlPlane:
-  type: latchflo
-  url: http://latchflo-control-plane:8080
-  instanceId: tyr-a
-  pools: [interactive-claude, batch-openai]
-  bootstrapTokenEnv: LATCHFLO_AGENT_BOOTSTRAP_TOKEN
-  agentTokenFile: /var/lib/tyr/latchflo-agent.token
-  retryIntervalMs: 1000
-  retryMaxIntervalMs: 30000
-  requestTimeoutMs: 5000
-  metadata:
-    region: us-west
-    zone: us-west-2a
-    version: 0.32.0
-    endpoint: http://tyr-a:8787
-    labels:
-      environment: demo
-```
-
-The bootstrap credential is read from the named environment variable only when
-no persisted agent token exists. After registration, Tyr writes the rotated
-agent token atomically with owner-only permissions. Relative token paths are
-resolved against the configuration file directory.
-
-When both managed mode and capacity-aware routing are enabled, the routing and
-control-plane `instanceId` values must match. Latchflo 0.13+ advertises active
-agents that have routing endpoints; Tyr treats each newer topology as the complete
-peer set. Older Latchflo responses omit `routingTopology`, in which case the
-startup `peers` list remains unchanged. `TYR_ROUTING_SECRET` is still provisioned
-directly to Tyr replicas and is not part of Latchflo desired state.
-
-Tyr opens its HTTP listener even when Latchflo is temporarily unavailable so
-`/healthz` can distinguish process health from control-plane readiness.
-Transient registration, heartbeat, and desired-state failures use single-flight,
-bounded exponential backoff with jitter; `429` and `503` `Retry-After` values are
-honored as a minimum delay. Permanent configuration, authentication, and
-protocol failures are not retried continuously. Every control-plane request is
-bounded by `requestTimeoutMs`.
-
-
-### Demand-aware Latchflo heartbeats
-
-Tyr automatically derives one snapshot per managed pool from its existing
-statistics. Tyr 0.32.0 carries forward bounded per-class demand in that additive
-heartbeat while preserving the original pool-level fields:
-
-```json
-{
-  "demand": [
-    {
-      "pool": "interactive-claude",
-      "observedAt": "2026-08-01T20:00:00.000Z",
-      "inFlight": 12,
-      "pending": 0,
-      "recentAdmissions": 31,
-      "recentRejections": 4,
-      "recentBudgetRejections": 3,
-      "recentConcurrencyRejections": 1,
-      "inFlightTokens": 9200,
-      "availableTokens": 800,
-      "lastRequestAt": "2026-08-01T19:59:59.900Z",
-      "admissionClasses": [
-        {
-          "admissionClass": "premium",
-          "inFlight": 8,
-          "recentAdmissions": 24,
-          "recentRejections": 3,
-          "recentBudgetRejections": 2,
-          "recentConcurrencyRejections": 1,
-          "protectedConcurrent": 4,
-          "protectedConcurrentInUse": 4,
-          "borrowedConcurrent": 4,
-          "maxConcurrent": 12,
-          "inFlightTokens": 6100,
-          "protectedInFlightTokens": 4000,
-          "protectedTokensInUse": 4000,
-          "borrowedInFlightTokens": 2100,
-          "maxInFlightTokens": 12000,
-          "lastRequestAt": "2026-08-01T19:59:59.900Z"
-        }
-      ]
-    }
-  ]
-}
-```
-
-`recent*` values are deltas since the last heartbeat accepted by Latchflo, not
-process-lifetime totals. Current in-flight work keeps a pool demanding even when
-no new arrivals occurred during the interval. A failed heartbeat does not
-advance the checkpoint, so its activity is retried rather than lost.
-
-The same accepted-heartbeat semantics apply independently to every configured
-admission class. `admissionClasses` is deterministic and bounded by Tyr's fixed
-class table (at most 64 entries); tenant, application, subject, and other raw
-identity values never become heartbeat keys. `protected*` and `borrowed*` fields
-report current use of the active floor and shared remainder. They are telemetry,
-not a request for Tyr to resize its own limits.
-
-Tyr 0.32.0 advertises `admissionClassDemand: true`,
-`grantOccupancyAck: true`, `admissionClassOccupancyAck: true`, and the additive
-`borrowedAdmissionSlotDeadlines: true` capability at registration. Older control
-planes that ignore unknown capability and nested evidence fields remain
-compatible. Latchflo 0.10.0 continues to use the physical-pool proof introduced
-in Tyr 0.24; Latchflo 0.11+ can require the class capability before committing a
-class-only handoff ahead of lease expiry.
-
-Tyr omits token fields for concurrency-only pools and currently omits
-`oldestPendingMs` because the underlying queue statistics do not expose waiter
-age. Latchflo can still age continuous demand from successive reports. Missing
-or stale telemetry remains protected by Latchflo; it cannot cause a floor to be
-lent early.
-
-### Acknowledged capacity handoffs
-
-When Latchflo 0.10.0 restores capacity from a borrower, it can issue a lower
-complete physical-pool grant as a drain target. Tyr installs that higher
-revision locally first, so no new request can extend occupancy beyond the new
-ceiling. Active work is not revoked; the pool shrinks by attrition.
-
-Only after the `applied` acknowledgement succeeds does Tyr publish a separate
-demand heartbeat. If the exact published snapshot is still above the new
-`maxConcurrent` limit, or above a newly introduced/lower token budget, Tyr uses
-a bounded 500 ms evidence cadence until a published snapshot is at or below the
-target. Normal heartbeat cadence then resumes. Failed acknowledgements or
-heartbeats do not weaken local enforcement, and Latchflo can still fall back to
-lease expiry rather than double-allocating capacity.
-
-The acknowledgement's `occupancy` object is additive observability evidence;
-Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
-post-ack heartbeat remains the authoritative proof used by that control plane.
-
-Tyr 0.32.0 applies the same ordering to restrictive class-only changes. When a
-protected floor is restored, the newly protected capacity reduces the shared
-remainder. Tyr therefore keeps publishing bounded class evidence until the sum
-of `borrowedConcurrent` fits within the desired shared concurrency remainder and,
-for token-managed pools, the sum of `borrowedInFlightTokens` fits within the
-desired shared token remainder. Reduced per-class hard ceilings must also contain
-their current class occupancy. The heartbeat includes the active protected floors
-and hard ceilings so Latchflo can reject stale snapshots.
-
-`/readyz` remains `503` until every managed pool has a complete unexpired grant.
-A transient poll failure does not discard a still-valid lease. When a grant
-expires, Tyr applies the reserved next even revision with zero capacity and
-immediately becomes unready. Grant acknowledgements are best-effort and cannot
-interrupt local expiration enforcement after limits have been applied.
-
-Omit `controlPlane.pools` to manage every pool declared in the Tyr file. Pool
-names are validated at startup, and a grant batch is preflighted before any
-local pool mutates. Queue timeout, model routing, estimator policy, admission
-mode, and provider upstreams remain construction-time settings.
-
-### Embedded control surface
-
-`createGateway()` still returns the narrow `control` object for custom embedded
-agents and tests. It does not expose the request-execution bulkhead itself.
-
-```ts
-const { control } = createGateway(options);
-const result = control.applyLimits([
-  {
-    pool: "interactive-claude",
-    limits: {
-      revision: 101,
-      maxConcurrent: 24,
-      maxQueue: 0,
-      tokenBudget: { budget: 240_000, highPriorityReserve: 48_000 },
-    },
-    provenance: {
-      source: "latchflo",
-      grantId: "f6bc97d0-14ba-4ca7-b9bb-9a275a8b1533",
-      controllerEpoch: 12,
-      revision: 101,
-      expiresAt: "2026-07-24T18:30:00.000Z",
-    },
-  },
-]);
-
-if (!result.applied) console.error(result.reason, result.pool);
-```
-
-Every update must provide the complete snapshot expected by that pool.
-Revisions must be strictly greater than the current revision, and provenance
-revision must match the limit revision. Tyr retains a bounded revision ledger
-so in-flight requests remain attributable to the grant captured at admission.
-Reductions use shrink-by-attrition; setting `maxConcurrent: 0` disables new
-admissions immediately.
-
 ## Authenticated identity and priority safety
 
 Identity is optional for backward compatibility. Once `identity` is configured,
@@ -1358,11 +701,11 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.32.0 .
+docker build -t tyr-admission-controller:0.33.0 .
+```
 
 The source tree must include the committed `vendor/` directory. Run `npm run verify:vendor` before building or publishing a source archive.
 It is an offline check: it proves each tarball matches the lockfile. Because a tarball and its lockfile entry can be regenerated together from a local `npm pack`, CI also runs `npm run verify:vendor-provenance`, which compares each vendored tarball against the artifact npm published for that exact `name@version`. That online check is what stops a local pre-release build from shipping under a released version number; run it whenever you re-vendor a dependency.
-```
 
 Run it with a read-only mounted configuration:
 
@@ -1372,7 +715,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.32.0
+  tyr-admission-controller:0.33.0
 ```
 
 Or use the included Compose example:
@@ -1501,7 +844,7 @@ pool name, configured admission-class ID, provider shape, priority, status
 class, outcome, and enumerated reason. Model strings, request IDs, admission
 IDs, grant IDs, and tenant-supplied identity values never become metric labels.
 
-Tyr 0.32.0 carries forward two admission-path histograms.
+Tyr 0.33.0 carries forward two admission-path histograms.
 `tyr_admission_decision_seconds` measures synchronous local decision work and
 **excludes** the awaited local concurrency acquire.
 `tyr_admission_queue_wait_seconds` measures that acquire wait separately. Both
@@ -1575,7 +918,7 @@ is logged but never returned to the caller.
 - Upstream response headers are not generally passed through; Tyr returns the
   upstream status and body with a normalized content type.
 - There is no Anthropic/OpenAI format translation.
-- Responses support is intentionally stateless in v0.32.0: hidden server-side
+- Responses support is intentionally stateless in v0.33.0: hidden server-side
   conversation/prompt references, background execution, and provider-managed
   retrieval/computer tools are rejected until Tyr can reserve their capacity
   without undercounting unseen state.
@@ -1583,6 +926,300 @@ is logged but never returned to the caller.
   overruns.
 - Multi-controller Latchflo failover, tenant policy, and supported Helm packaging
   remain roadmap work.
+
+## Capacity-aware replica routing
+
+Tyr can optionally route an external request to another Tyr replica before
+admission. Each replica publishes a shared-secret-protected capacity snapshot
+and polls its configured peers outside the request path. For each validated
+request, the ingress replica computes the exact local reservation and ranks
+fresh, ready replicas by the capacity that would remain after admitting it:
+
+- immediate physical-pool concurrency headroom;
+- priority-adjusted physical-pool token headroom when configured;
+- selected admission-class concurrency and token headroom;
+- shared capacity remaining after protected class floors; and
+- the tightest normalized constraint, so global capacity cannot hide a hard
+  class ceiling or protection-layer rejection.
+
+Equal candidates prefer the local replica to avoid an unnecessary hop.
+Observe-mode pools stay local and are never selected as remote destinations, so
+shadow evaluation cannot silently change the request topology or bypass an
+enforce-mode ingress decision. A forwarded request carries an authenticated one-hop marker and the selected
+bounded admission-class ID under the same shared secret. The class cannot be
+reclassified by a drifting destination policy, and the request can never be
+forwarded again, preventing routing loops. The destination Tyr remains the
+authoritative admission controller and may still reject if capacity changed
+after the last snapshot. Tyr never retries a request after forwarding it.
+
+This does not replace Latchflo. Latchflo still owns bounded fleet-wide grants;
+capacity-aware routing only chooses which current grant partition should
+evaluate a request. Replicas sharing a pool name must use compatible request
+projection and estimator policy. Tyr refuses to route between token-aware and token-unaware definitions of the
+same pool. Schema-3 snapshots carry protected and borrowed capacity; when local
+floors are configured, schema-1/2 peers are excluded because they cannot prove
+equivalent enforcement. In Latchflo managed mode, Latchflo 0.13+ may publish a
+complete versioned routing topology in desired state. Tyr applies only newer
+revisions, filters itself, drops removed-peer capacity immediately, and begins
+polling newly advertised peers without a restart. The Tyr-to-Tyr shared secret is
+never distributed by Latchflo and remains local configuration. Standalone Tyr, or
+managed Tyr connected to an older Latchflo, keeps the configured startup peer list.
+
+```yaml
+routing:
+  capacityAware:
+    instanceId: tyr-r1
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    pollIntervalMs: 100
+    staleAfterMs: 1000
+    probeTimeoutMs: 250
+    forwardTimeoutMs: 30000
+    peers:
+      - id: tyr-r2
+        baseUrl: http://tyr-r2:8787
+      - id: tyr-r3
+        baseUrl: http://tyr-r3:8787
+```
+
+Set the same random `TYR_ROUTING_SECRET` on every listed replica. Keep peer
+URLs on a trusted private network and use TLS whenever that network is not
+cryptographically isolated. Successful forwarding adds `x-tyr-routed-by` and
+`x-tyr-routed-to` to the client response.
+
+## Latchflo managed-mode overview
+
+Use [`config/tyr.latchflo.example.yaml`](config/tyr.latchflo.example.yaml) as the
+starting point. Managed pools must begin closed:
+
+```yaml
+pools:
+  - name: openai-primary
+    modelPrefixes: [gpt]
+    estimatorModel: gpt-4o
+    maxConcurrent: 0
+    maxQueue: 0
+    limitsRevision: 0
+    admissionMode: enforce
+
+controlPlane:
+  type: latchflo
+  url: http://latchflo-control-plane:8080
+  instanceId: tyr-a
+  pools: [openai-primary]
+  bootstrapTokenEnv: LATCHFLO_AGENT_BOOTSTRAP_TOKEN
+  agentTokenFile: /var/lib/tyr/latchflo-agent.token
+```
+
+`/healthz` reports process liveness. `/readyz` returns `503` until all managed
+pools hold valid grants and returns to `503` when a grant expires. The listener
+may therefore remain observable while admission remains safely closed.
+
+With Latchflo 0.6 or newer, the same authenticated heartbeat also carries a
+bounded demand snapshot for every managed pool. No additional endpoint or
+request-path callback is required. Latchflo can use these observations for
+work-conserving capacity groups while continuing to fence all allocations with
+expiring grants.
+
+## Latchflo managed mode
+
+File configuration can make Latchflo operation part of Tyr's normal process
+lifecycle. No package installation or `src/index.ts` modification is required.
+
+```yaml
+routing:
+  capacityAware:
+    instanceId: tyr-a
+    sharedSecretEnv: TYR_ROUTING_SECRET
+    # Empty is valid in Latchflo 0.13+ managed mode; desired-state topology
+    # supplies the routable fleet after startup.
+    peers: []
+
+controlPlane:
+  type: latchflo
+  url: http://latchflo-control-plane:8080
+  instanceId: tyr-a
+  pools: [interactive-claude, batch-openai]
+  bootstrapTokenEnv: LATCHFLO_AGENT_BOOTSTRAP_TOKEN
+  agentTokenFile: /var/lib/tyr/latchflo-agent.token
+  retryIntervalMs: 1000
+  retryMaxIntervalMs: 30000
+  requestTimeoutMs: 5000
+  metadata:
+    region: us-west
+    zone: us-west-2a
+    version: 0.33.0
+    endpoint: http://tyr-a:8787
+    labels:
+      environment: demo
+```
+
+The bootstrap credential is read from the named environment variable only when
+no persisted agent token exists. After registration, Tyr writes the rotated
+agent token atomically with owner-only permissions. Relative token paths are
+resolved against the configuration file directory.
+
+When both managed mode and capacity-aware routing are enabled, the routing and
+control-plane `instanceId` values must match. Latchflo 0.13+ advertises active
+agents that have routing endpoints; Tyr treats each newer topology as the complete
+peer set. Older Latchflo responses omit `routingTopology`, in which case the
+startup `peers` list remains unchanged. `TYR_ROUTING_SECRET` is still provisioned
+directly to Tyr replicas and is not part of Latchflo desired state.
+
+Tyr opens its HTTP listener even when Latchflo is temporarily unavailable so
+`/healthz` can distinguish process health from control-plane readiness.
+Transient registration, heartbeat, and desired-state failures use single-flight,
+bounded exponential backoff with jitter; `429` and `503` `Retry-After` values are
+honored as a minimum delay. Permanent configuration, authentication, and
+protocol failures are not retried continuously. Every control-plane request is
+bounded by `requestTimeoutMs`.
+
+
+### Demand-aware Latchflo heartbeats
+
+Tyr automatically derives one snapshot per managed pool from its existing
+statistics. Tyr 0.33.0 carries forward bounded per-class demand in that additive
+heartbeat while preserving the original pool-level fields:
+
+```json
+{
+  "demand": [
+    {
+      "pool": "interactive-claude",
+      "observedAt": "2026-08-01T20:00:00.000Z",
+      "inFlight": 12,
+      "pending": 0,
+      "recentAdmissions": 31,
+      "recentRejections": 4,
+      "recentBudgetRejections": 3,
+      "recentConcurrencyRejections": 1,
+      "inFlightTokens": 9200,
+      "availableTokens": 800,
+      "lastRequestAt": "2026-08-01T19:59:59.900Z",
+      "admissionClasses": [
+        {
+          "admissionClass": "premium",
+          "inFlight": 8,
+          "recentAdmissions": 24,
+          "recentRejections": 3,
+          "recentBudgetRejections": 2,
+          "recentConcurrencyRejections": 1,
+          "protectedConcurrent": 4,
+          "protectedConcurrentInUse": 4,
+          "borrowedConcurrent": 4,
+          "maxConcurrent": 12,
+          "inFlightTokens": 6100,
+          "protectedInFlightTokens": 4000,
+          "protectedTokensInUse": 4000,
+          "borrowedInFlightTokens": 2100,
+          "maxInFlightTokens": 12000,
+          "lastRequestAt": "2026-08-01T19:59:59.900Z"
+        }
+      ]
+    }
+  ]
+}
+```
+
+`recent*` values are deltas since the last heartbeat accepted by Latchflo, not
+process-lifetime totals. Current in-flight work keeps a pool demanding even when
+no new arrivals occurred during the interval. A failed heartbeat does not
+advance the checkpoint, so its activity is retried rather than lost.
+
+The same accepted-heartbeat semantics apply independently to every configured
+admission class. `admissionClasses` is deterministic and bounded by Tyr's fixed
+class table (at most 64 entries); tenant, application, subject, and other raw
+identity values never become heartbeat keys. `protected*` and `borrowed*` fields
+report current use of the active floor and shared remainder. They are telemetry,
+not a request for Tyr to resize its own limits.
+
+Tyr 0.33.0 advertises `admissionClassDemand: true`,
+`grantOccupancyAck: true`, `admissionClassOccupancyAck: true`, and the additive
+`borrowedAdmissionSlotDeadlines: true` capability at registration. Older control
+planes that ignore unknown capability and nested evidence fields remain
+compatible. Latchflo 0.10.0 continues to use the physical-pool proof introduced
+in Tyr 0.24; Latchflo 0.11+ can require the class capability before committing a
+class-only handoff ahead of lease expiry.
+
+Tyr omits token fields for concurrency-only pools and currently omits
+`oldestPendingMs` because the underlying queue statistics do not expose waiter
+age. Latchflo can still age continuous demand from successive reports. Missing
+or stale telemetry remains protected by Latchflo; it cannot cause a floor to be
+lent early.
+
+### Acknowledged capacity handoffs
+
+When Latchflo 0.10.0 restores capacity from a borrower, it can issue a lower
+complete physical-pool grant as a drain target. Tyr installs that higher
+revision locally first, so no new request can extend occupancy beyond the new
+ceiling. Active work is not revoked; the pool shrinks by attrition.
+
+Only after the `applied` acknowledgement succeeds does Tyr publish a separate
+demand heartbeat. If the exact published snapshot is still above the new
+`maxConcurrent` limit, or above a newly introduced/lower token budget, Tyr uses
+a bounded 500 ms evidence cadence until a published snapshot is at or below the
+target. Normal heartbeat cadence then resumes. Failed acknowledgements or
+heartbeats do not weaken local enforcement, and Latchflo can still fall back to
+lease expiry rather than double-allocating capacity.
+
+The acknowledgement's `occupancy` object is additive observability evidence;
+Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
+post-ack heartbeat remains the authoritative proof used by that control plane.
+
+Tyr 0.33.0 applies the same ordering to restrictive class-only changes. When a
+protected floor is restored, the newly protected capacity reduces the shared
+remainder. Tyr therefore keeps publishing bounded class evidence until the sum
+of `borrowedConcurrent` fits within the desired shared concurrency remainder and,
+for token-managed pools, the sum of `borrowedInFlightTokens` fits within the
+desired shared token remainder. Reduced per-class hard ceilings must also contain
+their current class occupancy. The heartbeat includes the active protected floors
+and hard ceilings so Latchflo can reject stale snapshots.
+
+`/readyz` remains `503` until every managed pool has a complete unexpired grant.
+A transient poll failure does not discard a still-valid lease. When a grant
+expires, Tyr applies the reserved next even revision with zero capacity and
+immediately becomes unready. Grant acknowledgements are best-effort and cannot
+interrupt local expiration enforcement after limits have been applied.
+
+Omit `controlPlane.pools` to manage every pool declared in the Tyr file. Pool
+names are validated at startup, and a grant batch is preflighted before any
+local pool mutates. Queue timeout, model routing, estimator policy, admission
+mode, and provider upstreams remain construction-time settings.
+
+### Embedded control surface
+
+`createGateway()` still returns the narrow `control` object for custom embedded
+agents and tests. It does not expose the request-execution bulkhead itself.
+
+```ts
+const { control } = createGateway(options);
+const result = control.applyLimits([
+  {
+    pool: "interactive-claude",
+    limits: {
+      revision: 101,
+      maxConcurrent: 24,
+      maxQueue: 0,
+      tokenBudget: { budget: 240_000, highPriorityReserve: 48_000 },
+    },
+    provenance: {
+      source: "latchflo",
+      grantId: "f6bc97d0-14ba-4ca7-b9bb-9a275a8b1533",
+      controllerEpoch: 12,
+      revision: 101,
+      expiresAt: "2026-07-24T18:30:00.000Z",
+    },
+  },
+]);
+
+if (!result.applied) console.error(result.reason, result.pool);
+```
+
+Every update must provide the complete snapshot expected by that pool.
+Revisions must be strictly greater than the current revision, and provenance
+revision must match the limit revision. Tyr retains a bounded revision ledger
+so in-flight requests remain attributable to the grant captured at admission.
+Reductions use shrink-by-attrition; setting `maxConcurrent: 0` disables new
+admissions immediately.
 
 ## Repository layout
 
@@ -1616,10 +1253,65 @@ test/
   routing-gateway.test.ts authenticated one-hop routing integration tests
   latchflo.test.ts  managed-agent, readiness, persistence, and expiration tests
   pools-v311.test.ts v3.11 preview, exact admission provenance, observe, reconfiguration, and drain tests
+eval/
+  run.mjs           self-serve evaluation runner (npm run eval, eval:serve, verify:eval)
+  tyr.eval.yaml     single-node evaluation configuration with admission classes
+  provider.mjs      capacity-limited mock OpenAI provider
+  identity.mjs      local evaluation-only JWT issuer
+  sdk/              OpenAI SDK quickstarts for Node and Python
 Dockerfile          production multi-stage image
 compose.example.yaml local file-configured container example
 demo/                mock provider, Prometheus, Grafana, dashboard, and load generator
+EVALUATION.md       evaluation checklist
 ```
+
+## Develop Tyr
+
+Install dependencies and run the full release gate:
+
+```bash
+npm ci
+npm run release:check
+
+# Zero-cost metrics demonstration
+npm run demo:up
+npm run demo:normal
+npm run demo:overload
+npm run demo:down
+```
+
+Copy the example configuration:
+
+```bash
+cp config/tyr.example.yaml tyr.yaml
+```
+
+Edit `tyr.yaml`, then validate it without opening a listener:
+
+```bash
+npm run validate:config -- --config ./tyr.yaml
+```
+
+Successful validation prints the resolved file path, schema version, SHA-256
+configuration fingerprint, port, pool names, and enabled routes.
+
+Start Tyr:
+
+```bash
+TYR_CONFIG_FILE=./tyr.yaml npm start
+```
+
+At startup, Tyr validates the entire file before calling `server.listen()`.
+Unreadable files, malformed YAML, unknown properties, invalid URLs, duplicate
+pool names or model prefixes, unsafe numeric values, and invalid reserve
+relationships terminate the process with a nonzero exit code.
+
+Startup configuration seeds pool routing, estimator policy, timeout behavior,
+and the initial admission-limit snapshot. Routing and estimator changes still
+require a restart. Concurrency, queue capacity, token budget, and high-priority
+reserve can be replaced at runtime through the versioned `control` interface;
+existing work drains under the new ceilings and is never cancelled merely
+because a limit shrank.
 
 ## Development commands
 
@@ -1636,7 +1328,12 @@ npm run verify:openai-responses
 npm run verify:borrowed-restoration
 npm run verify:demand
 npm run verify:admission-provenance
+npm run verify:eval
 npm run release:check
+
+# Self-serve evaluation
+npm run eval
+npm run eval:serve
 
 # Zero-cost metrics demonstration
 npm run demo:up
@@ -1644,6 +1341,11 @@ npm run demo:normal
 npm run demo:overload
 npm run demo:down
 ```
+
+## Releases
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the release history and
+[`ROADMAP.md`](ROADMAP.md) for planned work.
 
 ## License
 

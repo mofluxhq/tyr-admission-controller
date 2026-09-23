@@ -1,0 +1,69 @@
+# Single-node evaluation configuration. `npm run eval` starts Tyr with this file,
+# next to the evaluation provider (eval/provider.mjs, 127.0.0.1:9101) and the
+# evaluation token issuer (eval/identity.mjs, 127.0.0.1:9102). No Latchflo.
+version: 1
+
+server:
+  port: 8787
+  maxRequestBodyBytes: 262144
+  # Cost control: a request that asks for more output tokens than this is
+  # rejected with 400 before it reaches the provider.
+  maxOutputTokens: 256
+
+upstreams:
+  openai:
+    # `npm run eval -- --upstream=openai` replaces this with https://api.openai.com.
+    baseUrl: http://127.0.0.1:9101
+
+timeouts:
+  responseHeadersMs: 30000
+  streamIdleMs: 30000
+
+identity:
+  # Callers send `x-tyr-identity-token: Bearer <JWT>`. The token's `azp` claim
+  # names the application, which selects the admission class below. The
+  # provider Authorization header is forwarded unchanged.
+  jwt:
+    jwksUrl: http://127.0.0.1:9102/jwks
+    issuer: tyr-eval
+    audience: tyr-eval
+  roles:
+    invoke: [tyr.invoke]
+
+telemetry:
+  metrics:
+    enabled: true
+  audit:
+    enabled: false
+
+pools:
+  - name: openai-eval
+    modelPrefixes: [gpt, o1, o3, o4]
+    estimatorModel: gpt-4o
+    # Sized to the evaluation provider: 8 requests at a time.
+    maxConcurrent: 8
+    maxQueue: 0
+    inFlightTokenBudget: 16000
+    # Reserved for a request that sends no output limit.
+    defaultOutputReservation: 256
+    admissionMode: enforce
+    admissionClasses:
+      # Traffic without a matching rule is treated as batch.
+      defaultClass: batch
+      classes:
+        interactive:
+          # Three slots only interactive traffic can use; it may borrow more.
+          protectedConcurrent: 3
+          maxConcurrent: 8
+          protectedInFlightTokens: 4000
+          maxInFlightTokens: 16000
+        batch:
+          # One slot of its own and a hard ceiling of five, so a batch flood
+          # can never take the slots interactive traffic depends on.
+          protectedConcurrent: 1
+          maxConcurrent: 5
+          protectedInFlightTokens: 2000
+          maxInFlightTokens: 10000
+      rules:
+        - admissionClass: interactive
+          applicationIds: [eval-interactive]

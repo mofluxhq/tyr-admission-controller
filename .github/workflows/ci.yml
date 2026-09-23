@@ -49,6 +49,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The self-serve evaluation must keep working from a clean checkout:
+      # interactive traffic fully protected, provider never over capacity.
+      - name: Evaluation (mock provider)
+        run: node eval/run.mjs --quick --assert
+
       - name: Pack (dry-run)
         shell: bash
         run: |

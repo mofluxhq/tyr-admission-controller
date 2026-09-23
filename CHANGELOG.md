@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-09-23
+
+### Added
+
+- A self-serve evaluation that needs only Node.js 20 or newer: no API key,
+  Docker, Kubernetes, or Latchflo.
+  - `npm run eval` starts a mock OpenAI provider that serves 8 requests at a
+    time and answers 429 beyond that, a local evaluation-only JWT issuer, and
+    Tyr with `eval/tyr.eval.yaml`. It sends the same workload of 3 interactive
+    callers and 24 batch callers straight to the provider and then through Tyr,
+    and prints both results with Tyr's per-class admission metrics.
+  - `npm run eval:serve` keeps the stack running. `eval/sdk/quickstart.mjs` and
+    `eval/sdk/quickstart.py` call `responses.create(...)` and Chat Completions
+    through Tyr with the OpenAI SDKs and print the selected admission class.
+  - `npm run eval -- --upstream=openai --model=<model> --confirm-live` runs the
+    workload against OpenAI. At most 40 requests reach OpenAI, each limited to
+    16 output tokens, and the run stops at the first error that is not a
+    capacity 429.
+- `EVALUATION.md`, a checklist from the mock run through observe mode on real
+  traffic to deployment and readiness.
+- `npm run verify:eval` runs a short evaluation and fails unless every
+  interactive request completes through Tyr, the provider rejects nothing
+  behind Tyr, and Tyr sheds batch work. It is part of `release:check` and CI.
+
+### Changed
+
+- The README starts with the five-minute evaluation. Per-release notes now live
+  only in this changelog, and the Latchflo overview sits with the rest of the
+  managed-mode reference.
+
+### Fixed
+
+- The README's container build example no longer wraps the vendoring notes in
+  its code block.
+
+### Compatibility
+
+- No admission, configuration, wire, or dependency change.
+- `verify:eval` and `release:check` need local ports 8787, 9101, and 9102 free.
+
 ## [0.32.0] - 2026-09-22
 
 ### Changed

@@ -1,0 +1,9 @@
+{
+  "name": "tyr-eval-sdk-quickstart",
+  "private": true,
+  "type": "module",
+  "description": "OpenAI SDK quickstart against a local Tyr evaluation stack.",
+  "dependencies": {
+    "openai": "^7.23.0"
+  }
+}

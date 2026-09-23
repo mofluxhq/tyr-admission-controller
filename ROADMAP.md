@@ -2,8 +2,8 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.32.0`
-open-source release to a commercially credible product. It
+This roadmap prioritizes the shortest path from the current `v0.33.0`
+self-serve evaluation release to a commercially credible product. It
 assumes one experienced TypeScript/backend engineer, automated tests and
 documentation for every milestone, and no custom management UI before
 `v1.0.0`.
@@ -25,10 +25,14 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.32.0
+## Current baseline: v0.33.0
 
 The current release provides:
 
+- A self-serve evaluation path: `npm run eval` shows interactive traffic
+  protected from a batch flood on a capacity-limited mock provider, and
+  `npm run eval:serve` plus the OpenAI SDK quickstarts need no Kubernetes,
+  Latchflo, or API key.
 - Apache-2.0 licensing. Latchflo managed mode requires a separately licensed
   Latchflo 0.4.0 or later.
 - Upstream failure diagnostics: `502 upstream_error` names a bounded transport
@@ -504,6 +508,15 @@ Outcome:
 - Tyr keeps its pre-upstream token-reservation guarantee explicit rather than
   pretending unseen provider-managed state can be estimated safely.
 
+### v0.33.0 — Self-serve evaluation path — shipped 2026-09-23
+
+- `npm run eval` sends the same interactive-plus-batch-flood workload straight to a capacity-limited mock OpenAI provider and then through Tyr, and reports both. Admission classes are selected from a local evaluation JWT issuer. No API key, Docker, Kubernetes, or Latchflo.
+- `npm run eval:serve` keeps the stack running; Node and Python OpenAI SDK quickstarts call `responses.create(...)` and Chat Completions through Tyr.
+- An opt-in live OpenAI run, capped at 40 requests of 16 output tokens and gated by `--confirm-live`. `server.maxOutputTokens` bounds every request in the evaluation config.
+- `EVALUATION.md`: from the mock run through observe mode on real traffic to deployment and readiness.
+- `verify:eval` asserts the result in `release:check` and CI.
+- The live-provider Responses compatibility check already exists as MoFlux Bench `npm run demo:openai:responses`.
+
 ### v0.32.0 — Apache-2.0 open-source release — shipped 2026-09-22
 
 - Relicensed Tyr under Apache-2.0 and shipped the license, notice and third-party notices in the image and npm package.
@@ -536,36 +549,6 @@ Outcome:
   quota, model queues, or accelerator capacity was reclaimed.
 - Operators have a concrete reason to retain an unlent upstream floor wherever
   provider-side termination cannot be proven.
-
-### v0.33.0 — Self-serve evaluation path
-
-**Goal:** Make it possible for an engineer to prove Tyr's value against a real
-OpenAI workload without a design-partner engagement or custom deployment work.
-
-Planned work:
-
-- Publish a minimal OpenAI SDK quickstart for both `responses.create(...)` and
-  Chat Completions with Tyr as the base URL.
-- Provide a single-node evaluation configuration with interactive/batch admission
-  classes, Prometheus metrics, and explicit cost controls.
-- Add a small live-provider Responses compatibility check to MoFlux Bench rather
-  than another broad benchmark campaign.
-- Tighten deployment/readiness documentation and produce a short evaluation
-  checklist that can be completed before introducing Latchflo.
-
-Exit criteria:
-
-- A new evaluator can launch Tyr, point an OpenAI SDK at it, run a protected
-  interactive-versus-batch workload, and inspect the resulting admission metrics
-  without modifying Tyr source code.
-- The evaluation path does not require Kubernetes or Latchflo.
-
-Non-goals:
-
-- Multi-controller control-plane hardening without a demonstrated deployment
-  requirement.
-- A management UI.
-
 
 ### v1.0.0 — Supported production release
 
