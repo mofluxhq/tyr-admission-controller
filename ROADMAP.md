@@ -2,8 +2,8 @@
 
 Tyr is an LLM admission controller. Its purpose is to prevent concurrent AI workloads from overcommitting finite provider or inference capacity by reserving token capacity before upstream execution begins.
 
-This roadmap prioritizes the shortest path from the current `v0.31.0`
-resource-specific restoration release to a commercially credible product. It
+This roadmap prioritizes the shortest path from the current `v0.32.0`
+open-source release to a commercially credible product. It
 assumes one experienced TypeScript/backend engineer, automated tests and
 documentation for every milestone, and no custom management UI before
 `v1.0.0`.
@@ -25,10 +25,12 @@ The initial commercial promise is:
 5. **Control cardinality.** Tenant, application, model, and request identifiers must not create unbounded metric labels or bulkhead instances.
 6. **Preserve a small data plane.** Authentication, admission, forwarding, and telemetry belong in the gateway; historical analytics and fleet coordination may live outside it.
 
-## Current baseline: v0.31.0
+## Current baseline: v0.32.0
 
 The current release provides:
 
+- Apache-2.0 licensing. Latchflo managed mode requires a separately licensed
+  Latchflo 0.4.0 or later.
 - Upstream failure diagnostics: `502 upstream_error` names a bounded transport
   `cause.code`, counted by `tyr_upstream_failures_total` and logged as a
   `tyr.diagnostic.v1` event.
@@ -502,6 +504,11 @@ Outcome:
 - Tyr keeps its pre-upstream token-reservation guarantee explicit rather than
   pretending unseen provider-managed state can be estimated safely.
 
+### v0.32.0 — Apache-2.0 open-source release — shipped 2026-09-22
+
+- Relicensed Tyr under Apache-2.0 and shipped the license, notice and third-party notices in the image and npm package.
+- Removed the deprecated `x-korrx-*` headers and `source: "korrx"` provenance, completing the 0.12.0 deprecation.
+
 ### v0.31.0 — Upstream failure diagnostics — shipped 2026-09-22
 
 - `502 upstream_error` carries a bounded transport `cause.code`; `tyr_upstream_failures_total` and a `tyr.diagnostic.v1` stderr line record every upstream failure with its code and bounded detail.
@@ -530,7 +537,7 @@ Outcome:
 - Operators have a concrete reason to retain an unlent upstream floor wherever
   provider-side termination cannot be proven.
 
-### v0.32.0 — Self-serve evaluation path
+### v0.33.0 — Self-serve evaluation path
 
 **Goal:** Make it possible for an engineer to prove Tyr's value against a real
 OpenAI workload without a design-partner engagement or custom deployment work.
@@ -562,7 +569,7 @@ Non-goals:
 
 ### v1.0.0 — Supported production release
 
-**Timing:** After v0.32.0 and sufficient design-partner validation.
+**Timing:** After v0.33.0 and sufficient design-partner validation.
 **Goal:** Provide a stable, documented, supportable product for production design partners.
 
 Planned work:
@@ -574,7 +581,7 @@ Planned work:
 - Add bounded shutdown deadlines and documented termination behavior.
 - Add end-to-end load, soak, memory, disconnect, and coordinator-failure test suites.
 - Publish supported Node.js, Redis, provider API, and deployment compatibility matrices.
-- Choose and publish the product license and contribution policy.
+- Publish the contribution policy. Tyr is licensed under Apache-2.0.
 - Publish operational runbooks, threat model, security reporting process, and service-level indicators.
 - Produce at least one public or anonymized design-partner case study.
 

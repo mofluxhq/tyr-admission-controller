@@ -7,9 +7,9 @@ package-lock.json. Versions must be reviewed whenever dependencies or the base
 container image change.
 
 The notices below are provided for attribution and license compliance. They do
-not modify the proprietary Tyr license. Third-party components are provided by
-their respective authors under the terms reproduced below and without warranty
-from those authors.
+not modify Tyr's own license (Apache License 2.0, see LICENSE.txt). Third-party
+components are provided by their respective authors under the terms reproduced
+below and without warranty from those authors.
 
 RUNTIME JAVASCRIPT COMPONENTS
 
@@ -35,8 +35,8 @@ contains Node.js, npm, Alpine Linux packages, and other third-party components
 under their own licenses. The exact component set depends on the resolved image
 digest at build time. License files, package metadata, and notices supplied by
 the base image remain applicable and must not be removed. A release SBOM and
-base-image license report should be generated and retained for each customer
-release.
+base-image license report should be generated and retained for each published
+image.
 
 The following license text applies to async-bulkhead-llm and
 async-bulkhead-ts:

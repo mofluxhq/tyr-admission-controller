@@ -1,26 +1,41 @@
-# Tyr 0.31.0 verification
+# Tyr 0.32.0 verification
 
 Date: 2026-09-22
 
 ## Version alignment
 
-- Tyr package version: `0.31.0`
-- Runtime version constant: `0.31.0`
+- Tyr package version: `0.32.0`
+- Runtime version constant: `0.32.0`
 - Runtime dependency: `async-bulkhead-llm@3.17.0`
 - Transitive bulkhead dependency: `async-bulkhead-ts@1.0.1`
 - Vendored runtime artifacts:
   - `vendor/async-bulkhead-llm-3.17.0.tgz`
   - `vendor/async-bulkhead-ts-1.0.1.tgz`
   - `vendor/yaml-2.9.0.tgz`
-- Package repository: `git@github.com:mofluxhq/tyr-admission-controller.git`
+- Package repository: `https://github.com/mofluxhq/tyr-admission-controller.git`
 
 ## Required release order
 
-`async-bulkhead-llm@3.17.0` was published for Tyr 0.30.0; 0.31.0 uses the same
+`async-bulkhead-llm@3.17.0` was published for Tyr 0.30.0; 0.32.0 uses the same
 release. Tyr's committed lockfile intentionally resolves the exact bundled
 `vendor/async-bulkhead-llm-3.17.0.tgz`, so the Tyr build is reproducible while
 the dependency release is staged; the vendor artifact is not a substitute for
 publishing the declared public package version.
+
+## Apache-2.0 license and Korrx removal (0.32.0)
+
+`LICENSE.txt` is byte-identical to the Apache License 2.0 text (SHA-256
+`c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4`), and
+`package.json` declares `Apache-2.0`. `npm pack` includes `LICENSE.txt`,
+`NOTICE.txt` and `THIRD_PARTY_NOTICES.txt`. An image built from this tree
+contains all three files in `/app` and carries the
+`org.opencontainers.image.licenses=Apache-2.0` and `source` labels.
+
+`test/gateway.test.ts` asserts that admitted, observe-mode and rejected
+responses carry the `x-latchflo-*` grant headers and no `x-korrx-*` headers.
+`test/pools-v311.test.ts` asserts that `source: "zab"` and `source: "korrx"`
+are rejected with `provenance.source must be "latchflo"` before any pool
+changes, and that `source: "latchflo"` applies. `npm run release:check` passes.
 
 ## Upstream failure diagnostics (0.31.0)
 
@@ -117,7 +132,7 @@ still has no synchronous control-plane call.
 
 ## Carried-forward compatibility
 
-Tyr 0.31.0 retains the native Anthropic Messages, OpenAI Chat Completions, and
+Tyr 0.32.0 retains the native Anthropic Messages, OpenAI Chat Completions, and
 stateless OpenAI Responses routes from 0.29.0. Existing identity, routing,
 managed-mode, provenance, timing, retry-hint, and progressive-reconciliation
 paths remain intact. Classes without `borrowedAdmissionSlot` keep the existing

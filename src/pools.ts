@@ -43,17 +43,14 @@ import type { TyrRequestIdentity } from "./identity.js";
 export type AdmissionMode = LLMAdmissionMode;
 
 /**
- * Control-plane brand names Tyr accepts on admission provenance.
+ * Control-plane names Tyr accepts on admission provenance.
  *
- * `"korrx"` is the legacy value, retained for the Latchflo rebrand transition.
- * Tyr and the control plane are deployed independently, and a provenance
- * mismatch throws out of `applyLimits` rather than returning a rejection, so
- * the agent never acks, readiness goes stale, and the expiration kill switch
- * drives capacity to zero. Accepting both values means there is no ordering
- * constraint between the two rollouts. Drop `"korrx"` only once every
- * control plane in the fleet emits `"latchflo"`.
+ * A provenance mismatch throws out of `applyLimits` rather than returning a
+ * rejection, so the agent never acks, readiness goes stale, and the expiration
+ * kill switch drives capacity to zero. Add a value here before any control
+ * plane starts emitting it.
  */
-export const ADMISSION_PROVENANCE_SOURCES = ["korrx", "latchflo"] as const;
+export const ADMISSION_PROVENANCE_SOURCES = ["latchflo"] as const;
 
 export type AdmissionProvenanceSource =
   (typeof ADMISSION_PROVENANCE_SOURCES)[number];

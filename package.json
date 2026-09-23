@@ -1,13 +1,13 @@
 {
   "name": "tyr-admission-controller",
-  "version": "0.31.0",
+  "version": "0.32.0",
   "private": true,
-  "license": "SEE LICENSE IN LICENSE.txt",
+  "license": "Apache-2.0",
   "description": "Tyr is a capacity guard for LLM traffic that reserves expected token capacity before execution, sheds requests that would overcommit a model pool, and reconciles reservations from live provider usage.",
   "homepage": "https://github.com/mofluxhq/tyr-admission-controller#readme",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/mofluxhq/tyr-admission-controller.git"
+    "url": "git+https://github.com/mofluxhq/tyr-admission-controller.git"
   },
   "bugs": {
     "url": "https://github.com/mofluxhq/tyr-admission-controller/issues"
@@ -71,6 +71,7 @@
     "config/tyr.schema.json",
     "README.md",
     "CHANGELOG.md",
-    "THIRD_PARTY_NOTICES.txt"
+    "THIRD_PARTY_NOTICES.txt",
+    "NOTICE.txt"
   ]
 }

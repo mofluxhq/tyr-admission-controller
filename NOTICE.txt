@@ -1,25 +1,18 @@
-TYR ADMISSION CONTROLLER
+Tyr Admission Controller
+Copyright 2026 Jan Balangue
 
-Copyright © 2026 Jan Balangue. All rights reserved.
-
-Tyr is proprietary software. It is licensed, not sold, and may be used only
-under LICENSE.txt together with an applicable Order Form or other express written
-authorization from the Licensor.
-
-No permission is granted to redistribute, sublicense, publish, or provide Tyr to
-third parties except as expressly authorized in writing.
+This product is licensed under the Apache License, Version 2.0. See LICENSE.txt.
 
 This distribution includes third-party software governed by separate license
 terms. Required attributions and license texts for the standard production
-runtime are provided in THIRD_PARTY_NOTICES.txt. Those third-party licenses apply
-only to their respective components and do not license Tyr's proprietary code.
+runtime are provided in THIRD_PARTY_NOTICES.txt.
 
-"Tyr" and associated names, logos, and product identifiers are marks of their
-respective owner. OpenAI, Anthropic, Node.js, Alpine Linux, and other third-party
-names and marks are the property of their respective owners. Their appearance in
-this product or documentation does not imply sponsorship, endorsement, or
-affiliation.
+Tyr's managed mode communicates with Latchflo, a separately licensed
+proprietary control plane that is not part of this distribution. The Apache
+License, Version 2.0 does not grant any rights to Latchflo.
 
-Tyr forwards or processes requests to third-party model providers according to
-customer configuration. Customers are responsible for their provider accounts,
-credentials, terms, data handling, and usage charges.
+The Apache License, Version 2.0 does not grant permission to use the "Tyr",
+"Latchflo", or "MoFlux" names, logos, or product identifiers except as required
+for reasonable and customary use in describing the origin of the work.
+OpenAI, Anthropic, Node.js, Alpine Linux, and other third-party names and marks
+are the property of their respective owners.

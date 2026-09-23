@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-22
+
+### Changed
+
+- Tyr is now licensed under the Apache License, Version 2.0. `LICENSE.txt`
+  contains the unmodified license text, `NOTICE.txt` carries the attribution
+  notice, and `package.json` declares `Apache-2.0`. Latchflo, which managed mode
+  talks to, remains separately licensed and is not covered.
+- The container image now includes `LICENSE.txt`, `NOTICE.txt` and
+  `THIRD_PARTY_NOTICES.txt`, and carries the OCI `licenses` and `source`
+  labels. The npm package now includes `NOTICE.txt`.
+- Added `CONTRIBUTING.md` and `SECURITY.md`.
+
+### Removed
+
+- The deprecated `x-korrx-grant-id` and `x-korrx-controller-epoch` response
+  headers. `x-latchflo-grant-id` and `x-latchflo-controller-epoch` carry the
+  same values.
+- The deprecated `source: "korrx"` admission-provenance value. Provenance must
+  now use `source: "latchflo"`; the validation error reads
+  `provenance.source must be "latchflo"`.
+
+### Fixed
+
+- CI now runs on pushes to `master`. It was configured for `main`, which this
+  repository does not use, so only pull requests and tags were checked.
+- Removed the unused `eslint.config.mjs`. ESLint loads `eslint.config.js`
+  first, so the second file never applied.
+
+### Compatibility
+
+- Both removals complete the 0.12.0 deprecation. Latchflo has emitted
+  `source: "latchflo"` since 0.4.0, and no known consumer reads the
+  `x-korrx-*` headers. A client that still reads them must switch to the
+  `x-latchflo-*` pair.
+- Managed mode now requires Latchflo 0.4.0 or later. Latchflo 0.3.0 and
+  earlier emit `source: "korrx"`, which Tyr rejects, so their grants are never
+  applied and managed pools stay fail closed.
+- No admission, configuration or dependency change.
+
 ## [0.31.0] - 2026-09-22
 
 ### Added

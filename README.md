@@ -6,9 +6,9 @@ Tyr projects the request into a token reservation, evaluates current concurrency
 and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.31.0 is built on
+Tyr 0.32.0 is built on
 [`async-bulkhead-llm@3.17.0`](https://www.npmjs.com/package/async-bulkhead-llm),
-unchanged from 0.30.0.
+unchanged from 0.31.0.
 The committed lockfile uses the matching vendored tarball so Tyr's release gate
 remains reproducible before or without registry access.
 The pool runtime uses complete versioned limit snapshots, immutable reservation
@@ -16,11 +16,25 @@ previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, bounded
 identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.31.0, identity-aware distributed admission data plane,
-> proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
+> **Status:** v0.32.0, identity-aware distributed admission data plane,
+> licensed under Apache-2.0. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
 > first-class Latchflo managed mode with configuration-driven registration,
 > expiring grants, readiness, persisted agent credentials, demand reporting,
 > and fail-closed expiration behavior.
+
+## What changed in v0.32.0
+
+- Tyr is now open source under the Apache License, Version 2.0. The container
+  image and npm package carry `LICENSE.txt`, `NOTICE.txt` and
+  `THIRD_PARTY_NOTICES.txt`. Latchflo, which managed mode talks to, remains
+  separately licensed.
+- The deprecated `x-korrx-grant-id` and `x-korrx-controller-epoch` response
+  headers are removed. Read `x-latchflo-grant-id` and
+  `x-latchflo-controller-epoch`, which carry the same values.
+- Admission provenance must use `source: "latchflo"`; the deprecated
+  `source: "korrx"` is rejected. Managed mode therefore requires Latchflo 0.4.0
+  or later.
+- No admission, configuration or dependency change.
 
 ## What changed in v0.31.0
 
@@ -678,8 +692,6 @@ Every validated, pool-routed request includes an advisory snapshot:
 | `x-admission-bypass-reason` | Capacity reason simulated by an observe-mode bypass |
 | `x-latchflo-grant-id` | Exact Latchflo capacity grant associated with `x-admission-revision`, when present |
 | `x-latchflo-controller-epoch` | Latchflo fencing epoch that issued the associated grant |
-| `x-korrx-grant-id` | Deprecated alias of `x-latchflo-grant-id`, identical value |
-| `x-korrx-controller-epoch` | Deprecated alias of `x-latchflo-controller-epoch`, identical value |
 | `x-tyr-routed-by` | Ingress Tyr instance that selected a remote replica; present only after forwarding |
 | `x-tyr-routed-to` | Tyr instance that performed the authoritative admission and provider invocation |
 
@@ -830,7 +842,7 @@ curl -i http://127.0.0.1:8787/v1/responses \
   }'
 ```
 
-Tyr 0.31.0 supports stateless synchronous and streaming Responses requests. To
+Tyr 0.32.0 supports stateless synchronous and streaming Responses requests. To
 keep pre-admission token reservations bounded from request-visible state, it
 rejects `previous_response_id`, server-side `conversation`, stored `prompt`
 templates, `item_reference`, `background: true`, and provider-managed
@@ -1106,7 +1118,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.31.0
+    version: 0.32.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -1136,7 +1148,7 @@ bounded by `requestTimeoutMs`.
 ### Demand-aware Latchflo heartbeats
 
 Tyr automatically derives one snapshot per managed pool from its existing
-statistics. Tyr 0.31.0 carries forward bounded per-class demand in that additive
+statistics. Tyr 0.32.0 carries forward bounded per-class demand in that additive
 heartbeat while preserving the original pool-level fields:
 
 ```json
@@ -1191,7 +1203,7 @@ identity values never become heartbeat keys. `protected*` and `borrowed*` fields
 report current use of the active floor and shared remainder. They are telemetry,
 not a request for Tyr to resize its own limits.
 
-Tyr 0.31.0 advertises `admissionClassDemand: true`,
+Tyr 0.32.0 advertises `admissionClassDemand: true`,
 `grantOccupancyAck: true`, `admissionClassOccupancyAck: true`, and the additive
 `borrowedAdmissionSlotDeadlines: true` capability at registration. Older control
 planes that ignore unknown capability and nested evidence fields remain
@@ -1224,7 +1236,7 @@ The acknowledgement's `occupancy` object is additive observability evidence;
 Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
 post-ack heartbeat remains the authoritative proof used by that control plane.
 
-Tyr 0.31.0 applies the same ordering to restrictive class-only changes. When a
+Tyr 0.32.0 applies the same ordering to restrictive class-only changes. When a
 protected floor is restored, the newly protected capacity reduces the shared
 remainder. Tyr therefore keeps publishing bounded class evidence until the sum
 of `borrowedConcurrent` fits within the desired shared concurrency remainder and,
@@ -1346,7 +1358,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.31.0 .
+docker build -t tyr-admission-controller:0.32.0 .
 
 The source tree must include the committed `vendor/` directory. Run `npm run verify:vendor` before building or publishing a source archive.
 It is an offline check: it proves each tarball matches the lockfile. Because a tarball and its lockfile entry can be regenerated together from a local `npm pack`, CI also runs `npm run verify:vendor-provenance`, which compares each vendored tarball against the artifact npm published for that exact `name@version`. That online check is what stops a local pre-release build from shipping under a released version number; run it whenever you re-vendor a dependency.
@@ -1360,7 +1372,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.31.0
+  tyr-admission-controller:0.32.0
 ```
 
 Or use the included Compose example:
@@ -1489,7 +1501,7 @@ pool name, configured admission-class ID, provider shape, priority, status
 class, outcome, and enumerated reason. Model strings, request IDs, admission
 IDs, grant IDs, and tenant-supplied identity values never become metric labels.
 
-Tyr 0.31.0 carries forward two admission-path histograms.
+Tyr 0.32.0 carries forward two admission-path histograms.
 `tyr_admission_decision_seconds` measures synchronous local decision work and
 **excludes** the awaited local concurrency acquire.
 `tyr_admission_queue_wait_seconds` measures that acquire wait separately. Both
@@ -1563,7 +1575,7 @@ is logged but never returned to the caller.
 - Upstream response headers are not generally passed through; Tyr returns the
   upstream status and body with a normalized content type.
 - There is no Anthropic/OpenAI format translation.
-- Responses support is intentionally stateless in v0.31.0: hidden server-side
+- Responses support is intentionally stateless in v0.32.0: hidden server-side
   conversation/prompt references, background execution, and provider-managed
   retrieval/computer tools are rejected until Tyr can reserve their capacity
   without undercounting unseen state.
@@ -1635,6 +1647,14 @@ npm run demo:down
 
 ## License
 
-Tyr is proprietary software licensed under [`LICENSE.txt`](LICENSE.txt) and an
-applicable Order Form or other written authorization. Third-party notices are
-provided in [`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt).
+Tyr is licensed under the [Apache License, Version 2.0](LICENSE.txt). See
+[`NOTICE.txt`](NOTICE.txt) for attribution and
+[`THIRD_PARTY_NOTICES.txt`](THIRD_PARTY_NOTICES.txt) for the licenses of bundled
+runtime dependencies.
+
+Tyr runs standalone without any control plane. Latchflo managed mode requires a
+Latchflo deployment; Latchflo is a separately licensed proprietary control plane
+and is not covered by this license.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) to contribute and
+[`SECURITY.md`](SECURITY.md) to report a vulnerability.

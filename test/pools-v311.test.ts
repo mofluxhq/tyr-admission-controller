@@ -458,7 +458,7 @@ describe("v3.11 versioned pool limits", () => {
           pool: "provenance-validation",
           limits: { revision: 1, maxConcurrent: 2, maxQueue: 0 },
           provenance: {
-            source: "korrx",
+            source: "latchflo",
             grantId: "grant-wrong-revision",
             controllerEpoch: 1,
             revision: 2,
@@ -475,43 +475,45 @@ describe("v3.11 versioned pool limits", () => {
     });
   });
 
-  it("rejects the obsolete Zab provenance source before mutating any pool", () => {
-    const pools = createPools([
-      {
-        name: "korrx-source-validation",
-        modelPrefixes: ["gpt"],
-        model: "gpt-4o",
-        maxConcurrent: 1,
-        initialRevision: 0,
-      },
-    ]);
-    const obsoleteProvenance = {
-      source: "zab",
-      grantId: "legacy-zab-grant",
-      controllerEpoch: 1,
-      revision: 1,
-      expiresAt: "2026-07-25T18:00:00.000Z",
-    } as unknown as AdmissionProvenance;
-
-    expect(() =>
-      pools.applyLimits([
+  it("rejects retired provenance sources before mutating any pool", () => {
+    for (const source of ["zab", "korrx"]) {
+      const pools = createPools([
         {
-          pool: "korrx-source-validation",
-          limits: { revision: 1, maxConcurrent: 2, maxQueue: 0 },
-          provenance: obsoleteProvenance,
+          name: "retired-source-validation",
+          modelPrefixes: ["gpt"],
+          model: "gpt-4o",
+          maxConcurrent: 1,
+          initialRevision: 0,
         },
-      ]),
-    ).toThrow(/provenance\.source must be "korrx" or "latchflo"/);
+      ]);
+      const retiredProvenance = {
+        source,
+        grantId: `retired-${source}-grant`,
+        controllerEpoch: 1,
+        revision: 1,
+        expiresAt: "2026-07-25T18:00:00.000Z",
+      } as unknown as AdmissionProvenance;
 
-    expect(pools.limits()["korrx-source-validation"]).toEqual({
-      revision: 0,
-      maxConcurrent: 1,
-      maxQueue: 0,
-    });
+      expect(() =>
+        pools.applyLimits([
+          {
+            pool: "retired-source-validation",
+            limits: { revision: 1, maxConcurrent: 2, maxQueue: 0 },
+            provenance: retiredProvenance,
+          },
+        ]),
+      ).toThrow(/provenance\.source must be "latchflo"$/);
+
+      expect(pools.limits()["retired-source-validation"]).toEqual({
+        revision: 0,
+        maxConcurrent: 1,
+        maxQueue: 0,
+      });
+    }
   });
 
-  it("accepts both the legacy korrx and current latchflo provenance sources", () => {
-    for (const source of ["korrx", "latchflo"] as const) {
+  it("accepts the latchflo provenance source", () => {
+    for (const source of ["latchflo"] as const) {
       const pools = createPools([
         {
           name: `${source}-source-accepted`,
@@ -545,7 +547,7 @@ describe("v3.11 versioned pool limits", () => {
     }
   });
 
-  it("binds each admitted request to the exact Korrx grant revision", async () => {
+  it("binds each admitted request to the exact Latchflo grant revision", async () => {
     const pools = createPools([
       {
         name: "provenance",
@@ -558,14 +560,14 @@ describe("v3.11 versioned pool limits", () => {
     ]);
     const pool = pools.get("provenance")!;
     const grantA: AdmissionProvenance = {
-      source: "korrx",
+      source: "latchflo",
       grantId: "grant-a",
       controllerEpoch: 12,
       revision: 1,
       expiresAt: "2026-07-24T18:00:00.000Z",
     };
     const grantB: AdmissionProvenance = {
-      source: "korrx",
+      source: "latchflo",
       grantId: "grant-b",
       controllerEpoch: 12,
       revision: 2,

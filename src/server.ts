@@ -216,14 +216,7 @@ function rejectStatus(reason: LLMRejectReason): number {
   }
 }
 
-/**
- * Emits grant-attribution headers under both the legacy `x-korrx-*` names and
- * the current `x-latchflo-*` names.
- *
- * Both pairs carry identical values. Emitting both lets downstream consumers
- * migrate on their own schedule instead of being cut over in lockstep with a
- * Tyr deploy. Drop the `x-korrx-*` pair only once no consumer reads it.
- */
+/** Emits the `x-latchflo-*` grant-attribution headers. */
 function setGrantProvenanceHeaders(
   res: ServerResponse,
   provenance: AdmissionProvenance | undefined,
@@ -232,9 +225,6 @@ function setGrantProvenanceHeaders(
   const epoch = String(provenance.controllerEpoch);
   res.setHeader("x-latchflo-grant-id", provenance.grantId);
   res.setHeader("x-latchflo-controller-epoch", epoch);
-  // Deprecated aliases, retained for the Latchflo rebrand transition.
-  res.setHeader("x-korrx-grant-id", provenance.grantId);
-  res.setHeader("x-korrx-controller-epoch", epoch);
 }
 
 // Reads the request body up to `maxBytes`. On overflow we stop buffering and
