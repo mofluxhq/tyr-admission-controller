@@ -28,9 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Why
 
-- In a `moflux-bench` vLLM Metal run, three requests failed as
-  `502 upstream_error "fetch failed"`. vLLM logged none of them, and Tyr kept no
-  cause, so the failure could not be attributed.
+- A `502 upstream_error "fetch failed"` could not be attributed. A refused
+  connection, a reset, and a keep-alive socket closed by the upstream all looked
+  identical, and nothing recorded which one occurred.
 
 ### Compatibility
 
