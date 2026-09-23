@@ -8,6 +8,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-22
+
+### Added
+
+- `502 upstream_error` responses include a bounded `cause: { name, code }`,
+  for example `ECONNREFUSED`, `ECONNRESET` or `UND_ERR_SOCKET`. Node's `fetch`
+  reports every transport failure as `fetch failed`; the reason is only on the
+  error's cause chain, which Tyr previously discarded. The cause message is not
+  returned because it can contain internal addresses.
+- `tyr_upstream_failures_total{pool,provider,code}` counts every upstream
+  failure, including streams torn after headers were sent.
+- One `tyr.diagnostic.v1` `upstream_failure` JSON line is written to stderr
+  per failure. It carries the code, syscall, a flag for whether headers were
+  already sent, and a detail message bounded to 300 characters. It is emitted
+  regardless of `telemetry.audit.enabled`, because without it the transport
+  reason behind a 502 cannot be recovered. `telemetry.diagnosticSink`
+  overrides the sink for embedding and tests.
+
+### Why
+
+- In a `moflux-bench` vLLM Metal run, three requests failed as
+  `502 upstream_error "fetch failed"`. vLLM logged none of them, and Tyr kept no
+  cause, so the failure could not be attributed.
+
+### Compatibility
+
+- No admission, configuration, Latchflo wire, or dependency change.
+  `async-bulkhead-llm@3.17.0` is unchanged.
+- The 502 body gains one field; existing `type` and `message` are unchanged.
+
 ## [0.30.0] - 2026-09-03
 
 ### Added

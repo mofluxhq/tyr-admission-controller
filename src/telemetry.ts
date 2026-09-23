@@ -7,6 +7,7 @@ import type {
 import type { ApiShape } from "./adapters.js";
 import type { TyrRequestIdentity } from "./identity.js";
 import type { AdmissionProvenance, TyrPoolStats } from "./pools.js";
+import type { UpstreamFailure } from "./upstream-failure.js";
 import { TYR_VERSION } from "./version.js";
 
 export type TyrAdmissionOutcome = "admitted" | "bypassed" | "rejected";
@@ -83,6 +84,21 @@ export type LatchfloFailureReason =
   | "apply_error"
   | "persist_error";
 
+/**
+ * Operator diagnostic for an upstream call that failed without a usable
+ * response. Emitted regardless of `auditEnabled`: it is rare, and without it
+ * the transport reason behind a 502 is unrecoverable.
+ */
+export type TyrUpstreamFailureEvent = {
+  readonly schema: "tyr.diagnostic.v1";
+  readonly timestamp: string;
+  readonly event: "upstream_failure";
+  readonly pool: string;
+  readonly provider: ApiShape;
+  /** True when response headers were already sent, so the stream was torn. */
+  readonly afterHeaders: boolean;
+} & UpstreamFailure;
+
 export type TyrTelemetryOptions = {
   /** Expose Prometheus text format at GET /metrics. Default: true. */
   readonly metricsEnabled?: boolean;
@@ -90,6 +106,8 @@ export type TyrTelemetryOptions = {
   readonly auditEnabled?: boolean;
   /** Override the default stdout JSON sink, primarily for embedding and tests. */
   readonly auditSink?: (event: TyrAdmissionAuditEvent) => void;
+  /** Override the default stderr JSON sink for upstream failure diagnostics. */
+  readonly diagnosticSink?: (event: TyrUpstreamFailureEvent) => void;
 };
 
 type Labels = Readonly<Record<string, string>>;
@@ -226,6 +244,8 @@ export class TyrTelemetry {
   readonly auditEnabled: boolean;
 
   readonly #auditSink: (event: TyrAdmissionAuditEvent) => void;
+  readonly #diagnosticSink: (event: TyrUpstreamFailureEvent) => void;
+  readonly #upstreamFailures = new Map<string, CounterSeries>();
   readonly #admissionDecisions = new Map<string, CounterSeries>();
   readonly #rejections = new Map<string, CounterSeries>();
   readonly #requests = new Map<string, CounterSeries>();
@@ -242,6 +262,8 @@ export class TyrTelemetry {
     this.auditEnabled = options.auditEnabled ?? false;
     this.#auditSink =
       options.auditSink ?? ((event) => console.log(JSON.stringify(event)));
+    this.#diagnosticSink =
+      options.diagnosticSink ?? ((event) => console.warn(JSON.stringify(event)));
   }
 
   recordAdmissionStart(input: {
@@ -359,6 +381,32 @@ export class TyrTelemetry {
     readonly reason: LatchfloFailureReason;
   }): void {
     this.#increment(this.#latchfloFailures, input);
+  }
+
+  recordUpstreamFailure(input: {
+    readonly pool: string;
+    readonly provider: ApiShape;
+    readonly afterHeaders: boolean;
+    readonly failure: UpstreamFailure;
+  }): void {
+    this.#increment(this.#upstreamFailures, {
+      pool: input.pool,
+      provider: input.provider,
+      code: input.failure.code,
+    });
+    try {
+      this.#diagnosticSink({
+        schema: "tyr.diagnostic.v1",
+        timestamp: new Date().toISOString(),
+        event: "upstream_failure",
+        pool: input.pool,
+        provider: input.provider,
+        afterHeaders: input.afterHeaders,
+        ...input.failure,
+      });
+    } catch {
+      // A diagnostic write must never affect proxy behavior.
+    }
   }
 
   emitAdmissionAudit(
@@ -487,6 +535,9 @@ export class TyrTelemetry {
 
     addMetricHeader(lines, "tyr_latchflo_failures_total", "counter", "Latchflo integration failures by operation and bounded reason.");
     addCounterSeries(lines, "tyr_latchflo_failures_total", this.#latchfloFailures);
+
+    addMetricHeader(lines, "tyr_upstream_failures_total", "counter", "Upstream calls that failed without a usable response, by bounded transport error code.");
+    addCounterSeries(lines, "tyr_upstream_failures_total", this.#upstreamFailures);
 
     addMetricHeader(lines, "tyr_audit_write_failures_total", "counter", "Structured admission audit events that could not be written.");
     addSample(lines, "tyr_audit_write_failures_total", this.#auditWriteFailures);

@@ -6,9 +6,9 @@ Tyr projects the request into a token reservation, evaluates current concurrency
 and token pressure, and either
 enforces or observes the resulting admission decision.
 
-Tyr 0.30.0 is built on
-[`async-bulkhead-llm@3.17.0`](https://www.npmjs.com/package/async-bulkhead-llm).
-Release `async-bulkhead-llm@3.17.0` before tagging or publishing Tyr 0.30.0.
+Tyr 0.31.0 is built on
+[`async-bulkhead-llm@3.17.0`](https://www.npmjs.com/package/async-bulkhead-llm),
+unchanged from 0.30.0.
 The committed lockfile uses the matching vendored tarball so Tyr's release gate
 remains reproducible before or without registry access.
 The pool runtime uses complete versioned limit snapshots, immutable reservation
@@ -16,11 +16,26 @@ previews, native observe mode, per-model adaptive estimation, stable admission
 identities, streaming usage reconciliation, priority reserves, bounded
 identity-aware admission classes, and bounded drain results.
 
-> **Status:** v0.30.0, identity-aware distributed admission data plane,
+> **Status:** v0.31.0, identity-aware distributed admission data plane,
 > proprietary software. See [`LICENSE.txt`](LICENSE.txt). Tyr includes
 > first-class Latchflo managed mode with configuration-driven registration,
 > expiring grants, readiness, persisted agent credentials, demand reporting,
 > and fail-closed expiration behavior.
+
+## What changed in v0.31.0
+
+- A `502 upstream_error` now names the transport failure. Node's `fetch`
+  reports every connection failure as `fetch failed`. Tyr now walks the error's
+  cause chain and adds a bounded `cause: { name, code }` to the response body,
+  for example `ECONNREFUSED`, `ECONNRESET` or `UND_ERR_SOCKET`. The cause
+  message is not returned, because it can contain internal host addresses.
+- Every upstream failure, including a stream torn after headers were sent, is
+  counted in `tyr_upstream_failures_total{pool,provider,code}`. It also emits one
+  `tyr.diagnostic.v1` `upstream_failure` JSON line on stderr, with the code,
+  syscall and bounded detail. This line is independent of
+  `telemetry.audit.enabled`. Embedders can redirect it with
+  `telemetry.diagnosticSink`.
+- No admission, configuration, or Latchflo wire change.
 
 ## What changed in v0.30.0
 
@@ -708,7 +723,7 @@ admission, and a retry hint is an estimate rather than a reservation.
 | `422` | `unsupported_model` | No configured pool matches the requested model. |
 | `429` | `admission_rejected`, commonly `budget_limit` or `concurrency_limit` | Tyr is protecting bounded capacity; honor `x-admission-retry-after-ms` when present, otherwise retry with backoff or reduce demand. |
 | `500` | `internal` | Tyr encountered an unexpected internal failure; retry according to the caller's server-error policy. |
-| `502` | `upstream_error` or `routing_peer_unavailable` | The provider or selected Tyr peer failed before a valid response was returned. A routed request is not automatically replayed. |
+| `502` | `upstream_error` or `routing_peer_unavailable` | The provider or selected Tyr peer failed before a valid response was returned. `upstream_error` carries `cause.code` (for example `ECONNREFUSED` or `UND_ERR_SOCKET`) when the transport reported one. A routed request is not automatically replayed. |
 | `503` | `identity_unavailable` | Tyr cannot currently verify identity because the verifier or JWKS endpoint is unavailable; retry with backoff. |
 | `503` | `admission_rejected` with reason `shutdown` | This Tyr instance is draining and no longer accepts admissions; retry another instance or retry with backoff. |
 | `504` | `borrowed_admission_deadline` | Tyr returned a borrowed local slot and requested upstream cancellation. The body reports local release as enforced and upstream reclamation as unverified; retry only when the operation is safe to repeat. |
@@ -815,7 +830,7 @@ curl -i http://127.0.0.1:8787/v1/responses \
   }'
 ```
 
-Tyr 0.30.0 supports stateless synchronous and streaming Responses requests. To
+Tyr 0.31.0 supports stateless synchronous and streaming Responses requests. To
 keep pre-admission token reservations bounded from request-visible state, it
 rejects `previous_response_id`, server-side `conversation`, stored `prompt`
 templates, `item_reference`, `background: true`, and provider-managed
@@ -1091,7 +1106,7 @@ controlPlane:
   metadata:
     region: us-west
     zone: us-west-2a
-    version: 0.30.0
+    version: 0.31.0
     endpoint: http://tyr-a:8787
     labels:
       environment: demo
@@ -1121,7 +1136,7 @@ bounded by `requestTimeoutMs`.
 ### Demand-aware Latchflo heartbeats
 
 Tyr automatically derives one snapshot per managed pool from its existing
-statistics. Tyr 0.30.0 carries forward bounded per-class demand in that additive
+statistics. Tyr 0.31.0 carries forward bounded per-class demand in that additive
 heartbeat while preserving the original pool-level fields:
 
 ```json
@@ -1176,7 +1191,7 @@ identity values never become heartbeat keys. `protected*` and `borrowed*` fields
 report current use of the active floor and shared remainder. They are telemetry,
 not a request for Tyr to resize its own limits.
 
-Tyr 0.30.0 advertises `admissionClassDemand: true`,
+Tyr 0.31.0 advertises `admissionClassDemand: true`,
 `grantOccupancyAck: true`, `admissionClassOccupancyAck: true`, and the additive
 `borrowedAdmissionSlotDeadlines: true` capability at registration. Older control
 planes that ignore unknown capability and nested evidence fields remain
@@ -1209,7 +1224,7 @@ The acknowledgement's `occupancy` object is additive observability evidence;
 Latchflo 0.10.0 does not need to trust it to commit a transfer. The fresh
 post-ack heartbeat remains the authoritative proof used by that control plane.
 
-Tyr 0.30.0 applies the same ordering to restrictive class-only changes. When a
+Tyr 0.31.0 applies the same ordering to restrictive class-only changes. When a
 protected floor is restored, the newly protected capacity reduces the shared
 remainder. Tyr therefore keeps publishing bounded class evidence until the sum
 of `borrowedConcurrent` fits within the desired shared concurrency remainder and,
@@ -1331,7 +1346,7 @@ tyr validate --config ./deploy/tyr.yaml
 Build the included image:
 
 ```bash
-docker build -t tyr-admission-controller:0.30.0 .
+docker build -t tyr-admission-controller:0.31.0 .
 
 The source tree must include the committed `vendor/` directory. Run `npm run verify:vendor` before building or publishing a source archive.
 It is an offline check: it proves each tarball matches the lockfile. Because a tarball and its lockfile entry can be regenerated together from a local `npm pack`, CI also runs `npm run verify:vendor-provenance`, which compares each vendored tarball against the artifact npm published for that exact `name@version`. That online check is what stops a local pre-release build from shipping under a released version number; run it whenever you re-vendor a dependency.
@@ -1345,7 +1360,7 @@ docker run --rm \
   -p 127.0.0.1:8787:8787 \
   -e TYR_CONFIG_FILE=/etc/tyr/config.yaml \
   -v "$PWD/tyr.yaml:/etc/tyr/config.yaml:ro" \
-  tyr-admission-controller:0.30.0
+  tyr-admission-controller:0.31.0
 ```
 
 Or use the included Compose example:
@@ -1474,7 +1489,7 @@ pool name, configured admission-class ID, provider shape, priority, status
 class, outcome, and enumerated reason. Model strings, request IDs, admission
 IDs, grant IDs, and tenant-supplied identity values never become metric labels.
 
-Tyr 0.30.0 carries forward two admission-path histograms.
+Tyr 0.31.0 carries forward two admission-path histograms.
 `tyr_admission_decision_seconds` measures synchronous local decision work and
 **excludes** the awaited local concurrency acquire.
 `tyr_admission_queue_wait_seconds` measures that acquire wait separately. Both
@@ -1513,6 +1528,13 @@ and can include authenticated subject, tenant, application, roles, model,
 admission ID, reservation, exact grant provenance, final usage, and settlement. Audit-sink failures are isolated from proxy behavior and
 counted by `tyr_audit_write_failures_total`.
 
+Upstream failures are always reported, whether or not audit output is enabled.
+`tyr_upstream_failures_total{pool,provider,code}` counts them by bounded
+transport code. Each one also writes a `{"schema":"tyr.diagnostic.v1","event":"upstream_failure",...}`
+line to stderr with the code, syscall, whether headers had already been sent,
+and a bounded detail message. The detail can include internal addresses, so it
+is logged but never returned to the caller.
+
 ## Known limitations
 
 - Standalone budgets and statistics are per process. Configure Latchflo managed
@@ -1541,7 +1563,7 @@ counted by `tyr_audit_write_failures_total`.
 - Upstream response headers are not generally passed through; Tyr returns the
   upstream status and body with a normalized content type.
 - There is no Anthropic/OpenAI format translation.
-- Responses support is intentionally stateless in v0.30.0: hidden server-side
+- Responses support is intentionally stateless in v0.31.0: hidden server-side
   conversation/prompt references, background execution, and provider-managed
   retrieval/computer tools are rejected until Tyr can reserve their capacity
   without undercounting unseen state.

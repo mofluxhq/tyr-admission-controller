@@ -1,11 +1,11 @@
-# Tyr 0.30.0 verification
+# Tyr 0.31.0 verification
 
-Date: 2026-09-03
+Date: 2026-09-22
 
 ## Version alignment
 
-- Tyr package version: `0.30.0`
-- Runtime version constant: `0.30.0`
+- Tyr package version: `0.31.0`
+- Runtime version constant: `0.31.0`
 - Runtime dependency: `async-bulkhead-llm@3.17.0`
 - Transitive bulkhead dependency: `async-bulkhead-ts@1.0.1`
 - Vendored runtime artifacts:
@@ -16,11 +16,25 @@ Date: 2026-09-03
 
 ## Required release order
 
-`async-bulkhead-llm@3.17.0` must be published before Tyr 0.30.0 is tagged or
-released. Tyr's committed lockfile intentionally resolves the exact bundled
+`async-bulkhead-llm@3.17.0` was published for Tyr 0.30.0; 0.31.0 uses the same
+release. Tyr's committed lockfile intentionally resolves the exact bundled
 `vendor/async-bulkhead-llm-3.17.0.tgz`, so the Tyr build is reproducible while
 the dependency release is staged; the vendor artifact is not a substitute for
 publishing the declared public package version.
+
+## Upstream failure diagnostics (0.31.0)
+
+`test/upstream-failure.test.ts` checks the cause-chain helper on synthetic
+chains: it takes the deepest bounded code, rejects unbounded codes and names,
+and caps the detail at 300 characters. It also runs two real gateway cases:
+- an upstream port that refuses connections must return
+  `502 { cause: { name: "Error", code: "ECONNREFUSED" } }`;
+- an upstream that destroys the socket after reading the request must return
+  `UND_ERR_SOCKET` or `ECONNRESET`.
+
+In both cases the response body must not contain the upstream address, and
+exactly one `upstream_failure` diagnostic event must be emitted. The refused
+case also checks that `tyr_upstream_failures_total` carries the code label.
 
 ## Borrowed-resource restoration contract
 
@@ -103,7 +117,7 @@ still has no synchronous control-plane call.
 
 ## Carried-forward compatibility
 
-Tyr 0.30.0 retains the native Anthropic Messages, OpenAI Chat Completions, and
+Tyr 0.31.0 retains the native Anthropic Messages, OpenAI Chat Completions, and
 stateless OpenAI Responses routes from 0.29.0. Existing identity, routing,
 managed-mode, provenance, timing, retry-hint, and progressive-reconciliation
 paths remain intact. Classes without `borrowedAdmissionSlot` keep the existing

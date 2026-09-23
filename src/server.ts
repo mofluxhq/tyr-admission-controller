@@ -45,6 +45,7 @@ import {
   type TyrRequestOutcome,
   type TyrTelemetryOptions,
 } from "./telemetry.js";
+import { describeUpstreamFailure } from "./upstream-failure.js";
 import {
   CapacityAwareRouter,
   TYR_ROUTING_CAPACITY_PATH,
@@ -1248,6 +1249,16 @@ export function createGateway(opts: GatewayOptions) {
           failureKind ?? "upstream_error";
         recordRequest(settlement);
         emitAdmissionAudit(settlement, observedUsage);
+        const upstreamFailure =
+          settlement === "upstream_error" ? describeUpstreamFailure(err) : undefined;
+        if (upstreamFailure !== undefined) {
+          telemetry.recordUpstreamFailure({
+            pool: pool.name,
+            provider: adapter.shape,
+            afterHeaders: res.headersSent,
+            failure: upstreamFailure,
+          });
+        }
 
         if (res.headersSent) {
           // A stream already started; no safe response body remains.
@@ -1280,6 +1291,16 @@ export function createGateway(opts: GatewayOptions) {
           error: {
             type: "upstream_error",
             message: err instanceof Error ? err.message : String(err),
+            // Bounded name and code only; the detail can name internal
+            // addresses and is written to the operator diagnostic instead.
+            ...(upstreamFailure === undefined
+              ? {}
+              : {
+                  cause: {
+                    name: upstreamFailure.causeName ?? upstreamFailure.name,
+                    code: upstreamFailure.code,
+                  },
+                }),
           },
         });
       }
